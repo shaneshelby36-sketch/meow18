@@ -2,6 +2,9 @@
 
 const fs = require('fs');
 const path = require('path');
+const { dataPath, ensureDataDir } = require('./paths');
+
+ensureDataDir();
 
 const MAX_HISTORY = 40;
 const CHECKPOINTS = [
@@ -11,10 +14,10 @@ const CHECKPOINTS = [
 ];
 
 const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
-const PERIOD_STATE_PATH = path.join(__dirname, 'data', 'tracker-period-start.json');
-const ARCHIVE_DIR = path.join(__dirname, 'data', 'archive');
-const CALIBRATION_PATH = path.join(__dirname, 'data', 'calibration.json');
-const HISTORY_PATH = path.join(__dirname, 'data', 'tracker-history.json');
+const PERIOD_STATE_PATH = dataPath('tracker-period-start.json');
+const ARCHIVE_DIR = dataPath('archive');
+const CALIBRATION_PATH = dataPath('calibration.json');
+const HISTORY_PATH = dataPath('tracker-history.json');
 
 function bucketLabel(probabilityOfCalledDirection) {
   if (probabilityOfCalledDirection >= 90) return '90-100%';

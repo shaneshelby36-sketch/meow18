@@ -704,8 +704,26 @@ function closeBotOverlay() {
 async function refreshBotStatus() {
   const { engineUrl } = loadSettings();
   const modeLine = document.getElementById('bot-mode-line');
+  const persistLine = document.getElementById('bot-persist-line');
   const body = document.getElementById('bot-status-body');
   try {
+    const healthRes = await fetch(`${engineUrl}/api/health`, { cache: 'no-store' });
+    if (healthRes.ok && persistLine) {
+      const health = await healthRes.json();
+      if (!health.dataDirFromEnv) {
+        persistLine.hidden = false;
+        persistLine.style.color = 'var(--wait)';
+        persistLine.textContent =
+          'Warning: no persistent DATA_DIR is set. On Render, settings/ledger reset on every restart until you attach a Persistent Disk and set DATA_DIR=/var/data.';
+      } else {
+        persistLine.hidden = false;
+        persistLine.style.color = 'var(--up)';
+        persistLine.textContent = health.configFileExists
+          ? `Settings are persisting on disk (${health.dataDir}).`
+          : `Persistent disk ready (${health.dataDir}) — save settings once to create the config file.`;
+      }
+    }
+
     const res = await fetch(`${engineUrl}/api/bot/status`, { cache: 'no-store' });
     const data = await res.json();
     if (!data.enabled) {
@@ -858,6 +876,7 @@ const SLIDER_UNITS = {
   'bot-edge': (v) => `${(+v).toFixed(1)}%`,
   'bot-confidence': (v) => `${Math.round(v)}%`,
   'bot-stoploss': (v) => `${Math.round(v)}¢`,
+  'bot-takeprofit': (v) => `${Math.round(v)}¢`,
   'bot-stake': (v) => `$${Math.round(v)}`,
   'bot-maxpos': (v) => `${Math.round(v)}`,
   'bot-guardrail': (v) => `$${Math.round(v)}`,
@@ -881,7 +900,7 @@ function updateSkimSliderDisplay() {
 }
 
 function wireSliderDisplays() {
-  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-stake', 'bot-maxpos', 'bot-guardrail', 'bot-paper-balance'].forEach((id) => {
+  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-stake', 'bot-maxpos', 'bot-guardrail', 'bot-paper-balance'].forEach((id) => {
     const input = document.getElementById(id);
     if (input) input.addEventListener('input', () => updateSliderDisplay(id));
   });
@@ -906,13 +925,14 @@ async function loadBotConfigIntoForm() {
     document.getElementById('bot-edge').value = c.edgeThresholdPct;
     document.getElementById('bot-confidence').value = c.minConfidence;
     document.getElementById('bot-stoploss').value = c.stopLossCents;
+    document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 70;
     document.getElementById('bot-stake').value = c.stakeDollars;
     document.getElementById('bot-maxpos').value = c.maxOpenPositions;
     document.getElementById('bot-guardrail').value = c.guardrailDollars;
     document.getElementById('bot-paper-balance').value = c.paperStartingBalanceDollars;
     document.getElementById('bot-skim-mode').value = c.skimMode;
     document.getElementById('bot-skim-amount').value = c.skimMode === 'percent' ? c.skimPercent : c.skimFixedDollars;
-    ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-stake', 'bot-maxpos', 'bot-guardrail', 'bot-paper-balance'].forEach(updateSliderDisplay);
+    ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-stake', 'bot-maxpos', 'bot-guardrail', 'bot-paper-balance'].forEach(updateSliderDisplay);
     updateSkimSliderDisplay();
   } catch {
     // Bot likely disabled or engine unreachable — form just stays blank.
@@ -929,6 +949,7 @@ async function saveBotConfig() {
     edgeThresholdPct: parseFloat(document.getElementById('bot-edge').value),
     minConfidence: parseFloat(document.getElementById('bot-confidence').value),
     stopLossCents: parseFloat(document.getElementById('bot-stoploss').value),
+    takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
     guardrailDollars: parseFloat(document.getElementById('bot-guardrail').value),
@@ -984,6 +1005,7 @@ function readBacktestSettingsFromForm() {
     edgeThresholdPct: parseFloat(document.getElementById('bot-edge').value),
     minConfidence: parseFloat(document.getElementById('bot-confidence').value),
     stopLossCents: parseFloat(document.getElementById('bot-stoploss').value),
+    takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
     guardrailDollars: parseFloat(document.getElementById('bot-guardrail').value),
@@ -1002,7 +1024,8 @@ function applyHuntedSettingsToForm(settings) {
   if (settings.edgeThresholdPct != null) document.getElementById('bot-edge').value = settings.edgeThresholdPct;
   if (settings.minConfidence != null) document.getElementById('bot-confidence').value = settings.minConfidence;
   if (settings.stopLossCents != null) document.getElementById('bot-stoploss').value = settings.stopLossCents;
-  ['bot-edge', 'bot-confidence', 'bot-stoploss'].forEach(updateSliderDisplay);
+  if (settings.takeProfitCents != null) document.getElementById('bot-takeprofit').value = settings.takeProfitCents;
+  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit'].forEach(updateSliderDisplay);
 }
 
 function renderBacktestResults(data, dayLabel) {
@@ -1017,7 +1040,7 @@ function renderBacktestResults(data, dayLabel) {
   const pnlClass = (t.netPnlCents || 0) > 0 ? 'chip-positive' : (t.netPnlCents || 0) < 0 ? 'chip-negative' : '';
   const modeLabel = data.mode === 'AUTO' || t.mode === 'AUTO' ? 'AUTO' : data.symbol;
   const scanned = (data.symbolsScanned || t.symbolsScanned || [data.symbol]).join(', ');
-  const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Stop ${s.stopLossCents}¢ · Max pos ${s.maxOpenPositions} · Guardrail $${s.guardrailDollars} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
+  const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Stop ${s.stopLossCents}¢ · TP ${s.takeProfitCents != null ? s.takeProfitCents + '¢' : '—'} · Max pos ${s.maxOpenPositions} · Guardrail $${s.guardrailDollars} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
   const bySymbol = t.tradesBySymbol
     ? Object.entries(t.tradesBySymbol)
         .sort((a, b) => b[1] - a[1])
@@ -1056,6 +1079,8 @@ function renderBacktestResults(data, dayLabel) {
       <div class="capital-row"><span>Avg confidence (taken)</span><span>${t.avgConfidenceTaken != null ? t.avgConfidenceTaken + '%' : '—'}</span></div>
       <div class="capital-row"><span>Avg confidence (scanned)</span><span>${t.avgConfidenceScanned != null ? t.avgConfidenceScanned + '%' : '—'}</span></div>
       <div class="capital-row"><span>Stop-loss exits</span><span>${t.stopLossExits ?? 0}</span></div>
+      <div class="capital-row"><span>Take-profit exits</span><span>${t.takeProfitExits ?? 0}</span></div>
+      <div class="capital-row"><span>Breakeven exits</span><span>${t.breakevenExits ?? 0}</span></div>
       <div class="capital-divider"></div>
       <div class="capital-row"><span>Starting Bankroll</span><span>${formatMoneyFromCents(t.startingBankrollCents)}</span></div>
       <div class="capital-row"><span>Available Cash</span><span>${formatMoneyFromCents(t.availableCashCents)}</span></div>

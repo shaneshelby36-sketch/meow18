@@ -33,6 +33,7 @@ function normalizeSettings(raw = {}) {
     edgeThresholdPct: Number.isFinite(Number(raw.edgeThresholdPct)) ? Number(raw.edgeThresholdPct) : 8,
     minConfidence: Number.isFinite(Number(raw.minConfidence)) ? Number(raw.minConfidence) : 55,
     stopLossCents: Number.isFinite(Number(raw.stopLossCents)) ? Number(raw.stopLossCents) : 35,
+    takeProfitCents: Number.isFinite(Number(raw.takeProfitCents)) ? Number(raw.takeProfitCents) : 70,
     stakeDollars: Number.isFinite(Number(raw.stakeDollars)) ? Number(raw.stakeDollars) : 10,
     stakingStrategy: raw.stakingStrategy === 'halve-after-win' ? 'halve-after-win' : 'fixed',
     maxOpenPositions: Math.max(1, Math.round(Number(raw.maxOpenPositions) || 1)),
@@ -290,6 +291,14 @@ function backtestWithSettings(
       if (mark <= settings.stopLossCents) {
         exitPrice = settings.stopLossCents;
         reason = 'stop_loss';
+      } else if (
+        settings.takeProfitCents > 0 &&
+        mark >= settings.takeProfitCents
+      ) {
+        // Simplified backtest TP (no live confidence override path here —
+        // continuous search already filters entries by confidence).
+        exitPrice = settings.takeProfitCents;
+        reason = 'take_profit';
       } else if (minute >= trade.closeTime || minute >= trade.settleMinute) {
         const settleCandle = spotAt(tradeIndex, trade.settleMinute) || candle;
         const settledUp = settleCandle.close >= trade.entrySpot;
@@ -514,6 +523,8 @@ function backtestWithSettings(
   const totalEquity = available + openPos + reserveCents;
   const netPnl = totalEquity - startingCents;
   const stopLossExits = closedTrades.filter((t) => t.exitReason === 'stop_loss').length;
+  const takeProfitExits = closedTrades.filter((t) => t.exitReason === 'take_profit').length;
+  const breakevenExits = closedTrades.filter((t) => t.exitReason === 'breakeven').length;
   const avgConfidenceTaken = closedTrades.length
     ? +(closedTrades.reduce((s, t) => s + t.engineConfidence, 0) / closedTrades.length).toFixed(1)
     : null;
@@ -531,6 +542,8 @@ function backtestWithSettings(
     losses,
     winRatePct: closedTrades.length ? +((wins / closedTrades.length) * 100).toFixed(1) : null,
     stopLossExits,
+    takeProfitExits,
+    breakevenExits,
     avgConfidenceTaken,
     avgConfidenceScanned,
     startingBankrollCents: startingCents,
@@ -608,6 +621,7 @@ function huntBestSettings(candlesBySymbol, baseSettings = {}, runOptions = {}) {
             edgeThresholdPct,
             minConfidence,
             stopLossCents,
+            takeProfitCents: base.takeProfitCents,
             stakeDollars: base.stakeDollars,
             maxOpenPositions: base.maxOpenPositions,
             guardrailDollars: base.guardrailDollars,

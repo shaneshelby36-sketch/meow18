@@ -216,6 +216,7 @@
     <div class="settings-card bot-card">
       <h2>Trading Bot</h2>
       <p class="settings-hint" id="bot-mode-line">Checking status…</p>
+      <p class="settings-hint" id="bot-persist-line" hidden></p>
 
       <div class="bot-section">
         <h3>Trading mode</h3>
@@ -275,6 +276,15 @@
               <input id="bot-stoploss" type="range" min="1" max="99" step="1" />
               <span class="slider-value" id="bot-stoploss-value">—</span>
             </div>
+            <span class="field-hint">Exit early if the held side's bid falls to this many cents.</span>
+          </label>
+
+          <label>Take-profit
+            <div class="slider-row">
+              <input id="bot-takeprofit" type="range" min="51" max="99" step="1" />
+              <span class="slider-value" id="bot-takeprofit-value">—</span>
+            </div>
+            <span class="field-hint">Exit when the held side's bid reaches this. In the last 5 minutes: if 0-5 confidence is still high in your favor, hold for settlement instead; if not, exit at breakeven-or-better when available.</span>
           </label>
 
           <label>Stake per trade

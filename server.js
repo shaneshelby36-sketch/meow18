@@ -15,6 +15,9 @@ const { SignalAccumulatorManager } = require('./signalAccumulator');
 const { KalshiClient } = require('./kalshiClient');
 const { TradingBot, SERIES_BY_SYMBOL } = require('./bot');
 const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
+const { DATA_DIR, dataPath, ensureDataDir } = require('./paths');
+
+ensureDataDir();
 
 const tracker = new PredictionTracker();
 
@@ -42,11 +45,11 @@ const kalshiClient = new KalshiClient({
 });
 
 // Lets Kalshi API credentials be entered from the dashboard instead of only
-// via env vars/a key file on disk. Stored in plaintext in the data/ folder
+// via env vars/a key file on disk. Stored in plaintext in DATA_DIR
 // alongside the trading ledger — reasonable for a personal, single-user
 // deployment, but worth knowing: anyone with server disk access could read
 // it. Never sent back to the client once saved — only whether it's set.
-const CREDENTIALS_PATH = path.join(__dirname, 'data', 'kalshi-credentials.json');
+const CREDENTIALS_PATH = dataPath('kalshi-credentials.json');
 
 function loadSavedCredentials() {
   try {
@@ -82,6 +85,7 @@ const bot = KALSHI_ENABLED
         edgeThresholdPct: parseFloat(process.env.KALSHI_EDGE_THRESHOLD_PCT || '8'),
         minConfidence: parseFloat(process.env.KALSHI_MIN_CONFIDENCE || '55'),
         stopLossCents: parseInt(process.env.KALSHI_STOP_LOSS_CENTS || '35', 10),
+        takeProfitCents: parseInt(process.env.KALSHI_TAKE_PROFIT_CENTS || '70', 10),
         stakeDollars: parseFloat(process.env.KALSHI_STAKE_DOLLARS || '10'),
         maxOpenPositions: parseInt(process.env.KALSHI_MAX_OPEN_POSITIONS || '1', 10),
         skimMode: process.env.KALSHI_SKIM_MODE || 'fixed',
@@ -327,6 +331,7 @@ app.get("/", (req, res) => {
   });
 
   app.get('/api/health', (req, res) => {
+    const configPath = dataPath('bot-config.json');
     res.json({
       ok: true,
       lastComputeError,
@@ -338,6 +343,10 @@ app.get("/", (req, res) => {
       // Predictions + bot cycles run inside this Node process on a timer.
       // Closing the browser/dashboard does not pause them.
       dashboardIndependent: true,
+      dataDir: DATA_DIR,
+      // Without DATA_DIR on Render, restarts wipe settings/ledger.
+      dataDirFromEnv: Boolean(process.env.DATA_DIR),
+      configFileExists: fs.existsSync(configPath),
       uptimeMs: Date.now() - SERVER_START_TIME,
       time: new Date().toISOString(),
     });
@@ -455,6 +464,7 @@ app.get("/", (req, res) => {
       edgeThresholdPct: source.edgeThresholdPct ?? live.edgeThresholdPct,
       minConfidence: source.minConfidence ?? live.minConfidence,
       stopLossCents: source.stopLossCents ?? live.stopLossCents,
+      takeProfitCents: source.takeProfitCents ?? live.takeProfitCents,
       stakeDollars: source.stakeDollars ?? live.stakeDollars,
       stakingStrategy: source.stakingStrategy ?? live.stakingStrategy,
       maxOpenPositions: source.maxOpenPositions ?? live.maxOpenPositions,
@@ -585,6 +595,7 @@ app.get("/", (req, res) => {
   app.listen(PORT, () => {
     console.log(`[startup] prediction engine API listening on http://0.0.0.0:${PORT}`);
     console.log(`[startup] compute loop every ${COMPUTE_INTERVAL_MS / 1000}s — continues whether or not any dashboard is open`);
+    console.log(`[startup] data dir: ${DATA_DIR}${process.env.DATA_DIR ? '' : ' (ephemeral — set DATA_DIR to a persistent disk on Render or settings reset on restart)'}`);
     if (bot) {
       console.log(`[startup] trading bot is ${bot.isRunning ? 'RUNNING' : 'STOPPED'} on the server (dashboard is optional)`);
     }

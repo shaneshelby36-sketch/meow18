@@ -3,13 +3,16 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { dataPath, ensureDataDir } = require('./paths');
 
-const LEDGER_PATH = path.join(__dirname, 'data', 'bot-ledger.json');
-const CONFIG_PATH = path.join(__dirname, 'data', 'bot-config.json');
-const CALIBRATION_PATH = path.join(__dirname, 'data', 'calibration.json');
-const MODE_STATE_PATH = path.join(__dirname, 'data', 'bot-mode-state.json');
-const RUN_STATE_PATH = path.join(__dirname, 'data', 'bot-run-state.json');
-const ARCHIVE_DIR = path.join(__dirname, 'data', 'archive');
+ensureDataDir();
+
+const LEDGER_PATH = dataPath('bot-ledger.json');
+const CONFIG_PATH = dataPath('bot-config.json');
+const CALIBRATION_PATH = dataPath('calibration.json');
+const MODE_STATE_PATH = dataPath('bot-mode-state.json');
+const RUN_STATE_PATH = dataPath('bot-run-state.json');
+const ARCHIVE_DIR = dataPath('archive');
 const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
@@ -67,6 +70,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'edgeThresholdPct',
   'minConfidence',
   'stopLossCents',
+  'takeProfitCents',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -189,6 +193,7 @@ class TradingBot {
       edgeThresholdPct: 8, // minimum probability-point edge vs Kalshi to bother trading
       minConfidence: 55, // engine confidence (0-100) required to act
       stopLossCents: 35, // exit if our held side's price falls to this many cents
+      takeProfitCents: 70, // exit if our held side's bid rises to this many cents (see final-5 override)
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 1,
@@ -608,6 +613,15 @@ class TradingBot {
         ((trade.side === 'yes' && shortWindow.probabilityDown > shortWindow.probabilityUp) ||
           (trade.side === 'no' && shortWindow.probabilityUp > shortWindow.probabilityDown));
 
+      // Final-5 confidence in OUR direction: if the 0-5 window still trusts
+      // the held side strongly, ride settlement instead of clipping a take-profit.
+      const heldFavoredByShortWindow =
+        shortWindow &&
+        shortWindow.confidence >= this.config.minConfidence &&
+        ((trade.side === 'yes' && shortWindow.probabilityUp >= shortWindow.probabilityDown) ||
+          (trade.side === 'no' && shortWindow.probabilityDown >= shortWindow.probabilityUp));
+      const holdThroughForConfidence = inFinalFiveMinutes && heldFavoredByShortWindow;
+
       // Stronger early-warning exit: if BOTH of the next two windows (5-10
       // and 10-15 min out) strongly agree the price is heading the opposite
       // way from our held position — not just a marginal >50% flip, but a
@@ -625,12 +639,30 @@ class TradingBot {
       const w15AgainstUs = w15 && (heldIsYes ? w15.probabilityDown : w15.probabilityUp) >= REVERSAL_THRESHOLD_PCT;
       const strongReversalSignal = w10AgainstUs && w15AgainstUs;
 
+      const takeProfitHit =
+        heldSideBidCents != null &&
+        Number.isFinite(this.config.takeProfitCents) &&
+        this.config.takeProfitCents > 0 &&
+        heldSideBidCents >= this.config.takeProfitCents;
+
+      // Breakeven in the last 5 minutes when confidence is NOT high in our
+      // favor: lock even-or-better instead of gambling settlement.
+      const canExitEven =
+        inFinalFiveMinutes &&
+        !holdThroughForConfidence &&
+        heldSideBidCents != null &&
+        heldSideBidCents >= trade.entryPriceCents;
+
       if (heldSideBidCents != null && heldSideBidCents <= this.config.stopLossCents) {
         await this._closePosition(trade, heldSideBidCents, 'stop_loss');
       } else if (strongReversalSignal && heldSideBidCents != null) {
         await this._closePosition(trade, heldSideBidCents, 'reversal_signal');
       } else if (signalFlipped && heldSideBidCents != null) {
         await this._closePosition(trade, heldSideBidCents, 'signal_flip');
+      } else if (takeProfitHit && !holdThroughForConfidence) {
+        await this._closePosition(trade, heldSideBidCents, 'take_profit');
+      } else if (canExitEven) {
+        await this._closePosition(trade, heldSideBidCents, 'breakeven');
       } else if (now >= closeTime) {
         const settleCents = market.result === trade.side ? 100 : 0;
         await this._closePosition(
