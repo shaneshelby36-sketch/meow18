@@ -497,5 +497,6 @@ module.exports = {
   // against historical candles rather than re-implementing it separately.
   gatherIndicators,
   directionalScore,
+  buildWindowPrediction,
   logistic,
 };

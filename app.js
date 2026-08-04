@@ -250,6 +250,7 @@ function ensurePanels(symbols) {
 
     const panel = panelTpl.content.firstElementChild.cloneNode(true);
     panel.dataset.symbol = symbol;
+    panel.hidden = true; // hub only reveals the two featured cryptos
     panel.querySelector('.asset-symbol').textContent = symbol;
     panel.querySelector('.asset-name').textContent = ASSET_LABELS[symbol] || symbol;
 
@@ -346,13 +347,15 @@ function renderAssetTabs(symbols, data) {
     const rec = asset && asset.ready && asset.overall ? asset.overall.recommendation : 'Seeding';
     tab.textContent = `${index === 0 ? 'Best: ' : index === 1 ? '2nd: ' : ''}${symbol} · ${rec}`;
     tab.addEventListener('click', () => {
+      // Second slot only — best stays pinned; never show more than 2 crypto panels.
       activeAssetSymbol = symbol === topSymbol ? null : symbol;
       renderAssetTabs(symbols, data);
     });
     picker.appendChild(tab);
+  });
 
-    const panel = grid.querySelector(`.asset-panel[data-symbol="${symbol}"]`);
-    if (panel) panel.hidden = !featured.includes(symbol);
+  grid.querySelectorAll('.asset-panel[data-symbol]').forEach((panel) => {
+    panel.hidden = !featured.includes(panel.dataset.symbol);
   });
   featured.forEach((symbol) => {
     const panel = grid.querySelector(`.asset-panel[data-symbol="${symbol}"]`);
@@ -970,6 +973,85 @@ async function resetPaperHistory() {
   }
 }
 
+function readBacktestSettingsFromForm() {
+  const skimMode = document.getElementById('bot-skim-mode').value;
+  const skimAmount = parseFloat(document.getElementById('bot-skim-amount').value);
+  return {
+    edgeThresholdPct: parseFloat(document.getElementById('bot-edge').value),
+    minConfidence: parseFloat(document.getElementById('bot-confidence').value),
+    stopLossCents: parseFloat(document.getElementById('bot-stoploss').value),
+    stakeDollars: parseFloat(document.getElementById('bot-stake').value),
+    maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
+    guardrailDollars: parseFloat(document.getElementById('bot-guardrail').value),
+    paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),
+    skimMode,
+    ...(skimMode === 'percent' ? { skimPercent: skimAmount } : { skimFixedDollars: skimAmount }),
+  };
+}
+
+function formatMoneyFromCents(cents, { signed = false } = {}) {
+  return formatMoneyCents(cents, { signed });
+}
+
+function renderBacktestResults(data, dayLabel) {
+  const t = data.trading || {};
+  const s = data.settingsUsed || {};
+  const skimLabel =
+    s.skimMode === 'off'
+      ? 'off'
+      : s.skimMode === 'percent'
+        ? `${s.skimPercent}% of profit`
+        : `$${Number(s.skimFixedDollars || 0).toFixed(0)} per win`;
+  const pnlClass = (t.netPnlCents || 0) > 0 ? 'chip-positive' : (t.netPnlCents || 0) < 0 ? 'chip-negative' : '';
+  const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Stop ${s.stopLossCents}¢ · Max pos ${s.maxOpenPositions} · Guardrail $${s.guardrailDollars} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
+
+  const tradingBlock = `
+    <div class="capital-ledger backtest-ledger">
+      <div class="capital-ledger-title">Settings-based trading sim (${data.symbol} · ${dayLabel})</div>
+      <p class="backtest-settings-line">${settingsLine}</p>
+      <div class="capital-row"><span>Trades taken</span><span>${t.trades ?? 0}</span></div>
+      <div class="capital-row"><span>Wins / Losses</span><span>${t.wins ?? 0} / ${t.losses ?? 0}</span></div>
+      <div class="capital-row"><span>Win rate</span><span>${t.winRatePct != null ? t.winRatePct + '%' : '—'}</span></div>
+      <div class="capital-row"><span>Stop-loss exits</span><span>${t.stopLossExits ?? 0}</span></div>
+      <div class="capital-divider"></div>
+      <div class="capital-row"><span>Starting Bankroll</span><span>${formatMoneyFromCents(t.startingBankrollCents)}</span></div>
+      <div class="capital-row"><span>Available Cash</span><span>${formatMoneyFromCents(t.availableCashCents)}</span></div>
+      <div class="capital-row"><span>Open Positions Value</span><span>${formatMoneyFromCents(t.openPositionsValueCents)}</span></div>
+      <div class="capital-row"><span>Reserved Profit</span><span>${formatMoneyFromCents(t.reservedProfitCents)}</span></div>
+      <div class="capital-divider"></div>
+      <div class="capital-row capital-total"><span>Total Equity</span><span>${formatMoneyFromCents(t.totalEquityCents)}</span></div>
+      <div class="capital-row capital-pnl"><span>Net P&amp;L</span><span class="${pnlClass}">${formatMoneyFromCents(t.netPnlCents, { signed: true })}</span></div>
+    </div>`;
+
+  const skips = t.skipCounts || {};
+  const skipBlock = `
+    <div class="backtest-skips">
+      <span>Skipped setups — low confidence: ${skips.lowConfidence || 0}, low edge: ${skips.lowEdge || 0}, guardrail: ${skips.guardrail || 0}, cash: ${skips.insufficientCash || 0}</span>
+    </div>`;
+
+  const recent = (t.recentTrades || [])
+    .map(
+      (tr) =>
+        `<div class="backtest-row"><span>${tr.side.toUpperCase()} · ${tr.window} · conf ${tr.confidence}% · edge ${tr.edge}</span><span class="${tr.pnlDollars >= 0 ? 'chip-positive' : 'chip-negative'}">${tr.pnlDollars >= 0 ? '+' : ''}$${Math.abs(tr.pnlDollars).toFixed(2)} · ${tr.exitReason}</span></div>`
+    )
+    .join('');
+
+  const windowRows = Object.values(data.windows || {})
+    .map(
+      (w) =>
+        `<div class="backtest-row"><span>Engine ${w.window}</span><span>${w.accuracyPct != null ? w.accuracyPct + '%' : '—'} accurate (${w.correctCount}/${w.sampleSize})</span></div>`
+    )
+    .join('');
+
+  return `
+    ${tradingBlock}
+    ${skipBlock}
+    ${recent ? `<div class="backtest-recent-title">Recent simulated trades</div>${recent}` : ''}
+    <div class="backtest-recent-title">Engine directional accuracy (all minutes, not filtered by settings)</div>
+    ${windowRows}
+    <p class="backtest-note">${data.candleCount} candles over ${dayLabel} (${data.hoursRequested}h). ${data.note || t.note || ''}</p>`;
+}
+
 async function runBacktest(hoursOverride) {
   const { engineUrl } = loadSettings();
   const symbol = document.getElementById('backtest-symbol').value;
@@ -982,21 +1064,24 @@ async function runBacktest(hoursOverride) {
   const resultsEl = document.getElementById('backtest-results');
   const days = Number(hours) / 24;
   const dayLabel = days === 1 ? '1 day' : `${days} days`;
-  resultsEl.innerHTML = `<p class="settings-hint">Running ${dayLabel} backtest — fetching history and replaying every minute…</p>`;
+  resultsEl.innerHTML = `<p class="settings-hint">Running ${dayLabel} backtest with your current settings…</p>`;
   try {
-    const res = await fetch(`${engineUrl}/api/backtest?symbol=${symbol}&hours=${hours}`, { cache: 'no-store' });
+    const res = await fetch(`${engineUrl}/api/backtest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({
+        symbol,
+        hours: Number(hours),
+        ...readBacktestSettingsFromForm(),
+      }),
+    });
     const data = await res.json();
     if (!res.ok) {
       resultsEl.innerHTML = `<p class="settings-hint">Error: ${data.error || 'unknown error'}</p>`;
       return;
     }
-    const rows = Object.values(data.windows)
-      .map(
-        (w) =>
-          `<div class="backtest-row"><span>${w.window}</span><span>${w.accuracyPct != null ? w.accuracyPct + '%' : '—'} (${w.correctCount}/${w.sampleSize}) · illustrative edge: ${w.illustrativeReturnPct != null ? (w.illustrativeReturnPct >= 0 ? '+' : '') + w.illustrativeReturnPct + '%' : '—'}</span></div>`
-      )
-      .join('');
-    resultsEl.innerHTML = `${rows}<p class="backtest-note">${data.candleCount} candles over ${dayLabel} (${data.hoursRequested}h). ${data.note}</p>`;
+    resultsEl.innerHTML = renderBacktestResults(data, dayLabel);
   } catch (err) {
     resultsEl.innerHTML = `<p class="settings-hint">Failed to run backtest: ${err.message}</p>`;
   }

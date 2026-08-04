@@ -198,6 +198,12 @@ body[data-view-mode="bot"] .asset-picker {
   overflow: hidden;
 }
 
+/* Author display:flex above beats the UA [hidden] rule — force hide. */
+.asset-panel[hidden],
+#bot-dashboard-card[hidden] {
+  display: none !important;
+}
+
 .asset-head {
   display: flex;
   justify-content: space-between;
@@ -300,10 +306,10 @@ body[data-view-mode="bot"] .asset-picker {
   position: relative;
 }
 .windows-row .window-card {
-  display: none;
+  display: none !important;
 }
 .windows-row .window-card.tab-visible {
-  display: flex;
+  display: flex !important;
   height: 100%;
 }
 
@@ -800,6 +806,30 @@ body[data-view-mode="bot"] .asset-picker {
   background: color-mix(in srgb, var(--accent) 18%, var(--panel-raised));
   color: var(--text);
 }
+
+.backtest-ledger { margin-bottom: 10px; }
+.backtest-settings-line {
+  margin: 0 0 10px;
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.backtest-skips {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin: 0 0 10px;
+}
+.backtest-recent-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin: 12px 0 6px;
+}
+.backtest-row .chip-positive { color: var(--up); }
+.backtest-row .chip-negative { color: var(--down); }
 
 #backtest-results { display: flex; flex-direction: column; gap: 8px; }
 .backtest-row {

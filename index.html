@@ -348,7 +348,7 @@
 
       <div class="bot-section">
         <h3>Backtest</h3>
-        <p class="settings-hint">Replays the engine's own indicator logic against historical price data (order-book signals excluded — no historical order-book data exists). Shows directional accuracy plus an illustrative edge-over-a-coin-flip figure — not a real profit projection, since it assumes even-money odds rather than Kalshi's actual historical prices.</p>
+        <p class="settings-hint">Uses the settings above (edge, confidence, stake, stop-loss, skim, bankroll, guardrail) against historical Coinbase prices. Kalshi fills are assumed even-money (50¢) because historical Kalshi quotes aren't available — treat P&amp;L as illustrative.</p>
         <div class="backtest-controls">
           <label>Asset
             <select id="backtest-symbol">

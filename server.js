@@ -14,7 +14,7 @@ const { PredictionTracker } = require('./tracker');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
 const { KalshiClient } = require('./kalshiClient');
 const { TradingBot, SERIES_BY_SYMBOL } = require('./bot');
-const { backtestSymbol } = require('./backtest');
+const { backtestSymbol, backtestWithSettings } = require('./backtest');
 
 const tracker = new PredictionTracker();
 
@@ -445,33 +445,62 @@ app.get("/", (req, res) => {
   const SYMBOL_TO_PRODUCT = { BTC: 'BTC-USD', XRP: 'XRP-USD', ETH: 'ETH-USD', SOL: 'SOL-USD', DOGE: 'DOGE-USD', BNB: 'BNB-USD', ZEC: 'ZEC-USD' };
   const MAX_BACKTEST_HOURS = 72;
 
-  app.get('/api/backtest', async (req, res) => {
-    const symbol = (req.query.symbol || 'BTC').toUpperCase();
-    let hours = parseFloat(req.query.hours || '24');
+  function parseBacktestSettings(source = {}) {
+    // Prefer explicit request settings; fall back to the live bot config so a
+    // backtest always reflects whatever the dashboard is actually using.
+    const live = bot ? bot.config : {};
+    return {
+      edgeThresholdPct: source.edgeThresholdPct ?? live.edgeThresholdPct,
+      minConfidence: source.minConfidence ?? live.minConfidence,
+      stopLossCents: source.stopLossCents ?? live.stopLossCents,
+      stakeDollars: source.stakeDollars ?? live.stakeDollars,
+      stakingStrategy: source.stakingStrategy ?? live.stakingStrategy,
+      maxOpenPositions: source.maxOpenPositions ?? live.maxOpenPositions,
+      skimMode: source.skimMode ?? live.skimMode,
+      skimPercent: source.skimPercent ?? live.skimPercent,
+      skimFixedDollars: source.skimFixedDollars ?? live.skimFixedDollars,
+      guardrailDollars: source.guardrailDollars ?? live.guardrailDollars,
+      paperStartingBalanceDollars: source.paperStartingBalanceDollars ?? live.paperStartingBalanceDollars,
+      assumedEntryCents: source.assumedEntryCents ?? 50,
+    };
+  }
+
+  async function runBacktestHandler(req, res) {
+    const source = { ...(req.query || {}), ...((req.body && typeof req.body === 'object') ? req.body : {}) };
+    const symbol = String(source.symbol || 'BTC').toUpperCase();
+    let hours = parseFloat(source.hours || '24');
     if (!SYMBOL_TO_PRODUCT[symbol]) {
-      res.status(400).json({ error: `Unknown symbol '${symbol}'. Use BTC or XRP.` });
+      res.status(400).json({ error: `Unknown symbol '${symbol}'.` });
       return;
     }
     if (!hours || hours <= 0) hours = 24;
     if (hours > MAX_BACKTEST_HOURS) hours = MAX_BACKTEST_HOURS;
 
+    const settings = parseBacktestSettings(source);
+
     try {
       console.log(`[backtest] fetching ${hours}h of ${symbol} history…`);
       const candles = await fetchHistoricalRange(SYMBOL_TO_PRODUCT[symbol], hours);
-      console.log(`[backtest] running walk-forward backtest over ${candles.length} candles…`);
-      const results = backtestSymbol(candles, { stepMinutes: 1 });
+      console.log(`[backtest] running walk-forward backtest over ${candles.length} candles with settings…`);
+      const windows = backtestSymbol(candles, { stepMinutes: 1 });
+      const trading = backtestWithSettings(candles, settings, { stepMinutes: 1 });
       res.json({
         symbol,
         hoursRequested: hours,
         candleCount: candles.length,
-        note: 'Order book imbalance/spread/liquidity signals are not included — no historical order-book data exists to replay them. illustrativeReturnPct assumes every trade could be placed at even-money (50¢) odds, which real Kalshi prices almost never are — it shows whether the directional call beats a coin flip, not a real profit projection.',
-        windows: results,
+        settingsUsed: trading.settings,
+        trading,
+        windows,
+        note: trading.note,
       });
     } catch (err) {
       console.error('[backtest] failed:', err);
       res.status(500).json({ error: err.message });
     }
-  });
+  }
+
+  app.get('/api/backtest', runBacktestHandler);
+  app.post('/api/backtest', runBacktestHandler);
 
   app.listen(PORT, () => {
     console.log(`[startup] prediction engine API listening on http://0.0.0.0:${PORT}`);
