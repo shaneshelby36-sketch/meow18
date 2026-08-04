@@ -348,10 +348,11 @@
 
       <div class="bot-section">
         <h3>Backtest</h3>
-        <p class="settings-hint">Uses the settings above (edge, confidence, stake, stop-loss, skim, bankroll, guardrail) against historical Coinbase prices. Kalshi fills are assumed even-money (50¢) because historical Kalshi quotes aren't available — treat P&amp;L as illustrative.</p>
+        <p class="settings-hint">Uses the settings above. Auto continuously scans all Kalshi cryptos for the best setup (not only at window open). Hunt best searches edge/confidence/stop on its own for higher win rate and profit, then shows the winner.</p>
         <div class="backtest-controls">
           <label>Asset
             <select id="backtest-symbol">
+              <option value="AUTO">Auto (scan all markets, trade the best)</option>
               <option value="BTC">BTC</option>
               <option value="XRP">XRP</option>
               <option value="ETH">ETH</option>
@@ -366,6 +367,7 @@
             <button class="btn-secondary backtest-day-btn" type="button" data-hours="48">2 days</button>
             <button class="btn-secondary backtest-day-btn" type="button" data-hours="72">3 days</button>
           </div>
+          <button class="btn-primary" id="backtest-hunt" type="button">Hunt best</button>
           <input id="backtest-hours" type="hidden" value="24" />
         </div>
         <div id="backtest-results"></div>

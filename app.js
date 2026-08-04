@@ -899,6 +899,10 @@ async function loadBotConfigIntoForm() {
     const data = await res.json();
     const c = data.config;
     document.getElementById('bot-symbol').value = c.symbol;
+    const backtestSymbol = document.getElementById('backtest-symbol');
+    if (backtestSymbol && [...backtestSymbol.options].some((o) => o.value === c.symbol)) {
+      backtestSymbol.value = c.symbol;
+    }
     document.getElementById('bot-edge').value = c.edgeThresholdPct;
     document.getElementById('bot-confidence').value = c.minConfidence;
     document.getElementById('bot-stoploss').value = c.stopLossCents;
@@ -993,6 +997,14 @@ function formatMoneyFromCents(cents, { signed = false } = {}) {
   return formatMoneyCents(cents, { signed });
 }
 
+function applyHuntedSettingsToForm(settings) {
+  if (!settings) return;
+  if (settings.edgeThresholdPct != null) document.getElementById('bot-edge').value = settings.edgeThresholdPct;
+  if (settings.minConfidence != null) document.getElementById('bot-confidence').value = settings.minConfidence;
+  if (settings.stopLossCents != null) document.getElementById('bot-stoploss').value = settings.stopLossCents;
+  ['bot-edge', 'bot-confidence', 'bot-stoploss'].forEach(updateSliderDisplay);
+}
+
 function renderBacktestResults(data, dayLabel) {
   const t = data.trading || {};
   const s = data.settingsUsed || {};
@@ -1003,15 +1015,46 @@ function renderBacktestResults(data, dayLabel) {
         ? `${s.skimPercent}% of profit`
         : `$${Number(s.skimFixedDollars || 0).toFixed(0)} per win`;
   const pnlClass = (t.netPnlCents || 0) > 0 ? 'chip-positive' : (t.netPnlCents || 0) < 0 ? 'chip-negative' : '';
+  const modeLabel = data.mode === 'AUTO' || t.mode === 'AUTO' ? 'AUTO' : data.symbol;
+  const scanned = (data.symbolsScanned || t.symbolsScanned || [data.symbol]).join(', ');
   const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Stop ${s.stopLossCents}¢ · Max pos ${s.maxOpenPositions} · Guardrail $${s.guardrailDollars} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
+  const bySymbol = t.tradesBySymbol
+    ? Object.entries(t.tradesBySymbol)
+        .sort((a, b) => b[1] - a[1])
+        .map(([sym, count]) => `${sym} ${count}`)
+        .join(' · ')
+    : '';
+
+  let huntBlock = '';
+  if (data.hunt && data.hunt.best) {
+    const best = data.hunt.best;
+    const topRows = (data.hunt.top || [])
+      .map(
+        (row, i) =>
+          `<div class="backtest-row"><span>#${i + 1} edge ${row.settings.edgeThresholdPct}% · conf ${row.settings.minConfidence}% · stop ${row.settings.stopLossCents}¢</span><span>${row.winRatePct != null ? row.winRatePct + '%' : '—'} WR · ${row.trades} trades · ${formatMoneyFromCents(row.netPnlCents, { signed: true })}</span></div>`
+      )
+      .join('');
+    huntBlock = `
+      <div class="capital-ledger backtest-ledger">
+        <div class="capital-ledger-title">Hunt result — best win rate + profit</div>
+        <p class="backtest-settings-line">Searched ${data.hunt.searched} setting combos. Winner: edge ${best.settings.edgeThresholdPct}% · confidence ${best.settings.minConfidence}% · stop ${best.settings.stopLossCents}¢</p>
+        <p class="backtest-settings-line">Those values were applied to the settings sliders above — save settings if you want the live bot to use them.</p>
+        <div class="backtest-recent-title">Top combos</div>
+        ${topRows}
+      </div>`;
+    applyHuntedSettingsToForm(best.settings);
+  }
 
   const tradingBlock = `
     <div class="capital-ledger backtest-ledger">
-      <div class="capital-ledger-title">Settings-based trading sim (${data.symbol} · ${dayLabel})</div>
+      <div class="capital-ledger-title">${data.hunted ? 'Best-hunt' : 'Settings-based'} trading sim (${modeLabel} · ${dayLabel})</div>
       <p class="backtest-settings-line">${settingsLine}</p>
+      <p class="backtest-settings-line">Continuous scan · Scanned: ${scanned}${bySymbol ? ` · Trades taken: ${bySymbol}` : ''}</p>
       <div class="capital-row"><span>Trades taken</span><span>${t.trades ?? 0}</span></div>
       <div class="capital-row"><span>Wins / Losses</span><span>${t.wins ?? 0} / ${t.losses ?? 0}</span></div>
       <div class="capital-row"><span>Win rate</span><span>${t.winRatePct != null ? t.winRatePct + '%' : '—'}</span></div>
+      <div class="capital-row"><span>Avg confidence (taken)</span><span>${t.avgConfidenceTaken != null ? t.avgConfidenceTaken + '%' : '—'}</span></div>
+      <div class="capital-row"><span>Avg confidence (scanned)</span><span>${t.avgConfidenceScanned != null ? t.avgConfidenceScanned + '%' : '—'}</span></div>
       <div class="capital-row"><span>Stop-loss exits</span><span>${t.stopLossExits ?? 0}</span></div>
       <div class="capital-divider"></div>
       <div class="capital-row"><span>Starting Bankroll</span><span>${formatMoneyFromCents(t.startingBankrollCents)}</span></div>
@@ -1032,27 +1075,43 @@ function renderBacktestResults(data, dayLabel) {
   const recent = (t.recentTrades || [])
     .map(
       (tr) =>
-        `<div class="backtest-row"><span>${tr.side.toUpperCase()} · ${tr.window} · conf ${tr.confidence}% · edge ${tr.edge}</span><span class="${tr.pnlDollars >= 0 ? 'chip-positive' : 'chip-negative'}">${tr.pnlDollars >= 0 ? '+' : ''}$${Math.abs(tr.pnlDollars).toFixed(2)} · ${tr.exitReason}</span></div>`
+        `<div class="backtest-row"><span>${tr.symbol || data.symbol} ${tr.side.toUpperCase()} · ${tr.window} · conf ${tr.confidence}% · edge ${tr.edge}</span><span class="${tr.pnlDollars >= 0 ? 'chip-positive' : 'chip-negative'}">${tr.pnlDollars >= 0 ? '+' : ''}$${Math.abs(tr.pnlDollars).toFixed(2)} · ${tr.exitReason}</span></div>`
     )
     .join('');
 
-  const windowRows = Object.values(data.windows || {})
-    .map(
-      (w) =>
-        `<div class="backtest-row"><span>Engine ${w.window}</span><span>${w.accuracyPct != null ? w.accuracyPct + '%' : '—'} accurate (${w.correctCount}/${w.sampleSize})</span></div>`
-    )
-    .join('');
+  let windowRows = '';
+  if (data.mode === 'AUTO' && data.windows && !data.windows.w5) {
+    windowRows = Object.entries(data.windows)
+      .map(([sym, windows]) => {
+        const lines = Object.values(windows)
+          .map(
+            (w) =>
+              `<div class="backtest-row"><span>${sym} ${w.window}</span><span>${w.accuracyPct != null ? w.accuracyPct + '%' : '—'} acc · avg conf ${w.avgConfidence != null ? w.avgConfidence + '%' : '—'} · high-conf ${w.highConfidenceAccuracyPct != null ? w.highConfidenceAccuracyPct + '%' : '—'} (${w.highConfidenceSampleSize || 0})</span></div>`
+          )
+          .join('');
+        return lines;
+      })
+      .join('');
+  } else {
+    windowRows = Object.values(data.windows || {})
+      .map(
+        (w) =>
+          `<div class="backtest-row"><span>Engine ${w.window}</span><span>${w.accuracyPct != null ? w.accuracyPct + '%' : '—'} acc · avg conf ${w.avgConfidence != null ? w.avgConfidence + '%' : '—'} · high-conf (≥55%) ${w.highConfidenceAccuracyPct != null ? w.highConfidenceAccuracyPct + '%' : '—'} (${w.correctCount}/${w.sampleSize})</span></div>`
+      )
+      .join('');
+  }
 
   return `
+    ${huntBlock}
     ${tradingBlock}
     ${skipBlock}
     ${recent ? `<div class="backtest-recent-title">Recent simulated trades</div>${recent}` : ''}
-    <div class="backtest-recent-title">Engine directional accuracy (all minutes, not filtered by settings)</div>
+    <div class="backtest-recent-title">Engine accuracy + confidence (from live prediction path)</div>
     ${windowRows}
     <p class="backtest-note">${data.candleCount} candles over ${dayLabel} (${data.hoursRequested}h). ${data.note || t.note || ''}</p>`;
 }
 
-async function runBacktest(hoursOverride) {
+async function runBacktest(hoursOverride, { hunt = false } = {}) {
   const { engineUrl } = loadSettings();
   const symbol = document.getElementById('backtest-symbol').value;
   const hoursInput = document.getElementById('backtest-hours');
@@ -1064,7 +1123,7 @@ async function runBacktest(hoursOverride) {
   const resultsEl = document.getElementById('backtest-results');
   const days = Number(hours) / 24;
   const dayLabel = days === 1 ? '1 day' : `${days} days`;
-  resultsEl.innerHTML = `<p class="settings-hint">Running ${dayLabel} backtest with your current settings…</p>`;
+  resultsEl.innerHTML = `<p class="settings-hint">${hunt ? 'Hunting best settings' : 'Running'} ${dayLabel} backtest${symbol === 'AUTO' ? ' (AUTO — continuous multi-market scan)' : ''}${hunt ? ' — this can take a while' : ''}…</p>`;
   try {
     const res = await fetch(`${engineUrl}/api/backtest`, {
       method: 'POST',
@@ -1073,6 +1132,7 @@ async function runBacktest(hoursOverride) {
       body: JSON.stringify({
         symbol,
         hours: Number(hours),
+        hunt,
         ...readBacktestSettingsFromForm(),
       }),
     });
@@ -1186,7 +1246,11 @@ function wireBotUI() {
   document.getElementById('bot-dashboard-open').addEventListener('click', openBotOverlay);
   document.getElementById('bot-reset-paper').addEventListener('click', resetPaperHistory);
   document.querySelectorAll('.backtest-day-btn').forEach((btn) => {
-    btn.addEventListener('click', () => runBacktest(btn.dataset.hours));
+    btn.addEventListener('click', () => runBacktest(btn.dataset.hours, { hunt: false }));
+  });
+  document.getElementById('backtest-hunt').addEventListener('click', () => {
+    const hours = document.getElementById('backtest-hours').value || 24;
+    runBacktest(hours, { hunt: true });
   });
   document.getElementById('kalshi-creds-save').addEventListener('click', saveKalshiCredentials);
   document.getElementById('mode-btn-paper').addEventListener('click', () => switchMode('paper'));

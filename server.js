@@ -14,7 +14,7 @@ const { PredictionTracker } = require('./tracker');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
 const { KalshiClient } = require('./kalshiClient');
 const { TradingBot, SERIES_BY_SYMBOL } = require('./bot');
-const { backtestSymbol, backtestWithSettings } = require('./backtest');
+const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
 
 const tracker = new PredictionTracker();
 
@@ -443,6 +443,8 @@ app.get("/", (req, res) => {
   });
 
   const SYMBOL_TO_PRODUCT = { BTC: 'BTC-USD', XRP: 'XRP-USD', ETH: 'ETH-USD', SOL: 'SOL-USD', DOGE: 'DOGE-USD', BNB: 'BNB-USD', ZEC: 'ZEC-USD' };
+  // Same set the live AUTO bot can trade on Kalshi (ZEC excluded — no 15m market).
+  const AUTO_BACKTEST_SYMBOLS = Object.keys(SERIES_BY_SYMBOL);
   const MAX_BACKTEST_HOURS = 72;
 
   function parseBacktestSettings(source = {}) {
@@ -469,29 +471,107 @@ app.get("/", (req, res) => {
     const source = { ...(req.query || {}), ...((req.body && typeof req.body === 'object') ? req.body : {}) };
     const symbol = String(source.symbol || 'BTC').toUpperCase();
     let hours = parseFloat(source.hours || '24');
-    if (!SYMBOL_TO_PRODUCT[symbol]) {
-      res.status(400).json({ error: `Unknown symbol '${symbol}'.` });
+    const isAuto = symbol === 'AUTO';
+
+    if (!isAuto && !SYMBOL_TO_PRODUCT[symbol]) {
+      res.status(400).json({ error: `Unknown symbol '${symbol}'. Use AUTO or a supported asset.` });
       return;
     }
     if (!hours || hours <= 0) hours = 24;
     if (hours > MAX_BACKTEST_HOURS) hours = MAX_BACKTEST_HOURS;
 
     const settings = parseBacktestSettings(source);
+    const fetchSymbols = isAuto
+      ? AUTO_BACKTEST_SYMBOLS
+      : symbol === 'BTC'
+        ? ['BTC']
+        : ['BTC', symbol]; // BTC included for correlation / confidence agreement
 
     try {
-      console.log(`[backtest] fetching ${hours}h of ${symbol} history…`);
-      const candles = await fetchHistoricalRange(SYMBOL_TO_PRODUCT[symbol], hours);
-      console.log(`[backtest] running walk-forward backtest over ${candles.length} candles with settings…`);
-      const windows = backtestSymbol(candles, { stepMinutes: 1 });
-      const trading = backtestWithSettings(candles, settings, { stepMinutes: 1 });
+      console.log(`[backtest] fetching ${hours}h of ${fetchSymbols.join(',')} history…`);
+      const candlesBySymbol = {};
+      for (const sym of fetchSymbols) {
+        const productId = SYMBOL_TO_PRODUCT[sym];
+        if (!productId) continue;
+        // Sequential to stay polite with Coinbase's public rate limits.
+        // eslint-disable-next-line no-await-in-loop
+        candlesBySymbol[sym] = await fetchHistoricalRange(productId, hours);
+        console.log(`[backtest] ${sym}: ${candlesBySymbol[sym].length} candles`);
+      }
+
+      const tradeInput = isAuto
+        ? Object.fromEntries(AUTO_BACKTEST_SYMBOLS.map((s) => [s, candlesBySymbol[s]]).filter(([, c]) => c))
+        : candlesBySymbol; // may include BTC peer + focus symbol
+
+      console.log(`[backtest] running ${isAuto ? 'AUTO' : symbol} walk-forward with settings…`);
+      const wantHunt = source.hunt === true || source.hunt === 'true' || source.hunt === '1';
+
+      let hunt = null;
+      let trading;
+      if (wantHunt) {
+        console.log('[backtest] hunting best edge/confidence/stop for win rate + profit…');
+        hunt = huntBestSettings(tradeInput, settings, {
+          stepMinutes: 2,
+          mode: isAuto ? 'AUTO' : 'single',
+          focusSymbol: isAuto ? null : symbol,
+        });
+        trading = hunt.bestTrading;
+        if (!trading) {
+          trading = backtestWithSettings(tradeInput, settings, {
+            stepMinutes: 1,
+            mode: isAuto ? 'AUTO' : 'single',
+            focusSymbol: isAuto ? null : symbol,
+            continuousSearch: true,
+          });
+        }
+      } else {
+        trading = backtestWithSettings(tradeInput, settings, {
+          stepMinutes: 1,
+          mode: isAuto ? 'AUTO' : 'single',
+          focusSymbol: isAuto ? null : symbol,
+          continuousSearch: true,
+        });
+      }
+
+      let windows;
+      if (isAuto) {
+        windows = {};
+        for (const sym of AUTO_BACKTEST_SYMBOLS) {
+          if (!candlesBySymbol[sym]) continue;
+          windows[sym] = backtestSymbol(candlesBySymbol[sym], {
+            stepMinutes: 1,
+            symbol: sym,
+            btcCandles: candlesBySymbol.BTC,
+          });
+        }
+      } else {
+        windows = backtestSymbol(candlesBySymbol[symbol], {
+          stepMinutes: 1,
+          symbol,
+          btcCandles: symbol === 'BTC' ? null : candlesBySymbol.BTC,
+        });
+      }
+
+      const candleCount = Object.values(candlesBySymbol).reduce((sum, c) => sum + c.length, 0);
       res.json({
         symbol,
+        mode: isAuto ? 'AUTO' : 'single',
+        symbolsScanned: isAuto ? AUTO_BACKTEST_SYMBOLS : [symbol],
         hoursRequested: hours,
-        candleCount: candles.length,
+        candleCount,
+        hunted: !!wantHunt,
+        hunt: hunt
+          ? {
+              searched: hunt.searched,
+              best: hunt.best,
+              top: hunt.top,
+              note: hunt.note,
+            }
+          : null,
         settingsUsed: trading.settings,
         trading,
         windows,
-        note: trading.note,
+        note: wantHunt && hunt ? `${hunt.note} ${trading.note || ''}` : trading.note,
       });
     } catch (err) {
       console.error('[backtest] failed:', err);

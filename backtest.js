@@ -1,10 +1,12 @@
 'use strict';
 
-const { gatherIndicators, directionalScore, buildWindowPrediction, WINDOWS } = require('./prediction');
+const { correlation } = require('./indicators');
+const { gatherIndicators, buildWindowPrediction, WINDOWS } = require('./prediction');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
 
 const LOOKBACK_MIN = 210;
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
 
 // Same half-lives as the live engine, so a backtest run reflects the exact
 // same accumulating-signal methodology that's actually trading live —
@@ -74,24 +76,54 @@ function estimateMarkCents(side, entrySpot, currentSpot) {
   return clamp(Math.round(50 + (signed / 0.02) * 50), 1, 99);
 }
 
-/**
- * Directional accuracy by prediction window (engine quality, not trading P&L).
- */
-function backtestSymbol(candles, { stepMinutes = 1 } = {}) {
-  const perWindow = {};
+function buildCandleIndex(candles) {
+  const byMinute = new Map();
+  for (const c of candles) {
+    const minute = Math.floor(c.time / MINUTE_MS) * MINUTE_MS;
+    byMinute.set(minute, c);
+  }
+  return {
+    candles,
+    byMinute,
+    times: [...byMinute.keys()].sort((a, b) => a - b),
+  };
+}
 
+function historyThrough(index, minute) {
+  const out = [];
+  for (const c of index.candles) {
+    if (c.time > minute + MINUTE_MS - 1) break;
+    out.push(c);
+  }
+  return out;
+}
+
+function spotAt(index, minute) {
+  return index.byMinute.get(minute) || null;
+}
+
+/**
+ * Directional accuracy by prediction window, using the real prediction
+ * builder (including confidence scores) — not just raw directional lean.
+ */
+function backtestSymbol(candles, { stepMinutes = 1, symbol = 'BTC', btcCandles = null } = {}) {
+  const perWindow = {};
   for (const w of WINDOWS) {
     perWindow[w.key] = {
       label: w.label,
       minutes: w.minutes,
       correct: 0,
       total: 0,
+      confidenceSum: 0,
+      highConfidenceCorrect: 0,
+      highConfidenceTotal: 0,
     };
   }
 
   const accumulatorManager = new SignalAccumulatorManager(HALF_LIFE_MS);
   const maxHorizon = Math.max(...WINDOWS.map((w) => w.minutes));
   const lastUsableIndex = candles.length - maxHorizon - 1;
+  const btcIndex = btcCandles && symbol !== 'BTC' ? buildCandleIndex(btcCandles) : null;
 
   for (let i = LOOKBACK_MIN; i <= lastUsableIndex; i += stepMinutes) {
     const historySlice = candles.slice(0, i + 1);
@@ -102,33 +134,68 @@ function backtestSymbol(candles, { stepMinutes = 1 } = {}) {
     const currentPrice = candles[i].close;
     const historicalNow = candles[i].time;
 
+    let otherInd = null;
+    let crossCorrelation = null;
+    if (btcIndex) {
+      const btcHistory = historyThrough(btcIndex, historicalNow);
+      if (btcHistory.length >= LOOKBACK_MIN) {
+        otherInd = gatherIndicators(makeSeries(btcHistory), null);
+        const assetCloses = historySlice.map((c) => c.close);
+        const btcCloses = btcHistory.map((c) => c.close);
+        const n = Math.min(assetCloses.length, btcCloses.length, 60);
+        if (n >= 20) {
+          crossCorrelation = correlation(assetCloses.slice(-n), btcCloses.slice(-n));
+        }
+      }
+    }
+
     for (const w of WINDOWS) {
-      const { weighted } = directionalScore(ind, w.key);
-      const accumulator = accumulatorManager.get('backtest', w.key);
-      const { netDominance } = accumulator.update(Object.values(weighted), historicalNow);
-      const predictedUp = netDominance > 0;
+      const accumulator = accumulatorManager.get(`dir:${symbol}`, w.key);
+      const prediction = buildWindowPrediction(
+        w,
+        ind,
+        otherInd,
+        crossCorrelation,
+        currentPrice,
+        symbol,
+        accumulator,
+        historicalNow
+      );
 
       const futureIndex = i + w.minutes;
       if (futureIndex >= candles.length) continue;
 
+      const predictedUp = prediction.probabilityUp >= 50;
       const actualUp = candles[futureIndex].close >= currentPrice;
-      perWindow[w.key].total += 1;
-      if (predictedUp === actualUp) perWindow[w.key].correct += 1;
+      const bucket = perWindow[w.key];
+      bucket.total += 1;
+      bucket.confidenceSum += prediction.confidence;
+      if (predictedUp === actualUp) bucket.correct += 1;
+      if (prediction.confidence >= 55) {
+        bucket.highConfidenceTotal += 1;
+        if (predictedUp === actualUp) bucket.highConfidenceCorrect += 1;
+      }
     }
   }
 
   const summary = {};
   for (const key of Object.keys(perWindow)) {
-    const { label, minutes, correct, total } = perWindow[key];
-    const accuracyPct = total ? +((correct / total) * 100).toFixed(1) : null;
-    const illustrativeReturnPct = accuracyPct != null ? +((2 * accuracyPct - 100).toFixed(1)) : null;
+    const b = perWindow[key];
+    const accuracyPct = b.total ? +((b.correct / b.total) * 100).toFixed(1) : null;
+    const avgConfidence = b.total ? +(b.confidenceSum / b.total).toFixed(1) : null;
+    const highConfAccuracyPct = b.highConfidenceTotal
+      ? +((b.highConfidenceCorrect / b.highConfidenceTotal) * 100).toFixed(1)
+      : null;
     summary[key] = {
-      window: label,
-      minutes,
-      sampleSize: total,
-      correctCount: correct,
+      window: b.label,
+      minutes: b.minutes,
+      sampleSize: b.total,
+      correctCount: b.correct,
       accuracyPct,
-      illustrativeReturnPct,
+      avgConfidence,
+      highConfidenceSampleSize: b.highConfidenceTotal,
+      highConfidenceAccuracyPct: highConfAccuracyPct,
+      illustrativeReturnPct: accuracyPct != null ? +((2 * accuracyPct - 100).toFixed(1)) : null,
     };
   }
 
@@ -136,12 +203,39 @@ function backtestSymbol(candles, { stepMinutes = 1 } = {}) {
 }
 
 /**
- * Paper-trade simulation using the dashboard settings. Assumes even-money
- * Kalshi entry (default 50¢) because historical Kalshi quotes aren't available.
+ * Paper-trade simulation using dashboard settings.
+ * `candlesBySymbol` = { BTC: [...], ETH: [...], ... }
+ * AUTO mode: continuously scans all symbols and trades the best opportunity
+ * that clears confidence + edge (same ranking as live AUTO).
  */
-function backtestWithSettings(candles, rawSettings = {}, { stepMinutes = 1 } = {}) {
+function backtestWithSettings(
+  candlesBySymbol,
+  rawSettings = {},
+  { stepMinutes = 1, mode = 'single', focusSymbol = null, continuousSearch = true } = {}
+) {
   const settings = normalizeSettings(rawSettings);
   const accumulatorManager = new SignalAccumulatorManager(HALF_LIFE_MS);
+
+  // Normalize: allow legacy single-array callers.
+  let bySymbol = candlesBySymbol;
+  if (Array.isArray(candlesBySymbol)) {
+    bySymbol = { BTC: candlesBySymbol };
+  }
+
+  const symbols = Object.keys(bySymbol).filter((s) => Array.isArray(bySymbol[s]) && bySymbol[s].length);
+  if (symbols.length === 0) {
+    throw new Error('No candle data provided for backtest.');
+  }
+
+  const indexes = {};
+  for (const sym of symbols) indexes[sym] = buildCandleIndex(bySymbol[sym]);
+
+  const btcIndex = indexes.BTC || null;
+  const timeline = (indexes.BTC || indexes[symbols[0]]).times;
+  const autoMode = mode === 'AUTO';
+  const tradeSymbols = autoMode
+    ? symbols
+    : [focusSymbol && indexes[focusSymbol] ? focusSymbol : symbols.find((s) => s !== 'BTC') || symbols[0]].filter(Boolean);
 
   const startingCents = Math.round(settings.paperStartingBalanceDollars * 100);
   const guardrailCents = Math.round(settings.guardrailDollars * 100);
@@ -157,7 +251,10 @@ function backtestWithSettings(candles, rawSettings = {}, { stepMinutes = 1 } = {
     maxPositions: 0,
     guardrail: 0,
     insufficientCash: 0,
+    notReady: 0,
   };
+  const tradesBySymbol = {};
+  const confidenceSamples = [];
 
   const openExposure = () =>
     openTrades.reduce((sum, t) => sum + t.entryPriceCents * t.contracts, 0);
@@ -165,23 +262,37 @@ function backtestWithSettings(candles, rawSettings = {}, { stepMinutes = 1 } = {
   const availableCash = () =>
     Math.max(0, startingCents + closedPnlCents - reserveCents - openExposure());
 
-  for (let i = LOOKBACK_MIN; i < candles.length; i += stepMinutes) {
-    const candle = candles[i];
-    const now = candle.time;
-    const spot = candle.close;
+  for (let ti = 0; ti < timeline.length; ti += stepMinutes) {
+    const minute = timeline[ti];
+    const indicatorsCache = {};
 
-    // --- manage open trades ---
+    // Precompute BTC indicators once per minute for correlation peers.
+    if (btcIndex) {
+      const btcHistory = historyThrough(btcIndex, minute);
+      if (btcHistory.length >= LOOKBACK_MIN) {
+        indicatorsCache.BTC = gatherIndicators(makeSeries(btcHistory), null);
+      }
+    }
+
+    // --- manage open trades against each symbol's own spot ---
     for (let t = openTrades.length - 1; t >= 0; t -= 1) {
       const trade = openTrades[t];
-      const mark = estimateMarkCents(trade.side, trade.entrySpot, spot);
+      const tradeIndex = indexes[trade.symbol];
+      if (!tradeIndex) continue;
+      const candle = spotAt(tradeIndex, minute);
+      if (!candle) continue;
+      const spot = candle.close;
+
       let exitPrice = null;
       let reason = null;
+      const mark = estimateMarkCents(trade.side, trade.entrySpot, spot);
 
       if (mark <= settings.stopLossCents) {
         exitPrice = settings.stopLossCents;
         reason = 'stop_loss';
-      } else if (now >= trade.closeTime || i >= trade.settleIndex) {
-        const settledUp = candles[Math.min(trade.settleIndex, candles.length - 1)].close >= trade.entrySpot;
+      } else if (minute >= trade.closeTime || minute >= trade.settleMinute) {
+        const settleCandle = spotAt(tradeIndex, trade.settleMinute) || candle;
+        const settledUp = settleCandle.close >= trade.entrySpot;
         const won = trade.side === 'yes' ? settledUp : !settledUp;
         exitPrice = won ? 100 : 0;
         reason = 'settled';
@@ -199,28 +310,24 @@ function backtestWithSettings(candles, rawSettings = {}, { stepMinutes = 1 } = {
         exitReason: reason,
         pnlCents,
         skimmedCents,
-        closedAt: now,
+        closedAt: minute,
       });
       openTrades.splice(t, 1);
     }
 
-    if (i > candles.length - 16) continue; // need room for a 15m settle
-
-    const historySlice = candles.slice(0, i + 1);
-    const series = makeSeries(historySlice);
-    const ind = gatherIndicators(series, null);
-    if (!ind) continue;
-
-    const bucketStart = Math.floor(now / FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS;
+    const bucketStart = Math.floor(minute / FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS;
     const closeTime = bucketStart + FIFTEEN_MIN_MS;
-    const minutesRemaining = Math.max(0.1, (closeTime - now) / 60000);
-    const minutesIntoBucket = (now - bucketStart) / 60000;
+    const minutesRemaining = Math.max(0.1, (closeTime - minute) / 60000);
 
-    // One decision per Kalshi-style 15-minute market (first minute of the bucket).
-    if (minutesIntoBucket > 1.01) continue;
-
-    const windowKey = pickWindowKey(minutesRemaining);
-    const windowDef = WINDOWS.find((w) => w.key === windowKey);
+    // Keep searching for setups throughout the window (like the live bot),
+    // not only at the open — but still only one entry per 15m market.
+    if (!continuousSearch) {
+      const minutesIntoBucket = (minute - bucketStart) / 60000;
+      if (minutesIntoBucket > 1.01) continue;
+    }
+    // Need enough time left for the trade to mean anything.
+    if (minutesRemaining < 2.5) continue;
+    if (timeline[timeline.length - 1] - minute < 3 * MINUTE_MS) continue;
 
     const alreadyInBucket = openTrades.some((t) => t.bucketStart === bucketStart)
       || closedTrades.some((t) => t.bucketStart === bucketStart);
@@ -231,31 +338,113 @@ function backtestWithSettings(candles, rawSettings = {}, { stepMinutes = 1 } = {
       continue;
     }
 
-    const accumulator = accumulatorManager.get('backtest-trade', windowKey);
-    const prediction = buildWindowPrediction(
-      windowDef,
-      ind,
-      null,
-      null,
-      spot, // no historical Kalshi strike — same neutral fallback as live
-      'backtest',
-      accumulator,
-      now
-    );
+    const windowKey = pickWindowKey(minutesRemaining);
+    const windowDef = WINDOWS.find((w) => w.key === windowKey);
 
-    if (prediction.confidence < settings.minConfidence) {
-      skipCounts.lowConfidence += 1;
-      continue;
+    const candidates = [];
+    const scanSymbols = tradeSymbols;
+
+    for (const symbol of scanSymbols) {
+      const index = indexes[symbol];
+      if (!index || !spotAt(index, minute)) {
+        skipCounts.notReady += 1;
+        continue;
+      }
+
+      // Build peer indicators for non-BTC symbols first so BTC can optionally agree.
+      if (symbol !== 'BTC' && !indicatorsCache[symbol]) {
+        const hist = historyThrough(index, minute);
+        if (hist.length >= LOOKBACK_MIN) {
+          indicatorsCache[symbol] = gatherIndicators(makeSeries(hist), null);
+        }
+      }
+
+      let otherInd = null;
+      let crossCorrelation = null;
+      const hist = historyThrough(index, minute);
+      const ind = indicatorsCache[symbol] || gatherIndicators(makeSeries(hist), null);
+      if (!ind) {
+        skipCounts.notReady += 1;
+        continue;
+      }
+      indicatorsCache[symbol] = ind;
+
+      if (symbol !== 'BTC' && indicatorsCache.BTC && btcIndex) {
+        otherInd = indicatorsCache.BTC;
+        const btcHistory = historyThrough(btcIndex, minute);
+        const n = Math.min(hist.length, btcHistory.length, 60);
+        if (n >= 20) {
+          crossCorrelation = correlation(
+            hist.slice(-n).map((c) => c.close),
+            btcHistory.slice(-n).map((c) => c.close)
+          );
+        }
+      } else if (symbol === 'BTC') {
+        const peerSym = scanSymbols.find((s) => s !== 'BTC' && indexes[s] && spotAt(indexes[s], minute));
+        if (peerSym) {
+          const peerHist = historyThrough(indexes[peerSym], minute);
+          otherInd = indicatorsCache[peerSym] || gatherIndicators(makeSeries(peerHist), null);
+          if (otherInd) {
+            indicatorsCache[peerSym] = otherInd;
+            const n = Math.min(hist.length, peerHist.length, 60);
+            if (n >= 20) {
+              crossCorrelation = correlation(
+                hist.slice(-n).map((c) => c.close),
+                peerHist.slice(-n).map((c) => c.close)
+              );
+            }
+          }
+        }
+      }
+
+      const spot = hist[hist.length - 1].close;
+      const accumulator = accumulatorManager.get(`trade:${symbol}`, windowKey);
+      const prediction = buildWindowPrediction(
+        windowDef,
+        ind,
+        otherInd,
+        crossCorrelation,
+        spot,
+        symbol,
+        accumulator,
+        minute
+      );
+
+      confidenceSamples.push(prediction.confidence);
+
+      if (prediction.confidence < settings.minConfidence) {
+        skipCounts.lowConfidence += 1;
+        continue;
+      }
+
+      const edge = prediction.probabilityUp - entryCents;
+      if (Math.abs(edge) < settings.edgeThresholdPct) {
+        skipCounts.lowEdge += 1;
+        continue;
+      }
+
+      const side = edge > 0 ? 'yes' : 'no';
+      candidates.push({
+        symbol,
+        side,
+        edge: Math.abs(edge),
+        confidence: prediction.confidence,
+        probabilityUp: prediction.probabilityUp,
+        probabilityDown: prediction.probabilityDown,
+        window: prediction.window,
+        entrySpot: spot,
+        // Prefer strong edge + confidence; slight bonus for more time left
+        // so early solid setups aren't ignored, but late spikes can still win.
+        rankScore: Math.abs(edge) * (prediction.confidence / 100) * (0.85 + 0.15 * Math.min(1, minutesRemaining / 15)),
+      });
     }
 
-    const kalshiImpliedYesPct = entryCents; // even-money assumption
-    const edge = prediction.probabilityUp - kalshiImpliedYesPct;
-    if (Math.abs(edge) < settings.edgeThresholdPct) {
-      skipCounts.lowEdge += 1;
-      continue;
-    }
+    if (candidates.length === 0) continue;
 
-    const side = edge > 0 ? 'yes' : 'no';
+    // AUTO (and single): take the best-ranked opportunity that clears thresholds.
+    candidates.sort((a, b) => b.rankScore - a.rankScore);
+    const best = candidates[0];
+
     const lastClosed = closedTrades.length ? closedTrades[closedTrades.length - 1] : null;
     const stakeDollars = computeNextStake(settings, lastClosed);
     const contracts = Math.max(1, Math.floor((stakeDollars * 100) / entryCents));
@@ -270,31 +459,37 @@ function backtestWithSettings(candles, rawSettings = {}, { stepMinutes = 1 } = {
       continue;
     }
 
-    const settleIndex = Math.min(
-      candles.length - 1,
-      i + Math.max(1, Math.ceil(minutesRemaining))
+    const settleMinute = Math.min(
+      timeline[timeline.length - 1],
+      bucketStart + FIFTEEN_MIN_MS - MINUTE_MS
     );
 
     openTrades.push({
-      side,
+      symbol: best.symbol,
+      side: best.side,
       entryPriceCents: entryCents,
       contracts,
       stakeDollars,
-      entrySpot: spot,
+      entrySpot: best.entrySpot,
       bucketStart,
       closeTime,
-      settleIndex,
-      engineProbability: side === 'yes' ? prediction.probabilityUp : prediction.probabilityDown,
-      engineConfidence: prediction.confidence,
-      edge: Math.abs(edge),
-      window: prediction.window,
-      openedAt: now,
+      settleMinute,
+      engineProbability: best.side === 'yes' ? best.probabilityUp : best.probabilityDown,
+      engineConfidence: best.confidence,
+      edge: best.edge,
+      window: best.window,
+      rankScore: best.rankScore,
+      openedAt: minute,
     });
+    tradesBySymbol[best.symbol] = (tradesBySymbol[best.symbol] || 0) + 1;
   }
 
   // Force-settle anything still open at end of series.
   for (const trade of openTrades.splice(0)) {
-    const endSpot = candles[candles.length - 1].close;
+    const tradeIndex = indexes[trade.symbol];
+    const endMinute = timeline[timeline.length - 1];
+    const endCandle = tradeIndex ? spotAt(tradeIndex, endMinute) : null;
+    const endSpot = endCandle ? endCandle.close : trade.entrySpot;
     const settledUp = endSpot >= trade.entrySpot;
     const won = trade.side === 'yes' ? settledUp : !settledUp;
     const exitPrice = won ? 100 : 0;
@@ -308,7 +503,7 @@ function backtestWithSettings(candles, rawSettings = {}, { stepMinutes = 1 } = {
       exitReason: 'end_of_data',
       pnlCents,
       skimmedCents,
-      closedAt: candles[candles.length - 1].time,
+      closedAt: endMinute,
     });
   }
 
@@ -319,14 +514,25 @@ function backtestWithSettings(candles, rawSettings = {}, { stepMinutes = 1 } = {
   const totalEquity = available + openPos + reserveCents;
   const netPnl = totalEquity - startingCents;
   const stopLossExits = closedTrades.filter((t) => t.exitReason === 'stop_loss').length;
+  const avgConfidenceTaken = closedTrades.length
+    ? +(closedTrades.reduce((s, t) => s + t.engineConfidence, 0) / closedTrades.length).toFixed(1)
+    : null;
+  const avgConfidenceScanned = confidenceSamples.length
+    ? +(confidenceSamples.reduce((s, c) => s + c, 0) / confidenceSamples.length).toFixed(1)
+    : null;
 
   return {
     settings,
+    mode: autoMode ? 'AUTO' : 'single',
+    symbolsScanned: tradeSymbols,
     trades: closedTrades.length,
+    tradesBySymbol,
     wins,
     losses,
     winRatePct: closedTrades.length ? +((wins / closedTrades.length) * 100).toFixed(1) : null,
     stopLossExits,
+    avgConfidenceTaken,
+    avgConfidenceScanned,
     startingBankrollCents: startingCents,
     availableCashCents: available,
     openPositionsValueCents: openPos,
@@ -335,7 +541,8 @@ function backtestWithSettings(candles, rawSettings = {}, { stepMinutes = 1 } = {
     netPnlCents: netPnl,
     grossClosedPnlCents: closedPnlCents,
     skipCounts,
-    recentTrades: closedTrades.slice(-15).reverse().map((t) => ({
+    recentTrades: closedTrades.slice(-20).reverse().map((t) => ({
+      symbol: t.symbol,
       side: t.side,
       window: t.window,
       stakeDollars: t.stakeDollars,
@@ -345,13 +552,116 @@ function backtestWithSettings(candles, rawSettings = {}, { stepMinutes = 1 } = {
       exitReason: t.exitReason,
     })),
     note:
-      'Simulated with your bot settings against historical Coinbase prices. Kalshi quotes are assumed even-money (50¢ entry) because historical Kalshi order books are not available — real fill prices and edges will differ. Order-book signals are also excluded.',
+      (autoMode
+        ? 'AUTO mode: continuously scanned all listed cryptos and traded only the best opportunity that cleared your confidence + edge settings (same ranking idea as live AUTO). '
+        : 'Continuously searched for setups during each 15-minute window (not only at the open). ') +
+      'Simulated with your bot settings against historical Coinbase prices. Confidence comes from the live engine’s buildWindowPrediction path. Kalshi quotes are assumed even-money (50¢ entry) because historical Kalshi order books are not available — real fill prices and edges will differ. Order-book signals are also excluded.',
+  };
+}
+
+/**
+ * Score a trading result for the settings hunt — prioritizes profit, then
+ * win rate, with a soft preference for enough sample size.
+ */
+function scoreTradingResult(trading) {
+  const trades = trading.trades || 0;
+  const wr = trading.winRatePct;
+  const pnlDollars = (trading.netPnlCents || 0) / 100;
+  if (trades < 3 || wr == null) return -1e9;
+  return pnlDollars * 12 + wr * 2.5 + Math.min(trades, 40) * 0.2;
+}
+
+/**
+ * Grid-search edge + confidence (+ a few stop-loss values) while keeping the
+ * user's stake/skim/bankroll fixed. Returns the best combo for win rate + profit.
+ */
+function huntBestSettings(candlesBySymbol, baseSettings = {}, runOptions = {}) {
+  const base = normalizeSettings(baseSettings);
+  const edgeGrid = [5, 8, 10, 12, 15, 18, 22, 25];
+  const confGrid = [50, 55, 60, 65, 70, 75, 80];
+  const stopGrid = [25, 30, 35, 40, 45].includes(base.stopLossCents)
+    ? [base.stopLossCents, 30, 35, 40].filter((v, i, arr) => arr.indexOf(v) === i)
+    : [base.stopLossCents, 30, 35, 40];
+
+  const candidates = [];
+  const huntOpts = {
+    stepMinutes: runOptions.stepMinutes || 2,
+    mode: runOptions.mode || 'AUTO',
+    focusSymbol: runOptions.focusSymbol || null,
+    continuousSearch: true,
+  };
+
+  for (const edgeThresholdPct of edgeGrid) {
+    for (const minConfidence of confGrid) {
+      for (const stopLossCents of stopGrid) {
+        const settings = {
+          ...base,
+          edgeThresholdPct,
+          minConfidence,
+          stopLossCents,
+        };
+        const trading = backtestWithSettings(candlesBySymbol, settings, huntOpts);
+        const score = scoreTradingResult(trading);
+        candidates.push({
+          score,
+          settings: {
+            edgeThresholdPct,
+            minConfidence,
+            stopLossCents,
+            stakeDollars: base.stakeDollars,
+            maxOpenPositions: base.maxOpenPositions,
+            guardrailDollars: base.guardrailDollars,
+            paperStartingBalanceDollars: base.paperStartingBalanceDollars,
+            skimMode: base.skimMode,
+            skimPercent: base.skimPercent,
+            skimFixedDollars: base.skimFixedDollars,
+          },
+          trades: trading.trades,
+          wins: trading.wins,
+          losses: trading.losses,
+          winRatePct: trading.winRatePct,
+          netPnlCents: trading.netPnlCents,
+          totalEquityCents: trading.totalEquityCents,
+          avgConfidenceTaken: trading.avgConfidenceTaken,
+          tradesBySymbol: trading.tradesBySymbol,
+        });
+      }
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  const best = candidates[0] || null;
+  const top = candidates.filter((c) => c.score > -1e8).slice(0, 8);
+
+  // Full continuous sim of the winner at step=1 for the reported trading block.
+  let bestTrading = null;
+  if (best) {
+    bestTrading = backtestWithSettings(
+      candlesBySymbol,
+      { ...base, ...best.settings },
+      {
+        stepMinutes: 1,
+        mode: huntOpts.mode,
+        focusSymbol: huntOpts.focusSymbol,
+        continuousSearch: true,
+      }
+    );
+  }
+
+  return {
+    best,
+    top,
+    bestTrading,
+    searched: candidates.length,
+    note:
+      'Hunted edge × confidence × stop-loss while keeping your stake/skim/bankroll. Ranked for higher net profit and win rate (min 3 trades). Continuous AUTO-style scanning used throughout.',
   };
 }
 
 module.exports = {
   backtestSymbol,
   backtestWithSettings,
+  huntBestSettings,
   normalizeSettings,
   LOOKBACK_MIN,
 };
