@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#0a0e14" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>BTC / XRP Prediction Dashboard</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <div id="rotate-notice">
+    <div class="rotate-icon">⟳</div>
+    <p>Rotate the tablet to landscape</p>
+  </div>
+
+  <div id="app">
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">◈</span>
+        <span class="brand-name">CryptoPredict</span>
+      </div>
+      <div class="topbar-right">
+        <div class="uptime-pill" id="uptime-pill">
+          <span class="stat-label">Engine uptime</span>
+          <span class="uptime-value" id="uptime-value">—</span>
+        </div>
+        <div class="status-pill" id="status-pill">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="status-text">Connecting…</span>
+        </div>
+        <div class="updated-pill">
+          <span id="updated-text">—</span>
+        </div>
+        <button class="btn-secondary topbar-action" id="open-windows-btn" type="button">Open other windows</button>
+        <button class="icon-btn" id="bot-btn" aria-label="Trading bot">🤖</button>
+        <button class="icon-btn" id="settings-btn" aria-label="Settings">⚙</button>
+      </div>
+    </header>
+
+    <p class="server-note" id="server-note">Engine + bot run on the server. Closing this page does not stop trading.</p>
+
+    <div class="asset-picker" id="asset-picker">
+      <!-- one chip per supported symbol, injected by app.js; tap to toggle which are shown below -->
+    </div>
+
+    <main class="grid" id="main-grid">
+      <!-- selected asset panels are injected here by app.js -->
+      <section class="asset-panel bot-dashboard-card" id="bot-dashboard-card" hidden>
+        <div class="asset-head">
+          <div class="asset-id"><span class="asset-symbol">BOT</span><span class="asset-name">Trading control</span></div>
+          <button class="btn-primary" id="bot-dashboard-open" type="button">Open bot</button>
+        </div>
+        <p class="bot-dashboard-server-note">Runs on the VPS. Closing the dashboard does not pause the bot.</p>
+        <p class="bot-dashboard-state" id="bot-dashboard-state">Checking bot status…</p>
+        <div class="bot-dashboard-stats" id="bot-dashboard-stats"></div>
+        <button class="btn-secondary" id="bot-dashboard-toggle" type="button">Start bot</button>
+      </section>
+    </main>
+
+    <footer class="footer-note">
+      Heuristic technical-indicator model — not financial advice. Predictions and the bot keep running on the server even when no page is open.
+    </footer>
+  </div>
+
+  <div id="settings-overlay" class="overlay hidden">
+    <div class="settings-card">
+      <h2>Prediction Engine Connection</h2>
+      <p class="settings-hint">Enter the address of the Prediction Engine running on your PC or VPS.</p>
+      <label for="engine-url">Engine API base URL</label>
+      <input id="engine-url" type="text" inputmode="url" placeholder="http://192.168.1.50:4000" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <label for="refresh-interval">Refresh interval (seconds)</label>
+      <input id="refresh-interval" type="number" min="5" max="10" step="1" />
+      <div class="settings-actions">
+        <button class="btn-secondary" id="settings-cancel">Cancel</button>
+        <button class="btn-primary" id="settings-save">Save &amp; Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <template id="asset-panel-template">
+    <section class="asset-panel">
+      <div class="asset-head">
+        <div class="asset-id">
+          <span class="asset-symbol"></span>
+          <span class="asset-name"></span>
+          <span class="asset-corr"></span>
+        </div>
+        <div class="asset-price-block">
+          <span class="asset-price"></span>
+          <span class="asset-price-change"></span>
+        </div>
+      </div>
+
+      <div class="overall-row">
+        <span class="stat-label">Overall (all 3 windows blended)</span>
+        <span class="overall-rec"></span>
+        <span class="overall-prob"></span>
+      </div>
+
+      <div class="asset-target-row">
+        <div class="target-block">
+          <span class="stat-label">Kalshi 15-min target (over/under)</span>
+          <span class="stat-value target-price">—</span>
+          <span class="target-source"></span>
+        </div>
+        <div class="countdown-block">
+          <span class="stat-label">Window settles in</span>
+          <span class="stat-value big-countdown">—</span>
+        </div>
+      </div>
+
+      <div class="asset-meta">
+        <div class="meta-chip">
+          <span class="meta-label">RSI</span>
+          <span class="meta-value meta-rsi">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">MACD hist</span>
+          <span class="meta-value meta-macd">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Volatility</span>
+          <span class="meta-value meta-vol">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Order flow</span>
+          <span class="meta-value meta-flow">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Pattern</span>
+          <span class="meta-value meta-pattern">—</span>
+        </div>
+      </div>
+
+      <div class="window-tabs">
+        <button class="window-tab" data-window-key="w15" type="button">10-15 min</button>
+        <button class="window-tab" data-window-key="w10" type="button">5-10 min</button>
+        <button class="window-tab" data-window-key="w5" type="button">0-5 min</button>
+      </div>
+
+      <div class="windows-row">
+        <!-- window cards injected here -->
+      </div>
+    </section>
+  </template>
+
+  <template id="window-card-template">
+    <article class="window-card">
+      <div class="window-head">
+        <span class="window-label"></span>
+        <span class="window-rec"></span>
+      </div>
+
+      <div class="prob-bar">
+        <div class="prob-up"></div>
+        <div class="prob-down"></div>
+      </div>
+      <div class="prob-numbers">
+        <span class="prob-up-text"></span>
+        <span class="prob-down-text"></span>
+      </div>
+
+      <div class="signal-score-row">
+        <div class="signal-score-bar">
+          <div class="signal-up-fill"></div>
+          <div class="signal-down-fill"></div>
+        </div>
+        <div class="signal-score-numbers">
+          <span class="signal-up-value">UP —</span>
+          <span class="signal-trend-badge">—</span>
+          <span class="signal-down-value">DOWN —</span>
+        </div>
+      </div>
+
+      <div class="window-stats">
+        <div class="stat">
+          <span class="stat-label">Confidence</span>
+          <span class="stat-value confidence-value">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Risk adj.</span>
+          <span class="stat-value risk-value">—</span>
+        </div>
+      </div>
+
+      <p class="window-explanation"></p>
+
+      <div class="track-row">
+        <div class="track-countdown">
+          <span class="stat-label">Settles in</span>
+          <span class="stat-value countdown-value">—</span>
+        </div>
+      </div>
+
+      <div class="track-result hidden">
+        <span class="result-badge"></span>
+        <span class="result-text"></span>
+      </div>
+
+      <div class="track-accuracy">
+        <span class="accuracy-label">Track record</span>
+        <span class="accuracy-value">—</span>
+      </div>
+    </article>
+  </template>
+
+  <div id="bot-overlay" class="overlay hidden">
+    <div class="settings-card bot-card">
+      <h2>Trading Bot</h2>
+      <p class="settings-hint" id="bot-mode-line">Checking status…</p>
+
+      <div class="bot-section">
+        <h3>Trading mode</h3>
+        <div class="mode-toggle-row">
+          <button class="mode-toggle-btn" id="mode-btn-paper" type="button">Paper (simulated)</button>
+          <button class="mode-toggle-btn" id="mode-btn-live" type="button">Live (real money)</button>
+        </div>
+        <p class="settings-hint" id="mode-toggle-feedback"></p>
+      </div>
+
+      <div class="bot-section">
+        <h3>Live status</h3>
+        <div class="settings-actions">
+          <button class="btn-primary" id="bot-running-toggle" type="button">Start bot</button>
+          <span class="settings-hint" id="bot-running-timer"></span>
+        </div>
+        <div id="bot-status-body">
+          <p class="settings-hint">Loading…</p>
+        </div>
+      </div>
+
+      <div class="bot-section">
+        <h3>Settings</h3>
+        <p class="settings-hint">These apply immediately — no restart needed. Trading mode (paper/live) is set on the server for safety and can't be changed here.</p>
+        <div class="bot-field-grid">
+          <label>Asset to trade
+            <select id="bot-symbol">
+              <option value="AUTO">Auto (scan all markets, trade the best)</option>
+              <option value="BTC">BTC</option>
+              <option value="XRP">XRP</option>
+              <option value="ETH">ETH</option>
+              <option value="SOL">SOL</option>
+              <option value="BNB">BNB</option>
+              <option value="DOGE">DOGE</option>
+            </select>
+            <span class="field-hint">ZEC isn't listed — Kalshi doesn't currently offer a 15-minute market for it, so it can't be traded (its predictions still show on the dashboard).</span>
+          </label>
+
+          <label>Edge threshold
+            <div class="slider-row">
+              <input id="bot-edge" type="range" min="1" max="30" step="0.5" />
+              <span class="slider-value" id="bot-edge-value">—</span>
+            </div>
+            <span class="field-hint">How many percentage points our probability must beat Kalshi's own price before it's worth trading.</span>
+          </label>
+
+          <label>Min confidence
+            <div class="slider-row">
+              <input id="bot-confidence" type="range" min="10" max="95" step="1" />
+              <span class="slider-value" id="bot-confidence-value">—</span>
+            </div>
+            <span class="field-hint">The engine's own trust in its prediction (docked for volatility, conflicting signals, etc.) — must clear this before the bot acts.</span>
+          </label>
+
+          <label>Stop-loss
+            <div class="slider-row">
+              <input id="bot-stoploss" type="range" min="1" max="99" step="1" />
+              <span class="slider-value" id="bot-stoploss-value">—</span>
+            </div>
+          </label>
+
+          <label>Stake per trade
+            <div class="slider-row">
+              <input id="bot-stake" type="range" min="1" max="500" step="1" />
+              <span class="slider-value" id="bot-stake-value">—</span>
+            </div>
+            <span class="field-hint">Dollar amount risked per trade — the bot converts this to a contract count automatically.</span>
+          </label>
+
+          <label>Max open positions
+            <div class="slider-row">
+              <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
+              <span class="slider-value" id="bot-maxpos-value">—</span>
+            </div>
+            <span class="field-hint">How many trades can be open at the same time. Keep at 1 unless you specifically want to stack bets.</span>
+          </label>
+
+          <label>Guardrail (max deployed)
+            <div class="slider-row">
+              <input id="bot-guardrail" type="range" min="10" max="1000" step="5" />
+              <span class="slider-value" id="bot-guardrail-value">â€”</span>
+            </div>
+            <span class="field-hint">The bot will not open a trade if its total open capital would exceed this amount.</span>
+          </label>
+
+          <label>Starting Bankroll
+            <div class="slider-row">
+              <input id="bot-paper-balance" type="range" min="10" max="10000" step="10" />
+              <span class="slider-value" id="bot-paper-balance-value">â€”</span>
+            </div>
+            <span class="field-hint">Simulated starting bankroll. Available Cash excludes Reserved Profit and Open Positions Value.</span>
+          </label>
+
+          <label>Profit skim mode
+            <select id="bot-skim-mode">
+              <option value="fixed">Fixed amount per win</option>
+              <option value="percent">Percent of profit per win</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+
+          <label>Skim amount
+            <div class="slider-row">
+              <input id="bot-skim-amount" type="range" min="0" max="100" step="1" />
+              <span class="slider-value" id="bot-skim-amount-value">—</span>
+            </div>
+          </label>
+        </div>
+        <div class="settings-actions">
+          <button class="btn-secondary" id="bot-settings-refresh">Refresh</button>
+          <button class="btn-primary" id="bot-settings-save">Save settings</button>
+        </div>
+        <p class="settings-hint" id="bot-settings-feedback"></p>
+      </div>
+
+      <div class="bot-section">
+        <h3>Kalshi API Access</h3>
+        <p class="settings-hint" id="kalshi-creds-status">Checking…</p>
+        <label>API Key ID
+          <input id="kalshi-key-id" type="text" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="e.g. 8f2c1a90-....." />
+        </label>
+        <label>Private Key (PEM)
+          <textarea id="kalshi-private-key" rows="5" placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----" spellcheck="false"></textarea>
+        </label>
+        <p class="field-hint">Stored on the engine's server only, never shown again once saved. This alone does not enable real-money trading — that still requires a separate server-side confirmation (see docs).</p>
+        <div class="settings-actions">
+          <button class="btn-primary" id="kalshi-creds-save">Save credentials</button>
+        </div>
+      </div>
+
+      <div class="bot-section">
+        <h3>Backtest</h3>
+        <p class="settings-hint">Replays the engine's own indicator logic against historical price data (order-book signals excluded — no historical order-book data exists). Shows directional accuracy plus an illustrative edge-over-a-coin-flip figure — not a real profit projection, since it assumes even-money odds rather than Kalshi's actual historical prices.</p>
+        <div class="backtest-controls">
+          <label>Asset
+            <select id="backtest-symbol">
+              <option value="BTC">BTC</option>
+              <option value="XRP">XRP</option>
+              <option value="ETH">ETH</option>
+              <option value="SOL">SOL</option>
+              <option value="BNB">BNB</option>
+              <option value="DOGE">DOGE</option>
+              <option value="ZEC">ZEC</option>
+            </select>
+          </label>
+          <div class="backtest-days" role="group" aria-label="Backtest range">
+            <button class="btn-secondary backtest-day-btn" type="button" data-hours="24">1 day</button>
+            <button class="btn-secondary backtest-day-btn" type="button" data-hours="48">2 days</button>
+            <button class="btn-secondary backtest-day-btn" type="button" data-hours="72">3 days</button>
+          </div>
+          <input id="backtest-hours" type="hidden" value="24" />
+        </div>
+        <div id="backtest-results"></div>
+      </div>
+
+      <div class="bot-section">
+        <h3>Calibration (real trade outcomes by probability)</h3>
+        <p class="settings-hint">Tracks every settled trade by the probability the engine gave it at entry, so you can see whether "75%" actually corresponds to winning more often in your own system — rather than guessing. Rule of thumb: ~40-50 trades in a bucket before trusting it at all, 100-200+ for real confidence.</p>
+        <div id="calibration-table"></div>
+        <div class="settings-actions">
+          <button class="btn-secondary" id="bot-reset-paper" type="button">Reset paper history &amp; stats</button>
+        </div>
+      </div>
+
+      <div class="settings-actions">
+        <button class="btn-secondary" id="bot-overlay-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
