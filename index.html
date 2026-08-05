@@ -288,7 +288,7 @@
               <input id="bot-takeprofit" type="range" min="51" max="99" step="1" />
               <span class="slider-value" id="bot-takeprofit-value">—</span>
             </div>
-            <span class="field-hint">Exit when the held side's bid reaches this. In the last 5 minutes: if 0-5 confidence is still high in your favor, hold for settlement instead; if not, exit at breakeven-or-better when available.</span>
+            <span class="field-hint">Exit when the held side's bid reaches this *and* is above your entry (real profit). The bot will not open a trade already at/above this price. In the last 5 minutes: if 0-5 confidence is still high in your favor, hold for settlement instead; if not, exit at breakeven-or-better when available.</span>
           </label>
 
           <label>Stake per trade

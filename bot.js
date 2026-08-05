@@ -790,7 +790,11 @@ class TradingBot {
       heldSideBidCents != null &&
       Number.isFinite(this.config.takeProfitCents) &&
       this.config.takeProfitCents > 0 &&
-      heldSideBidCents >= this.config.takeProfitCents;
+      heldSideBidCents >= this.config.takeProfitCents &&
+      // Must be real profit vs entry — otherwise buying at 90¢ with an 83¢
+      // TP fires "take_profit" immediately at ~flat (90→90).
+      Number.isFinite(trade.entryPriceCents) &&
+      heldSideBidCents > trade.entryPriceCents;
 
     // Breakeven in the last 5 minutes when confidence is NOT high in our
     // favor: lock even-or-better instead of gambling settlement.
@@ -847,6 +851,15 @@ class TradingBot {
     ) {
       this.lastDecision =
         `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: entry is at/under the ${this.config.stopLossCents}¢ stop.`;
+      return;
+    }
+    if (
+      Number.isFinite(this.config.takeProfitCents) &&
+      this.config.takeProfitCents > 0 &&
+      priceCents >= this.config.takeProfitCents
+    ) {
+      this.lastDecision =
+        `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: entry is at/above the ${this.config.takeProfitCents}¢ take-profit.`;
       return;
     }
     // Each Kalshi contract costs `priceCents` cents and pays out $1 if it
@@ -1070,6 +1083,17 @@ class TradingBot {
     ) {
       this.lastDecision =
         `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢, at/under the ${this.config.stopLossCents}¢ stop — skipping (would stop out immediately).`;
+      return null;
+    }
+    // Same trap upside-down: entry already at/above the absolute TP means
+    // the next cycle would "take profit" at ~entry with no real gain.
+    if (
+      Number.isFinite(this.config.takeProfitCents) &&
+      this.config.takeProfitCents > 0 &&
+      priceCents >= this.config.takeProfitCents
+    ) {
+      this.lastDecision =
+        `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢, at/above the ${this.config.takeProfitCents}¢ take-profit — skipping (would exit flat immediately).`;
       return null;
     }
 

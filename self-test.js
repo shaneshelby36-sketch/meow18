@@ -958,6 +958,63 @@ async function testBotTradingFlow() {
     checkEq(stopBot.openTrades.length, 0, 'hard guard blocks open at/under stop');
   }
 
+  // Block entries at/above absolute take-profit (flat "TP" death trap)
+  {
+    const tpBot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-RICH',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(Date.now() + 12 * 60 * 1000).toISOString(),
+        // YES mid ~91 → engine UP 98 → buy YES @ 92 ask, above TP 83
+        yes_bid: 90,
+        yes_ask: 92,
+        no_bid: 8,
+        no_ask: 10,
+      }),
+      {
+        symbol: 'ETH',
+        edgeThresholdPct: 1,
+        minConfidence: 50,
+        stopLossCents: 35,
+        takeProfitCents: 83,
+        stakeDollars: 10,
+      }
+    );
+    const richPreds = {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: {
+          w5: win(98, 90),
+          w10: win(95, 85),
+          w15: win(92, 80),
+        },
+      },
+    };
+    const richOpp = await tpBot._evaluateSymbolForEdge('ETH', richPreds);
+    checkEq(richOpp, null, 'skips YES @ 92¢ when take-profit is 83¢');
+    check(/take-profit|take profit/i.test(tpBot.lastDecision || ''), 'decision mentions take-profit ceiling');
+
+    // Already-open rich entry: bid at/above TP but not above entry → no flat TP
+    const flatBot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        yes_bid: 90,
+        no_bid: 10,
+      }),
+      { takeProfitCents: 83 }
+    );
+    const flatTrade = openTrade(flatBot, {
+      side: 'yes',
+      entryPriceCents: 90,
+      windowCloseTime: Date.now() + 10 * 60 * 1000,
+    });
+    await flatBot._manageOpenTrade(flatTrade, predictions(3010));
+    checkEq(flatTrade.status, 'open', 'does not take_profit at flat 90→90');
+  }
+
   // Expired markets skipped
   const expiredClient = mockClient(null, {
     openMarkets: [
