@@ -1323,6 +1323,28 @@ function renderBacktestResults(data, dayLabel) {
     applyHuntedSettingsToForm(best.settings);
   }
 
+  const lon = t.longevity || {};
+  const longevityVerdict = lon.survivedFullPeriod
+    ? `Survived the full ${lon.simulatedDays != null ? lon.simulatedDays : '—'} day(s) — Available Cash never ran dry.`
+    : lon.broke
+      ? `Available Cash ran dry after ~${lon.daysUntilBroke != null ? lon.daysUntilBroke : '—'} day(s) (${lon.hoursUntilBroke != null ? lon.hoursUntilBroke : '—'}h). Reserved may still hold skimmed profit.`
+      : 'Longevity not available for this run.';
+  const dailyRows = (lon.dailyEquity || [])
+    .map(
+      (d) =>
+        `<div class="backtest-row"><span>Day ${d.day}${d.broke ? ' · dry' : ''}</span><span>${formatMoneyFromCents(d.totalEquityCents)} equity · ${formatMoneyFromCents(d.availableCashCents)} avail · ${d.tradesSoFar} trades</span></div>`
+    )
+    .join('');
+  const longevityBlock = `
+    <div class="capital-ledger backtest-ledger">
+      <div class="capital-ledger-title">Bankroll longevity (continuous ${dayLabel})</div>
+      <p class="backtest-settings-line">${longevityVerdict}</p>
+      <div class="capital-row"><span>Simulated runtime</span><span>${lon.simulatedHours != null ? lon.simulatedHours + 'h' : '—'} (${lon.simulatedDays != null ? lon.simulatedDays : '—'} days)</span></div>
+      <div class="capital-row"><span>Days survived</span><span>${lon.daysSurvived != null ? lon.daysSurvived : '—'}</span></div>
+      <div class="capital-row"><span>Ran dry?</span><span class="${lon.broke ? 'chip-negative' : 'chip-positive'}">${lon.broke ? 'Yes — Available empty' : 'No'}</span></div>
+      ${dailyRows ? `<div class="backtest-recent-title">Equity by day</div>${dailyRows}` : ''}
+    </div>`;
+
   const tradingBlock = `
     <div class="capital-ledger backtest-ledger">
       <div class="capital-ledger-title">${data.hunted ? 'Best-hunt' : 'Settings-based'} trading sim (${modeLabel} · ${dayLabel})</div>
@@ -1384,6 +1406,7 @@ function renderBacktestResults(data, dayLabel) {
 
   return `
     ${huntBlock}
+    ${longevityBlock}
     ${tradingBlock}
     ${skipBlock}
     ${recent ? `<div class="backtest-recent-title">Recent simulated trades</div>${recent}` : ''}

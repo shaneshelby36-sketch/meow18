@@ -501,6 +501,9 @@ function testBacktest() {
   check(trading && Number.isFinite(trading.netPnlCents), 'backtestWithSettings netPnlCents');
   check(typeof trading.trades === 'number', 'backtest trades count');
   check(trading.skipCounts && typeof trading.skipCounts === 'object', 'skipCounts present');
+  check(trading.longevity && Number.isFinite(trading.longevity.simulatedHours), 'longevity simulatedHours');
+  check(typeof trading.longevity.survivedFullPeriod === 'boolean', 'longevity survivedFullPeriod');
+  check(Array.isArray(trading.longevity.dailyEquity), 'longevity dailyEquity array');
 
   const hunt = huntBestSettings({ BTC: btc, ETH: eth }, settings, { stepMinutes: 3 });
   check(hunt && hunt.best, 'huntBestSettings returns best');
@@ -688,6 +691,7 @@ async function testBotExits() {
     const trade = openTrade(bot, { side: 'no', windowCloseTime: now + 10 * 60 * 1000 });
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.exitReason, 'stop_loss', 'stop_loss');
+    checkEq(trade.exitPriceCents, 35, 'paper stop fills at configured stop, not worse bid');
   }
 
   // Take profit

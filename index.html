@@ -280,7 +280,7 @@
               <input id="bot-stoploss" type="range" min="1" max="99" step="1" />
               <span class="slider-value" id="bot-stoploss-value">—</span>
             </div>
-            <span class="field-hint">Exit early if the held side's bid falls to this many cents. The bot will not open a new trade at or below this price (cheap fades that would instantly stop out are skipped).</span>
+            <span class="field-hint">Exit early if the held side's bid falls to this many cents. Paper fills at this exact stop; live uses the real bid. The bot will not open a new trade at or below this price.</span>
           </label>
 
           <label>Take-profit
@@ -355,7 +355,7 @@
 
       <div class="bot-section">
         <h3>Backtest</h3>
-        <p class="settings-hint">Uses the settings above. Auto continuously scans all Kalshi cryptos for the best setup (not only at window open). Hunt best searches edge/confidence/stop on its own for higher win rate and profit, then shows the winner.</p>
+        <p class="settings-hint">Uses the settings above. Runs a continuous full-day sim (24h of minute data per day) and reports how long Available Cash lasted before it couldn't fund another stake. Auto scans all Kalshi cryptos. Hunt best searches edge/confidence/stop on its own.</p>
         <div class="backtest-controls">
           <label>Asset
             <select id="backtest-symbol">
@@ -371,8 +371,8 @@
           </label>
           <div class="backtest-days" role="group" aria-label="Backtest range">
             <button class="btn-secondary backtest-day-btn" type="button" data-hours="24">1 day</button>
-            <button class="btn-secondary backtest-day-btn" type="button" data-hours="48">2 days</button>
             <button class="btn-secondary backtest-day-btn" type="button" data-hours="72">3 days</button>
+            <button class="btn-secondary backtest-day-btn" type="button" data-hours="168">7 days</button>
           </div>
           <button class="btn-primary" id="backtest-hunt" type="button">Hunt best</button>
           <input id="backtest-hours" type="hidden" value="24" />

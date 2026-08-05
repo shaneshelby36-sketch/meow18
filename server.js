@@ -481,7 +481,7 @@ app.get("/", (req, res) => {
   const SYMBOL_TO_PRODUCT = { BTC: 'BTC-USD', XRP: 'XRP-USD', ETH: 'ETH-USD', SOL: 'SOL-USD', DOGE: 'DOGE-USD', BNB: 'BNB-USD', ZEC: 'ZEC-USD' };
   // Same set the live AUTO bot can trade on Kalshi (ZEC excluded — no 15m market).
   const AUTO_BACKTEST_SYMBOLS = Object.keys(SERIES_BY_SYMBOL);
-  const MAX_BACKTEST_HOURS = 72;
+  const MAX_BACKTEST_HOURS = 168; // 7 full days of continuous minute data
 
   function parseBacktestSettings(source = {}) {
     // Prefer explicit request settings; fall back to the live bot config so a

@@ -256,6 +256,8 @@ function backtestWithSettings(
 
   const startingCents = Math.round(settings.paperStartingBalanceDollars * 100);
   const entryCents = clamp(Math.round(settings.assumedEntryCents), 1, 99);
+  // Minimum cash to open at least one contract at the assumed entry.
+  const minTradeCostCents = Math.max(entryCents, Math.floor((settings.stakeDollars * 100) / entryCents) * entryCents);
 
   let reserveCents = 0;
   let closedPnlCents = 0;
@@ -270,12 +272,20 @@ function backtestWithSettings(
   };
   const tradesBySymbol = {};
   const confidenceSamples = [];
+  const dailyEquity = [];
+  let brokeAtMs = null;
+  let lastDayBucket = null;
 
   const openExposure = () =>
     openTrades.reduce((sum, t) => sum + t.entryPriceCents * t.contracts, 0);
 
   const availableCash = () =>
     Math.max(0, startingCents + closedPnlCents - reserveCents - openExposure());
+
+  const totalEquityNow = () => availableCash() + openExposure() + reserveCents;
+
+  const simStartMs = timeline.length ? timeline[0] : null;
+  const simEndMs = timeline.length ? timeline[timeline.length - 1] : null;
 
   for (let ti = 0; ti < timeline.length; ti += stepMinutes) {
     const minute = timeline[ti];
@@ -337,6 +347,33 @@ function backtestWithSettings(
         closedAt: minute,
       });
       openTrades.splice(t, 1);
+    }
+
+    // Longevity: first time Available can't fund another stake and nothing is open.
+    if (
+      brokeAtMs == null &&
+      openTrades.length === 0 &&
+      availableCash() < minTradeCostCents
+    ) {
+      brokeAtMs = minute;
+    }
+
+    // One equity snapshot per calendar day of the sim (end-of-day-ish).
+    if (Number.isFinite(simStartMs)) {
+      const dayBucket = Math.floor((minute - simStartMs) / (24 * 60 * 60 * 1000));
+      if (dayBucket !== lastDayBucket) {
+        lastDayBucket = dayBucket;
+        dailyEquity.push({
+          day: dayBucket + 1,
+          at: minute,
+          availableCashCents: availableCash(),
+          reservedProfitCents: reserveCents,
+          openPositionsValueCents: openExposure(),
+          totalEquityCents: totalEquityNow(),
+          tradesSoFar: closedTrades.length,
+          broke: brokeAtMs != null,
+        });
+      }
     }
 
     const bucketStart = Math.floor(minute / FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS;
@@ -544,6 +581,36 @@ function backtestWithSettings(
     ? +(confidenceSamples.reduce((s, c) => s + c, 0) / confidenceSamples.length).toFixed(1)
     : null;
 
+  // Final end-of-sim day snapshot (so a partial last day still shows).
+  if (Number.isFinite(simEndMs) && (dailyEquity.length === 0 || dailyEquity[dailyEquity.length - 1].at !== simEndMs)) {
+    dailyEquity.push({
+      day: dailyEquity.length + 1,
+      at: simEndMs,
+      availableCashCents: available,
+      reservedProfitCents: reserveCents,
+      openPositionsValueCents: openPos,
+      totalEquityCents: totalEquity,
+      tradesSoFar: closedTrades.length,
+      broke: brokeAtMs != null,
+    });
+  }
+
+  const simulatedMs =
+    Number.isFinite(simStartMs) && Number.isFinite(simEndMs) ? Math.max(0, simEndMs - simStartMs) : 0;
+  const simulatedHours = +(simulatedMs / (60 * 60 * 1000)).toFixed(2);
+  const simulatedDays = +(simulatedHours / 24).toFixed(2);
+  const survivedFullPeriod = brokeAtMs == null && available >= minTradeCostCents;
+  const hoursUntilBroke =
+    brokeAtMs != null && Number.isFinite(simStartMs)
+      ? +((brokeAtMs - simStartMs) / (60 * 60 * 1000)).toFixed(2)
+      : null;
+  const daysUntilBroke = hoursUntilBroke != null ? +(hoursUntilBroke / 24).toFixed(2) : null;
+  const daysSurvived = survivedFullPeriod
+    ? simulatedDays
+    : daysUntilBroke != null
+      ? daysUntilBroke
+      : simulatedDays;
+
   return {
     settings,
     mode: autoMode ? 'AUTO' : 'single',
@@ -566,6 +633,17 @@ function backtestWithSettings(
     netPnlCents: netPnl,
     grossClosedPnlCents: closedPnlCents,
     skipCounts,
+    longevity: {
+      simulatedHours,
+      simulatedDays,
+      survivedFullPeriod,
+      broke: brokeAtMs != null,
+      hoursUntilBroke,
+      daysUntilBroke,
+      daysSurvived,
+      minTradeCostCents,
+      dailyEquity,
+    },
     recentTrades: closedTrades.slice(-20).reverse().map((t) => ({
       symbol: t.symbol,
       side: t.side,
@@ -580,7 +658,8 @@ function backtestWithSettings(
       (autoMode
         ? 'AUTO mode: continuously scanned all listed cryptos and traded only the best opportunity that cleared your confidence + edge settings (same ranking idea as live AUTO). '
         : 'Continuously searched for setups during each 15-minute window (not only at the open). ') +
-      'Simulated with your bot settings against historical Coinbase prices. Confidence comes from the live engine’s buildWindowPrediction path. Kalshi quotes are assumed even-money (50¢ entry) because historical Kalshi order books are not available — real fill prices and edges will differ. Order-book signals are also excluded.',
+      'Simulated continuous running time (full 24h days of minute data), not just market open hours. Longevity = how long Available Cash could still fund another stake before going dry. ' +
+      'Kalshi quotes are assumed even-money (50¢ entry) because historical Kalshi order books are not available — real fill prices and edges will differ. Order-book signals are also excluded.',
   };
 }
 

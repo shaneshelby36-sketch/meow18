@@ -832,7 +832,13 @@ class TradingBot {
       heldSideBidCents >= trade.entryPriceCents;
 
     if (heldSideBidCents != null && heldSideBidCents <= this.config.stopLossCents) {
-      await this._closePosition(trade, heldSideBidCents, 'stop_loss');
+      // Trigger on the live bid. Paper books the configured stop (same as
+      // backtest). Live books the real bid — markets don't owe you the stop.
+      const stopFill =
+        this.config.mode === 'paper' && Number.isFinite(this.config.stopLossCents)
+          ? this.config.stopLossCents
+          : heldSideBidCents;
+      await this._closePosition(trade, stopFill, 'stop_loss');
     } else if (strongReversalSignal && heldSideBidCents != null) {
       await this._closePosition(trade, heldSideBidCents, 'reversal_signal');
     } else if (signalFlipped && heldSideBidCents != null) {
