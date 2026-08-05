@@ -16,6 +16,7 @@ const { KalshiClient } = require('./kalshiClient');
 const { TradingBot, SERIES_BY_SYMBOL } = require('./bot');
 const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
 const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir, ARCHIVE_RETENTION_DAYS } = require('./paths');
+const APP_VERSION = require('./package.json').version;
 
 ensureDataDir();
 
@@ -84,9 +85,9 @@ const bot = KALSHI_ENABLED
         symbol: (process.env.KALSHI_SYMBOL || 'BTC').toUpperCase(),
         edgeThresholdPct: parseFloat(process.env.KALSHI_EDGE_THRESHOLD_PCT || '1'),
         minConfidence: parseFloat(process.env.KALSHI_MIN_CONFIDENCE || '55'),
-        stopLossCents: parseInt(process.env.KALSHI_STOP_LOSS_CENTS || '10', 10),
+        stopLossCents: parseInt(process.env.KALSHI_STOP_LOSS_CENTS || '23', 10),
         takeProfitCents: parseInt(process.env.KALSHI_TAKE_PROFIT_CENTS || '15', 10),
-        minEntryCents: parseInt(process.env.KALSHI_MIN_ENTRY_CENTS || '25', 10),
+        minEntryCents: parseInt(process.env.KALSHI_MIN_ENTRY_CENTS || '40', 10),
         stakeDollars: parseFloat(process.env.KALSHI_STAKE_DOLLARS || '10'),
         maxOpenPositions: parseInt(process.env.KALSHI_MAX_OPEN_POSITIONS || '2', 10),
         skimMode: process.env.KALSHI_SKIM_MODE || 'percent',
@@ -334,6 +335,18 @@ async function main() {
   await recompute();
   setInterval(recompute, COMPUTE_INTERVAL_MS);
 
+  // Settlement watchdog: every 2s, force-close any trade past its own
+  // windowCloseTime. Must NOT depend on recomputeInFlight — a hung Coinbase
+  // / Kalshi cycle was letting opens "freeze" into the next 15m session.
+  if (bot) {
+    setInterval(() => {
+      bot.forceSettleOverdue(latestPrediction).catch((err) => {
+        console.error('[bot] settle-watchdog error:', err.message);
+      });
+    }, 2000);
+    console.log('[startup] settle watchdog every 2s (independent of prediction loop)');
+  }
+
   const app = express();
   app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') }));
   app.use(express.json());
@@ -350,6 +363,7 @@ app.get("/", (req, res) => {
     const configPath = dataPath('bot-config.json');
     res.json({
       ok: true,
+      version: APP_VERSION,
       lastComputeError,
       feedStatus: Object.fromEntries(Object.entries(state).map(([sym, s]) => [sym, s.feedStatus])),
       candleCounts: Object.fromEntries(Object.entries(state).map(([sym, s]) => [sym, s.series.candles.length])),
@@ -374,12 +388,14 @@ app.get("/", (req, res) => {
     if (!bot) {
       res.json({
         enabled: false,
+        version: APP_VERSION,
         message: 'Set KALSHI_ENABLED=true to turn on the trading bot (paper mode by default). The engine keeps running on the server either way — the dashboard is only a viewer/control panel.',
       });
       return;
     }
     res.json({
       enabled: true,
+      version: APP_VERSION,
       dashboardIndependent: true,
       ...bot.status(),
     });

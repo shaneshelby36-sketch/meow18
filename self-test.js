@@ -140,9 +140,9 @@ function makeBot(client, config = {}) {
       liveAuthorized: false,
       edgeThresholdPct: 8,
       minConfidence: 55,
-      stopLossCents: 10,
+      stopLossCents: 23,
       takeProfitCents: 15,
-      minEntryCents: 25,
+      minEntryCents: 40,
       stakeDollars: 10,
       maxOpenPositions: 1,
       skimMode: 'off',
@@ -160,9 +160,9 @@ function makeBot(client, config = {}) {
     liveAuthorized: config.liveAuthorized === true,
     edgeThresholdPct: config.edgeThresholdPct ?? 8,
     minConfidence: config.minConfidence ?? 55,
-    stopLossCents: config.stopLossCents ?? 10,
+    stopLossCents: config.stopLossCents ?? 23,
     takeProfitCents: config.takeProfitCents ?? 15,
-    minEntryCents: config.minEntryCents ?? 25,
+    minEntryCents: config.minEntryCents ?? 40,
     minMinutesToOpen: config.minMinutesToOpen ?? 5,
     stakeDollars: config.stakeDollars ?? 10,
     maxOpenPositions: config.maxOpenPositions ?? 1,
@@ -872,6 +872,31 @@ async function testBotExits() {
     });
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.exitReason, 'near_certain', 'near_certain at 97¢');
+  }
+
+  // Watchdog: forceSettleOverdue closes past-deadline opens without waiting on full manage
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'active',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        result: '',
+        floor_strike: 3000,
+        yes_bid: 40,
+        no_bid: 55,
+      })
+    );
+    // Hang getMarket to prove settle still happens via timeout + scratch/strike
+    bot.client.getMarket = () => new Promise(() => {});
+    const trade = openTrade(bot, {
+      side: 'no',
+      floorStrike: 3000,
+      windowCloseTime: now - 2000,
+    });
+    const n = await bot.forceSettleOverdue(predictions(2950));
+    check(n >= 1, 'forceSettleOverdue settled at least one');
+    checkEq(trade.status, 'closed', 'overdue trade closed by watchdog path');
   }
 }
 

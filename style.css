@@ -509,6 +509,12 @@ body[data-view-mode="bot"] .asset-picker {
   color: var(--text-dim);
   padding: 6px 12px 10px;
 }
+.app-version {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
 
 /* ---------- Settings overlay ---------- */
 

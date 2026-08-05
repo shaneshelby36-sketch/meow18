@@ -579,6 +579,12 @@ function setStatus(state, text) {
   label.textContent = text;
 }
 
+function setAppVersion(version) {
+  const el = document.getElementById('app-version');
+  if (!el || !version) return;
+  el.textContent = `v${String(version).replace(/^v/i, '')}`;
+}
+
 function renderUpdatedTime() {
   const el = document.getElementById('updated-text');
   const now = new Date();
@@ -711,24 +717,28 @@ async function refreshBotStatus() {
   const body = document.getElementById('bot-status-body');
   try {
     const healthRes = await fetch(`${engineUrl}/api/health`, { cache: 'no-store' });
-    if (healthRes.ok && persistLine) {
+    if (healthRes.ok) {
       const health = await healthRes.json();
-      if (health.dataDirEphemeral) {
-        persistLine.hidden = false;
-        persistLine.style.color = 'var(--wait)';
-        persistLine.textContent =
-          'Warning: Render disk is ephemeral — Save works until the next restart, then settings reset. Attach a Persistent Disk at /var/data.';
-      } else {
-        persistLine.hidden = false;
-        persistLine.style.color = 'var(--up)';
-        persistLine.textContent = health.configFileExists
-          ? `Settings persist on disk (${health.dataDir}).`
-          : `Durable data dir ready (${health.dataDir}) — save settings once to create the config file.`;
+      setAppVersion(health.version);
+      if (persistLine) {
+        if (health.dataDirEphemeral) {
+          persistLine.hidden = false;
+          persistLine.style.color = 'var(--wait)';
+          persistLine.textContent =
+            'Warning: Render disk is ephemeral — Save works until the next restart, then settings reset. Attach a Persistent Disk at /var/data.';
+        } else {
+          persistLine.hidden = false;
+          persistLine.style.color = 'var(--up)';
+          persistLine.textContent = health.configFileExists
+            ? `Settings persist on disk (${health.dataDir}).`
+            : `Durable data dir ready (${health.dataDir}) — save settings once to create the config file.`;
+        }
       }
     }
 
     const res = await fetch(`${engineUrl}/api/bot/status`, { cache: 'no-store' });
     const data = await res.json();
+    setAppVersion(data.version);
     if (!data.enabled) {
       modeLine.textContent = data.message || 'Bot is not enabled on the engine.';
       body.innerHTML = '';
@@ -747,6 +757,9 @@ async function refreshBotStatus() {
     chips.push(chip('Win rate', data.stats.winRatePct != null ? `${data.stats.winRatePct}%` : '—'));
     chips.push(chip('Current streak', `${data.stats.currentWinStreak} win${data.stats.currentWinStreak === 1 ? '' : 's'}`));
     chips.push(chip('Best streak', `${data.stats.longestWinStreak} win${data.stats.longestWinStreak === 1 ? '' : 's'}`));
+    if (Number(data.overdueOpenCount) > 0) {
+      chips.push(chip('Overdue (force-settling)', data.overdueOpenCount));
+    }
     const capital = data.capital;
     if (capital && data.config.mode === 'live') {
       chips.push(chip('Kalshi available', capital.liveAvailableCents == null ? 'Checking…' : `$${(capital.liveAvailableCents / 100).toFixed(2)}`));

@@ -19,7 +19,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 4;
+const SETTINGS_DEFAULTS_VERSION = 5;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -271,10 +271,10 @@ class TradingBot {
       symbol: 'BTC', // 'BTC' | 'XRP' — which asset the bot is currently trading
       edgeThresholdPct: 1, // minimum probability-point edge vs Kalshi to bother trading
       minConfidence: 55, // engine confidence (0-100) required to act
-      stopLossCents: 10, // exit if held bid falls this many cents below entry
+      stopLossCents: 23, // exit if held bid falls this many cents below entry
       takeProfitCents: 15, // exit if held bid rises this many cents above entry (see final-5 override)
       nearCertainExitCents: 97, // if held bid reaches this, bank it — don't wait on settlement for the last few ¢
-      minEntryCents: 25, // never buy a side cheaper than this — blocks longshot lottery tickets
+      minEntryCents: 40, // never buy a side cheaper than this — blocks longshot lottery tickets
       minMinutesToOpen: 5, // don't open when fewer than this many minutes remain in the window
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
@@ -743,12 +743,66 @@ class TradingBot {
   }
 
   async _getMarketBounded(ticker, timeoutMs = 4000) {
-    return Promise.race([
-      this.client.getMarket(ticker),
-      new Promise((_, reject) => {
-        setTimeout(() => reject(new Error(`getMarket timeout after ${timeoutMs}ms`)), timeoutMs);
-      }),
-    ]);
+    let timer = null;
+    try {
+      return await Promise.race([
+        this.client.getMarket(ticker),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`getMarket timeout after ${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Close any trade whose own window is already over. Safe to call on a
+   * tight timer independent of prediction compute — this is what stops
+   * open positions from "freezing" into the next 15m dashboard session.
+   */
+  async forceSettleOverdue(predictions) {
+    const now = Date.now();
+    let settled = 0;
+    for (const trade of [...this.openTrades]) {
+      if (trade.status !== 'open') continue;
+      const deadline = this._tradeCloseDeadline(trade);
+      const openedAt = Number(trade.openedAt);
+      const due =
+        (Number.isFinite(deadline) && now >= deadline) ||
+        (Number.isFinite(openedAt) && now - openedAt >= 16.5 * 60 * 1000);
+      if (!due) continue;
+
+      console.warn(
+        `[bot] force-settle overdue ${trade.symbol} ${String(trade.side).toUpperCase()} ` +
+          `${trade.ticker} (saved close ${Number.isFinite(deadline) ? new Date(deadline).toISOString() : 'n/a'})`
+      );
+      let market = null;
+      try {
+        market = await this._getMarketBounded(trade.ticker, 1000);
+      } catch (err) {
+        console.warn(`[bot] overdue settle fetch ${trade.ticker}: ${err.message}`);
+      }
+      try {
+        await this._settleClosedWindow(trade, predictions, market);
+        settled += 1;
+      } catch (err) {
+        console.error(`[bot] overdue settle failed ${trade.ticker}:`, err.message);
+        if (trade.status === 'open') {
+          try {
+            await this._closePosition(
+              trade,
+              Number.isFinite(trade.entryPriceCents) ? trade.entryPriceCents : 50,
+              'settled_timeout'
+            );
+            settled += 1;
+          } catch (closeErr) {
+            console.error(`[bot] emergency scratch failed ${trade.ticker}:`, closeErr.message);
+          }
+        }
+      }
+    }
+    return settled;
   }
 
   async _manageOpenTrade(trade, predictions) {
@@ -763,7 +817,7 @@ class TradingBot {
     if (pastSavedClose || tooOld) {
       let market = null;
       try {
-        market = await this._getMarketBounded(trade.ticker, 3500);
+        market = await this._getMarketBounded(trade.ticker, 1000);
       } catch (err) {
         console.warn(`[bot] market fetch for settle ${trade.ticker}: ${err.message}`);
       }
@@ -1341,6 +1395,11 @@ class TradingBot {
 
     const capital = this._capitalStatus();
     const permanentLog = loadTradeLog();
+    const now = Date.now();
+    const overdueOpen = this.openTrades.filter((t) => {
+      const d = this._tradeCloseDeadline(t);
+      return Number.isFinite(d) && now >= d;
+    });
     return {
       mode: this.config.mode,
       isRunning: this.isRunning,
@@ -1349,6 +1408,7 @@ class TradingBot {
       lastError: this.lastError,
       lastDecision: this.lastDecision,
       openTrades: this.openTrades,
+      overdueOpenCount: overdueOpen.length,
       recentTrades: this.ledger.trades.slice(0, 20),
       activityLog: (this.ledger.activityLog || []).slice(0, 40),
       // Permanent history (survives 12h ledger rotation). Newest first.
