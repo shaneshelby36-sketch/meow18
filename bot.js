@@ -100,10 +100,11 @@ function stopRecoveryCentsRequired(config = {}) {
 }
 
 /**
- * After a stop-loss on the same symbol+side, block re-entry until the bid
- * has bounced and the engine still favors that side — avoids immediately
- * rebuying a grind-down and getting stopped again.
- * `lastClosedForSymbol` should be the most recent closed trade for that coin.
+ * After a stop-loss, block same-side entry (on the stopped coin OR any other)
+ * until the *stopped coin's* bid has bounced and the engine still favors that
+ * side — cryptos often follow each other, so jumping to another coin without
+ * that recovery is the same knife-catch. Opposite side is allowed.
+ * `lastClosedForSymbol` should be the stop-loss trade (usually the latest stop).
  */
 function checkPostStopRecovery({
   lastClosedForSymbol,
@@ -112,6 +113,7 @@ function checkPostStopRecovery({
   window,
   recoveryCents,
   symbol = '',
+  forCandidateSymbol = null,
 }) {
   if (!recoveryCents || recoveryCents <= 0) return { ok: true };
   const last = lastClosedForSymbol;
@@ -123,13 +125,18 @@ function checkPostStopRecovery({
 
   const needBid = Math.min(99, exit + recoveryCents);
   const price = Number(priceCents);
+  const stoppedLabel = symbol || last.symbol || '';
+  const otherNote =
+    forCandidateSymbol && forCandidateSymbol !== last.symbol
+      ? ` before same-side entry on ${forCandidateSymbol} too`
+      : ' before same-side re-entry';
+
   if (!Number.isFinite(price) || price < needBid) {
-    const label = symbol ? `${symbol} ` : '';
     return {
       ok: false,
       reason:
-        `Waiting: ${label}${String(side).toUpperCase()} stopped @ ${exit}¢ — need bid ≥ ${needBid}¢ ` +
-        `(+${recoveryCents}¢ bounce) before same-side re-entry (recovery check, not a timer).`,
+        `Waiting: ${stoppedLabel} ${String(side).toUpperCase()} stopped @ ${exit}¢ — need ${stoppedLabel} bid ≥ ${needBid}¢ ` +
+        `(+${recoveryCents}¢ bounce)${otherNote} (recovery check, not a timer).`,
     };
   }
 
@@ -141,18 +148,68 @@ function checkPostStopRecovery({
         ? Number.isFinite(up) && Number.isFinite(down) && up >= down
         : Number.isFinite(up) && Number.isFinite(down) && down >= up;
     if (!favored) {
-      const label = symbol ? `${symbol} ` : '';
       return {
         ok: false,
         reason:
-          `Waiting: ${label}${String(side).toUpperCase()} bid recovered after stop, ` +
-          `but engine no longer favors ${String(side).toUpperCase()} — skipping knife-catch.`,
+          `Waiting: ${stoppedLabel} ${String(side).toUpperCase()} bid recovered after stop, ` +
+          `but engine no longer favors ${String(side).toUpperCase()}` +
+          (forCandidateSymbol && forCandidateSymbol !== last.symbol
+            ? ` — skipping ${forCandidateSymbol} same-side until ${stoppedLabel} thesis recovers.`
+            : ' — skipping knife-catch.'),
       };
     }
   }
 
   return { ok: true };
 }
+
+/**
+ * After a stop-loss, cryptos often cascade together. Before opening the same
+ * side again on ANY coin, check peer short windows — if a majority are still
+ * moving against that side, wait (not a timer). Opposite-side fades are allowed.
+ */
+function checkPostStopPeerCascade({
+  lastStopTrade,
+  candidateSide,
+  predictions,
+  seriesBySymbol,
+  minConfidence = 50,
+}) {
+  if (!lastStopTrade || lastStopTrade.exitReason !== 'stop_loss') return { ok: true };
+  if (!candidateSide || candidateSide !== lastStopTrade.side) return { ok: true };
+  if (!predictions || !seriesBySymbol) return { ok: true };
+
+  const stoppedSym = lastStopTrade.symbol;
+  const peers = Object.keys(seriesBySymbol).filter(
+    (sym) => sym !== stoppedSym && predictions[sym] && predictions[sym].ready
+  );
+  const peered = [];
+  const adverse = [];
+  for (const sym of peers) {
+    const w5 = predictions[sym].windows && predictions[sym].windows.w5;
+    if (!w5) continue;
+    if (Number(w5.confidence) < Number(minConfidence)) continue;
+    peered.push(sym);
+    const against =
+      lastStopTrade.side === 'yes'
+        ? Number(w5.probabilityDown) > Number(w5.probabilityUp)
+        : Number(w5.probabilityUp) > Number(w5.probabilityDown);
+    if (against) adverse.push(sym);
+  }
+  if (peered.length === 0) return { ok: true };
+
+  const need = Math.ceil(peered.length / 2);
+  if (adverse.length >= need) {
+    return {
+      ok: false,
+      reason:
+        `Waiting: after ${stoppedSym} stop, peers still cascading against ${String(lastStopTrade.side).toUpperCase()} ` +
+        `(${adverse.slice(0, 4).join(', ')}${adverse.length > 4 ? '…' : ''}) — cryptos often follow each other.`,
+    };
+  }
+  return { ok: true };
+}
+
 const EDITABLE_STRING_FIELDS = {
   symbol: (v) => (v === 'AUTO' || SERIES_BY_SYMBOL[v] ? v : null),
   skimMode: (v) => (['percent', 'fixed', 'off'].includes(v) ? v : null),
@@ -1229,12 +1286,25 @@ class TradingBot {
     if (this.openTrades.length >= this.config.maxOpenPositions) return;
     if (!predictions) return;
 
+    // After a stop-loss, scan other coins first instead of immediately
+    // rebuying the same one that just stopped (even if it still ranks highest).
+    const preferOtherThan = this._lastStopLossSymbol();
+    const scanAllAfterStop =
+      preferOtherThan != null &&
+      (this.config.symbol === 'AUTO' || preferOtherThan === this.config.symbol);
+
     const opportunity =
-      this.config.symbol === 'AUTO'
-        ? await this._findBestOpportunity(predictions)
+      this.config.symbol === 'AUTO' || scanAllAfterStop
+        ? await this._findBestOpportunity(predictions, { preferOtherThan })
         : await this._evaluateSymbolForEdge(this.config.symbol, predictions);
 
     if (!opportunity) return;
+
+    if (preferOtherThan && opportunity.symbol !== preferOtherThan) {
+      this.lastDecision =
+        `Post-stop: chose ${opportunity.symbol} over recently stopped ${preferOtherThan} ` +
+        `(checking other cryptos first).`;
+    }
 
     await this._openPosition({
       symbol: opportunity.symbol,
@@ -1245,6 +1315,95 @@ class TradingBot {
       closeTime: opportunity.closeTime,
       engineProbability: opportunity.side === 'yes' ? opportunity.window.probabilityUp : opportunity.window.probabilityDown,
       engineConfidence: opportunity.window.confidence,
+    });
+  }
+
+  /** Most recent closed trade if it was a stop-loss; else null. */
+  _lastStopLossTrade() {
+    const last = this.ledger.trades.find((t) => t.status === 'closed');
+    if (last && last.exitReason === 'stop_loss') return last;
+    return null;
+  }
+
+  /** Most recent closed trade's symbol if it was a stop-loss; else null. */
+  _lastStopLossSymbol() {
+    const last = this._lastStopLossTrade();
+    return last && last.symbol ? last.symbol : null;
+  }
+
+  /**
+   * After a stop, require the stopped coin's bid bounce (+ engine favor) before
+   * any same-side entry — including on a different crypto.
+   */
+  async _stoppedCoinRecoveryGate(candidateSymbol, candidateSide, candidatePriceCents, candidateWindow, predictions) {
+    const lastStop = this._lastStopLossTrade();
+    const recoveryCents = stopRecoveryCentsRequired(this.config);
+    if (!lastStop || lastStop.side !== candidateSide || recoveryCents <= 0) {
+      return { ok: true };
+    }
+
+    let priceCents = candidatePriceCents;
+    let window = candidateWindow;
+
+    if (candidateSymbol !== lastStop.symbol) {
+      const seriesTicker = SERIES_BY_SYMBOL[lastStop.symbol];
+      const stoppedPred = predictions && predictions[lastStop.symbol];
+      if (!seriesTicker) return { ok: true };
+      if (!stoppedPred || !stoppedPred.ready) {
+        return {
+          ok: false,
+          reason:
+            `Waiting: after ${lastStop.symbol} stop — need ${lastStop.symbol} prediction ready ` +
+            `before same-side entry on ${candidateSymbol}.`,
+        };
+      }
+      try {
+        const markets = await this.client.getOpenMarkets(seriesTicker, 5);
+        const nowMs = Date.now();
+        const market = (markets || []).find((m) => {
+          const closeMs = m.close_time ? new Date(m.close_time).getTime() : NaN;
+          return Number.isFinite(closeMs) && closeMs > nowMs + 5000;
+        });
+        if (!market) {
+          return {
+            ok: false,
+            reason:
+              `Waiting: after ${lastStop.symbol} stop — no live ${lastStop.symbol} quote for recovery ` +
+              `check before entering ${candidateSymbol}.`,
+          };
+        }
+        const yesBid = Number(market.yes_bid);
+        const yesAsk = Number(market.yes_ask);
+        priceCents = lastStop.side === 'yes' ? yesAsk : 100 - yesBid;
+        if (!Number.isFinite(priceCents)) {
+          return {
+            ok: false,
+            reason:
+              `Waiting: after ${lastStop.symbol} stop — ${lastStop.symbol} ${String(lastStop.side).toUpperCase()} ` +
+              `quote unavailable for recovery check.`,
+          };
+        }
+        const closeTime = new Date(market.close_time).getTime();
+        const minutesRemaining = Math.max(0.1, (closeTime - nowMs) / 60000);
+        window = this._pickWindow(stoppedPred.windows, minutesRemaining) || stoppedPred.windows.w5;
+      } catch (err) {
+        return {
+          ok: false,
+          reason:
+            `Waiting: after ${lastStop.symbol} stop — recovery quote failed (${err.message}) ` +
+            `before entering ${candidateSymbol}.`,
+        };
+      }
+    }
+
+    return checkPostStopRecovery({
+      lastClosedForSymbol: lastStop,
+      side: lastStop.side,
+      priceCents,
+      window,
+      recoveryCents,
+      symbol: lastStop.symbol,
+      forCandidateSymbol: candidateSymbol,
     });
   }
 
@@ -1344,19 +1503,29 @@ class TradingBot {
       return null;
     }
 
-    const lastClosedForSymbol = this.ledger.trades.find(
-      (t) => t.status === 'closed' && t.symbol === symbol
-    );
-    const recoveryCheck = checkPostStopRecovery({
-      lastClosedForSymbol,
+    // Same recovery gate for re-entering the stopped coin OR jumping to another
+    // coin on the same side — the *stopped* coin must bounce first.
+    const recoveryCheck = await this._stoppedCoinRecoveryGate(
+      symbol,
       side,
       priceCents,
       window,
-      recoveryCents: stopRecoveryCentsRequired(this.config),
-      symbol,
-    });
+      predictions
+    );
     if (!recoveryCheck.ok) {
       this.lastDecision = recoveryCheck.reason;
+      return null;
+    }
+
+    const peerCheck = checkPostStopPeerCascade({
+      lastStopTrade: this._lastStopLossTrade(),
+      candidateSide: side,
+      predictions,
+      seriesBySymbol: SERIES_BY_SYMBOL,
+      minConfidence: this.config.minConfidence,
+    });
+    if (!peerCheck.ok) {
+      this.lastDecision = peerCheck.reason;
       return null;
     }
 
@@ -1383,8 +1552,11 @@ class TradingBot {
    * acts on whichever market currently has the strongest, most trustworthy
    * edge across everything it's watching. Symbols that already have an open
    * position are skipped so a second slot diversifies instead of doubling up.
+   *
+   * After a stop-loss, `preferOtherThan` demotes that coin so other cryptos
+   * are tried first; the stopped coin is only chosen if nothing else clears.
    */
-  async _findBestOpportunity(predictions) {
+  async _findBestOpportunity(predictions, { preferOtherThan = null } = {}) {
     const candidates = Object.keys(SERIES_BY_SYMBOL).filter(
       (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
     );
@@ -1393,7 +1565,14 @@ class TradingBot {
     );
     const valid = evaluations.filter(Boolean);
     if (valid.length === 0) return null;
-    valid.sort((a, b) => b.rankScore - a.rankScore);
+    valid.sort((a, b) => {
+      if (preferOtherThan) {
+        const aPen = a.symbol === preferOtherThan ? 1 : 0;
+        const bPen = b.symbol === preferOtherThan ? 1 : 0;
+        if (aPen !== bPen) return aPen - bPen;
+      }
+      return b.rankScore - a.rankScore;
+    });
     return valid[0];
   }
 
@@ -1529,4 +1708,5 @@ module.exports = {
   SERIES_BY_SYMBOL,
   stopRecoveryCentsRequired,
   checkPostStopRecovery,
+  checkPostStopPeerCascade,
 };

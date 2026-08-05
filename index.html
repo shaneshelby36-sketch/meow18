@@ -290,7 +290,7 @@
               <input id="bot-stoprecovery" type="range" min="0" max="25" step="1" />
               <span class="slider-value" id="bot-stoprecovery-value">—</span>
             </div>
-            <span class="field-hint">After a stop-loss, don't rebuy the same coin+side until the bid has bounced this many cents off the stop exit and the engine still favors that side. Not a timer — skips grinding knife-catches. 0 = off. Opposite side is still allowed immediately.</span>
+            <span class="field-hint">After a stop-loss, don't open the same side on that coin <em>or any other coin</em> until the stopped coin's bid has bounced this many cents and the engine still favors that side. Not a timer — skips correlated knife-catches. 0 = off. Opposite side is still allowed immediately.</span>
           </label>
 
           <label>Take-profit (¢ above entry)

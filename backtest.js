@@ -3,7 +3,7 @@
 const { correlation } = require('./indicators');
 const { gatherIndicators, buildWindowPrediction, WINDOWS } = require('./prediction');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
-const { stopRecoveryCentsRequired, checkPostStopRecovery } = require('./bot');
+const { stopRecoveryCentsRequired, checkPostStopRecovery, checkPostStopPeerCascade } = require('./bot');
 
 const LOOKBACK_MIN = 210;
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
@@ -273,6 +273,7 @@ function backtestWithSettings(
     insufficientCash: 0,
     notReady: 0,
     postStopRecovery: 0,
+    postStopPeerCascade: 0,
   };
   const tradesBySymbol = {};
   const confidenceSamples = [];
@@ -414,6 +415,7 @@ function backtestWithSettings(
     const windowDef = WINDOWS.find((w) => w.key === windowKey);
 
     const candidates = [];
+    const predictionBySymbol = {};
     const scanSymbols = tradeSymbols;
 
     for (const symbol of scanSymbols) {
@@ -482,6 +484,9 @@ function backtestWithSettings(
         minute
       );
 
+      // Snapshot for post-stop peer-cascade checks (cryptos often move together).
+      predictionBySymbol[symbol] = { ready: true, windows: { w5: prediction } };
+
       confidenceSamples.push(prediction.confidence);
 
       if (prediction.confidence < settings.minConfidence) {
@@ -496,25 +501,6 @@ function backtestWithSettings(
       }
 
       const side = edge > 0 ? 'yes' : 'no';
-
-      // Same-side post-stop recovery: use spot-implied mark (no historical Kalshi book).
-      const lastClosedForSymbol = [...closedTrades].reverse().find((t) => t.symbol === symbol) || null;
-      const markNow =
-        lastClosedForSymbol && lastClosedForSymbol.exitReason === 'stop_loss'
-          ? estimateMarkCents(side, lastClosedForSymbol.entrySpot, spot)
-          : entryCents;
-      const recoveryCheck = checkPostStopRecovery({
-        lastClosedForSymbol,
-        side,
-        priceCents: markNow,
-        window: prediction,
-        recoveryCents: stopRecoveryCentsRequired(settings),
-        symbol,
-      });
-      if (!recoveryCheck.ok) {
-        skipCounts.postStopRecovery += 1;
-        continue;
-      }
 
       candidates.push({
         symbol,
@@ -533,9 +519,70 @@ function backtestWithSettings(
 
     if (candidates.length === 0) continue;
 
-    // AUTO (and single): take the best-ranked opportunity that clears thresholds.
-    candidates.sort((a, b) => b.rankScore - a.rankScore);
-    const best = candidates[0];
+    // Post-stop: stopped coin must recover before same-side entry on any coin;
+    // also block while peers are still cascading.
+    const lastStopAny = [...closedTrades].reverse().find((t) => t.exitReason === 'stop_loss') || null;
+    const seriesMap = Object.fromEntries(symbols.map((s) => [s, true]));
+    const afterGates = [];
+    for (const c of candidates) {
+      let recoveryPrice = entryCents;
+      let recoveryWindow = predictionBySymbol[c.symbol]
+        ? predictionBySymbol[c.symbol].windows.w5
+        : null;
+      if (lastStopAny && lastStopAny.side === c.side) {
+        const stopIndex = indexes[lastStopAny.symbol];
+        const stopCandle = stopIndex ? spotAt(stopIndex, minute) : null;
+        if (stopCandle && Number.isFinite(lastStopAny.entrySpot)) {
+          recoveryPrice = estimateMarkCents(lastStopAny.side, lastStopAny.entrySpot, stopCandle.close);
+        }
+        const stoppedSnap = predictionBySymbol[lastStopAny.symbol];
+        if (stoppedSnap && stoppedSnap.windows && stoppedSnap.windows.w5) {
+          recoveryWindow = stoppedSnap.windows.w5;
+        }
+      }
+      const recoveryCheck = checkPostStopRecovery({
+        lastClosedForSymbol: lastStopAny,
+        side: c.side,
+        priceCents: recoveryPrice,
+        window: recoveryWindow,
+        recoveryCents: stopRecoveryCentsRequired(settings),
+        symbol: lastStopAny ? lastStopAny.symbol : c.symbol,
+        forCandidateSymbol: c.symbol,
+      });
+      if (!recoveryCheck.ok) {
+        skipCounts.postStopRecovery += 1;
+        continue;
+      }
+
+      const peerCheck = checkPostStopPeerCascade({
+        lastStopTrade: lastStopAny,
+        candidateSide: c.side,
+        predictions: predictionBySymbol,
+        seriesBySymbol: seriesMap,
+        minConfidence: settings.minConfidence,
+      });
+      if (!peerCheck.ok) {
+        skipCounts.postStopPeerCascade += 1;
+        continue;
+      }
+      afterGates.push(c);
+    }
+    if (afterGates.length === 0) continue;
+
+    // After a stop-loss, prefer a different coin before re-entering the stopped one.
+    const lastClosedAny = closedTrades.length ? closedTrades[closedTrades.length - 1] : null;
+    const preferOtherThan =
+      lastClosedAny && lastClosedAny.exitReason === 'stop_loss' ? lastClosedAny.symbol : null;
+
+    afterGates.sort((a, b) => {
+      if (preferOtherThan) {
+        const aPen = a.symbol === preferOtherThan ? 1 : 0;
+        const bPen = b.symbol === preferOtherThan ? 1 : 0;
+        if (aPen !== bPen) return aPen - bPen;
+      }
+      return b.rankScore - a.rankScore;
+    });
+    const best = afterGates[0];
 
     const lastClosed = closedTrades.length ? closedTrades[closedTrades.length - 1] : null;
     const stakeDollars = computeNextStake(settings, lastClosed);

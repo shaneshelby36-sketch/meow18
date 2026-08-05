@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, checkPostStopRecovery } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, checkPostStopRecovery, checkPostStopPeerCascade } = require('./bot');
 const { KalshiClient, normalizeMarketPrices, priceInCents } = require('./kalshiClient');
 
 const ONLINE = process.env.ONLINE === '1' || process.env.ONLINE === 'true';
@@ -1167,6 +1167,7 @@ async function testBotTradingFlow() {
         side: 'yes',
         exitPriceCents: 40,
         entryPriceCents: 55,
+        symbol: 'ETH',
       },
       side: 'yes',
       priceCents: 49,
@@ -1175,6 +1176,24 @@ async function testBotTradingFlow() {
       symbol: 'ETH',
     });
     check(recovered.ok, 'allows same-side after bounce + engine favor');
+
+    const crossBlocked = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 40,
+        entryPriceCents: 55,
+        symbol: 'ETH',
+      },
+      side: 'yes',
+      priceCents: 42,
+      window: { probabilityUp: 62, probabilityDown: 38 },
+      recoveryCents: 8,
+      symbol: 'ETH',
+      forCandidateSymbol: 'BTC',
+    });
+    check(!crossBlocked.ok, 'same recovery blocks other-coin same-side until stopped coin bounces');
+    check(/BTC/i.test(crossBlocked.reason || ''), 'cross-coin block mentions the candidate');
 
     const noFavor = checkPostStopRecovery({
       lastClosedForSymbol: {
@@ -1334,6 +1353,113 @@ async function testBotTradingFlow() {
   };
   const best = await autoBot._findBestOpportunity(multi);
   check(best && best.symbol === 'ETH', 'AUTO ranks stronger ETH edge first');
+
+  // After stop on ETH, prefer another crypto even if ETH still ranks highest
+  autoBot.config.stopRecoveryCents = 0;
+  autoBot.ledger.trades = [
+    {
+      status: 'closed',
+      symbol: 'ETH',
+      side: 'yes',
+      exitReason: 'stop_loss',
+      exitPriceCents: 30,
+      entryPriceCents: 50,
+      pnlCents: -200,
+    },
+  ];
+  checkEq(autoBot._lastStopLossSymbol(), 'ETH', 'last stop symbol is ETH');
+  const afterStop = await autoBot._findBestOpportunity(multi, { preferOtherThan: 'ETH' });
+  check(afterStop && afterStop.symbol === 'BTC', 'after ETH stop, prefers other crypto (BTC) first');
+
+  // Cross-coin: same recovery must pass on the *stopped* coin before entering another
+  {
+    const crossClient = {
+      hasCredentials: false,
+      async getOpenMarkets(series) {
+        const close = new Date(Date.now() + 12 * 60 * 1000).toISOString();
+        if (series.includes('ETH')) {
+          return [{ ticker: 'ETH', close_time: close, floor_strike: 3000, yes_bid: 44, yes_ask: 46, no_bid: 54, no_ask: 56 }];
+        }
+        if (series.includes('BTC')) {
+          return [{ ticker: 'BTC', close_time: close, floor_strike: 60000, yes_bid: 48, yes_ask: 50, no_bid: 50, no_ask: 52 }];
+        }
+        return [];
+      },
+      async getMarket() {
+        return null;
+      },
+      async createOrder() {
+        throw new Error('no');
+      },
+    };
+    const crossBot = makeBot(crossClient, {
+      symbol: 'AUTO',
+      minConfidence: 50,
+      edgeThresholdPct: 5,
+      stopRecoveryCents: 8,
+      minEntryCents: 20,
+    });
+    crossBot.ledger.trades = [
+      {
+        status: 'closed',
+        symbol: 'ETH',
+        side: 'yes',
+        exitReason: 'stop_loss',
+        exitPriceCents: 45,
+        entryPriceCents: 60,
+        pnlCents: -150,
+      },
+    ];
+    const crossPreds = {
+      ETH: { ready: true, price: 3000, windows: { w5: win(70, 80), w10: win(68, 75), w15: win(65, 70) } },
+      BTC: { ready: true, price: 60000, windows: { w5: win(70, 80), w10: win(68, 75), w15: win(65, 70) } },
+    };
+    // ETH ask 46 < 45+8=53 → BTC same-side must wait on ETH recovery
+    const blockedOther = await crossBot._evaluateSymbolForEdge('BTC', crossPreds);
+    checkEq(blockedOther, null, 'blocks other-coin same-side until stopped coin recovers');
+    check(/ETH|bounce|recovery|stopped/i.test(crossBot.lastDecision || ''), 'decision cites stopped-coin recovery');
+  }
+
+  // Peer cascade: after YES stop, block same-side on other coins while peers still dump
+  {
+    const cascade = checkPostStopPeerCascade({
+      lastStopTrade: { exitReason: 'stop_loss', symbol: 'BTC', side: 'yes' },
+      candidateSide: 'yes',
+      predictions: {
+        BTC: { ready: true, windows: { w5: { probabilityUp: 40, probabilityDown: 60, confidence: 70 } } },
+        ETH: { ready: true, windows: { w5: { probabilityUp: 35, probabilityDown: 65, confidence: 70 } } },
+        SOL: { ready: true, windows: { w5: { probabilityUp: 38, probabilityDown: 62, confidence: 70 } } },
+      },
+      seriesBySymbol: { BTC: 1, ETH: 1, SOL: 1 },
+      minConfidence: 50,
+    });
+    check(!cascade.ok, 'peer cascade blocks same-side while peers dump');
+    check(/cascad|follow/i.test(cascade.reason || ''), 'cascade reason mentions peers');
+
+    const fade = checkPostStopPeerCascade({
+      lastStopTrade: { exitReason: 'stop_loss', symbol: 'BTC', side: 'yes' },
+      candidateSide: 'no',
+      predictions: {
+        BTC: { ready: true, windows: { w5: { probabilityUp: 40, probabilityDown: 60, confidence: 70 } } },
+        ETH: { ready: true, windows: { w5: { probabilityUp: 35, probabilityDown: 65, confidence: 70 } } },
+      },
+      seriesBySymbol: { BTC: 1, ETH: 1 },
+      minConfidence: 50,
+    });
+    check(fade.ok, 'peer cascade allows opposite-side fade during dump');
+
+    const calm = checkPostStopPeerCascade({
+      lastStopTrade: { exitReason: 'stop_loss', symbol: 'BTC', side: 'yes' },
+      candidateSide: 'yes',
+      predictions: {
+        BTC: { ready: true, windows: { w5: { probabilityUp: 55, probabilityDown: 45, confidence: 70 } } },
+        ETH: { ready: true, windows: { w5: { probabilityUp: 58, probabilityDown: 42, confidence: 70 } } },
+      },
+      seriesBySymbol: { BTC: 1, ETH: 1 },
+      minConfidence: 50,
+    });
+    check(calm.ok, 'peer cascade clears when peers are no longer dumping');
+  }
 
   // Staking halve-after-win
   const stakeBot = makeBot(mockClient({}), { stakeDollars: 10, stakingStrategy: 'halve-after-win' });
