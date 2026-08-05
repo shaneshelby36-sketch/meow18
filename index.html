@@ -26,6 +26,7 @@
       <div class="brand">
         <span class="brand-mark">◈</span>
         <span class="brand-name">CryptoPredict</span>
+        <span class="app-version" id="app-version" title="Deploy version">v…</span>
       </div>
       <div class="topbar-right">
         <div class="uptime-pill" id="uptime-pill">
@@ -70,7 +71,7 @@
     </main>
 
     <footer class="footer-note">
-      <span class="app-version" id="app-version" title="Deploy version">v…</span>
+      <span class="app-version" data-app-version title="Deploy version">v…</span>
       · Heuristic technical-indicator model — not financial advice. Predictions and the bot keep running on the server even when no page is open.
     </footer>
   </div>
@@ -219,7 +220,7 @@
 
   <div id="bot-overlay" class="overlay hidden">
     <div class="settings-card bot-card">
-      <h2>Trading Bot</h2>
+      <h2>Trading Bot <span class="app-version" data-app-version title="Deploy version">v…</span></h2>
       <p class="settings-hint" id="bot-mode-line">Checking status…</p>
       <p class="settings-hint" id="bot-persist-line" hidden></p>
 
@@ -282,6 +283,14 @@
               <span class="slider-value" id="bot-stoploss-value">—</span>
             </div>
             <span class="field-hint">Exit if the held side's bid drops this many cents from your entry (e.g. entry 55¢, stop 10 → exit near 45¢). Caps a loser before a full 0¢ settlement. Paper fills at that level; live uses the real bid.</span>
+          </label>
+
+          <label>Post-stop recovery (¢ bounce)
+            <div class="slider-row">
+              <input id="bot-stoprecovery" type="range" min="0" max="25" step="1" />
+              <span class="slider-value" id="bot-stoprecovery-value">—</span>
+            </div>
+            <span class="field-hint">After a stop-loss, don't rebuy the same coin+side until the bid has bounced this many cents off the stop exit and the engine still favors that side. Not a timer — skips grinding knife-catches. 0 = off. Opposite side is still allowed immediately.</span>
           </label>
 
           <label>Take-profit (¢ above entry)

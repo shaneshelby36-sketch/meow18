@@ -79,12 +79,80 @@ const EDITABLE_NUMERIC_FIELDS = [
   'nearCertainExitCents',
   'minEntryCents',
   'minMinutesToOpen',
+  'stopRecoveryCents',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
   'skimFixedDollars',
   'paperStartingBalanceDollars',
 ];
+
+/**
+ * Cents the held-side bid must bounce above the stop-exit before same-side
+ * re-entry. 0 disables the gate. Unset/invalid → ~40% of the stop distance
+ * (min 5¢) — a recovery check, not a timer.
+ */
+function stopRecoveryCentsRequired(config = {}) {
+  const configured = Number(config.stopRecoveryCents);
+  if (Number.isFinite(configured) && configured <= 0) return 0;
+  if (Number.isFinite(configured) && configured > 0) return Math.round(configured);
+  return Math.max(5, Math.round((Number(config.stopLossCents) || 10) * 0.4));
+}
+
+/**
+ * After a stop-loss on the same symbol+side, block re-entry until the bid
+ * has bounced and the engine still favors that side — avoids immediately
+ * rebuying a grind-down and getting stopped again.
+ * `lastClosedForSymbol` should be the most recent closed trade for that coin.
+ */
+function checkPostStopRecovery({
+  lastClosedForSymbol,
+  side,
+  priceCents,
+  window,
+  recoveryCents,
+  symbol = '',
+}) {
+  if (!recoveryCents || recoveryCents <= 0) return { ok: true };
+  const last = lastClosedForSymbol;
+  if (!last || last.exitReason !== 'stop_loss' || last.side !== side) {
+    return { ok: true };
+  }
+  const exit = Number(last.exitPriceCents);
+  if (!Number.isFinite(exit)) return { ok: true };
+
+  const needBid = Math.min(99, exit + recoveryCents);
+  const price = Number(priceCents);
+  if (!Number.isFinite(price) || price < needBid) {
+    const label = symbol ? `${symbol} ` : '';
+    return {
+      ok: false,
+      reason:
+        `Waiting: ${label}${String(side).toUpperCase()} stopped @ ${exit}¢ — need bid ≥ ${needBid}¢ ` +
+        `(+${recoveryCents}¢ bounce) before same-side re-entry (recovery check, not a timer).`,
+    };
+  }
+
+  if (window) {
+    const up = Number(window.probabilityUp);
+    const down = Number(window.probabilityDown);
+    const favored =
+      side === 'yes'
+        ? Number.isFinite(up) && Number.isFinite(down) && up >= down
+        : Number.isFinite(up) && Number.isFinite(down) && down >= up;
+    if (!favored) {
+      const label = symbol ? `${symbol} ` : '';
+      return {
+        ok: false,
+        reason:
+          `Waiting: ${label}${String(side).toUpperCase()} bid recovered after stop, ` +
+          `but engine no longer favors ${String(side).toUpperCase()} — skipping knife-catch.`,
+      };
+    }
+  }
+
+  return { ok: true };
+}
 const EDITABLE_STRING_FIELDS = {
   symbol: (v) => (v === 'AUTO' || SERIES_BY_SYMBOL[v] ? v : null),
   skimMode: (v) => (['percent', 'fixed', 'off'].includes(v) ? v : null),
@@ -276,6 +344,9 @@ class TradingBot {
       nearCertainExitCents: 97, // if held bid reaches this, bank it — don't wait on settlement for the last few ¢
       minEntryCents: 40, // never buy a side cheaper than this — blocks longshot lottery tickets
       minMinutesToOpen: 5, // don't open when fewer than this many minutes remain in the window
+      // After stop-loss: require this many ¢ of bid bounce before same-side re-entry (0 = off).
+      // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
+      stopRecoveryCents: 8,
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -1273,6 +1344,22 @@ class TradingBot {
       return null;
     }
 
+    const lastClosedForSymbol = this.ledger.trades.find(
+      (t) => t.status === 'closed' && t.symbol === symbol
+    );
+    const recoveryCheck = checkPostStopRecovery({
+      lastClosedForSymbol,
+      side,
+      priceCents,
+      window,
+      recoveryCents: stopRecoveryCentsRequired(this.config),
+      symbol,
+    });
+    if (!recoveryCheck.ok) {
+      this.lastDecision = recoveryCheck.reason;
+      return null;
+    }
+
     return {
       symbol,
       market,
@@ -1437,4 +1524,9 @@ class TradingBot {
   }
 }
 
-module.exports = { TradingBot, SERIES_BY_SYMBOL };
+module.exports = {
+  TradingBot,
+  SERIES_BY_SYMBOL,
+  stopRecoveryCentsRequired,
+  checkPostStopRecovery,
+};

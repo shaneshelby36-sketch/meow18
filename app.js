@@ -580,9 +580,11 @@ function setStatus(state, text) {
 }
 
 function setAppVersion(version) {
-  const el = document.getElementById('app-version');
-  if (!el || !version) return;
-  el.textContent = `v${String(version).replace(/^v/i, '')}`;
+  if (!version) return;
+  const text = `v${String(version).replace(/^v/i, '')}`;
+  document.querySelectorAll('#app-version, [data-app-version], .app-version').forEach((el) => {
+    el.textContent = text;
+  });
 }
 
 function renderUpdatedTime() {
@@ -1081,6 +1083,7 @@ const SLIDER_UNITS = {
   'bot-edge': (v) => `${(+v).toFixed(1)}%`,
   'bot-confidence': (v) => `${Math.round(v)}%`,
   'bot-stoploss': (v) => `−${Math.round(v)}¢`,
+  'bot-stoprecovery': (v) => (Number(v) <= 0 ? 'off' : `+${Math.round(v)}¢`),
   'bot-takeprofit': (v) => `+${Math.round(v)}¢`,
   'bot-minentries': (v) => `${Math.round(v)}¢`,
   'bot-stake': (v) => `$${Math.round(v)}`,
@@ -1111,7 +1114,7 @@ function formatSkimLabel(config) {
 }
 
 function wireSliderDisplays() {
-  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-minentries', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach((id) => {
+  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-stoprecovery', 'bot-takeprofit', 'bot-minentries', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach((id) => {
     const input = document.getElementById(id);
     if (input) input.addEventListener('input', () => updateSliderDisplay(id));
   });
@@ -1146,6 +1149,7 @@ function wireBotConfigAutoSave() {
     'bot-edge',
     'bot-confidence',
     'bot-stoploss',
+    'bot-stoprecovery',
     'bot-takeprofit',
     'bot-minentries',
     'bot-stake',
@@ -1178,6 +1182,8 @@ async function loadBotConfigIntoForm() {
     document.getElementById('bot-edge').value = c.edgeThresholdPct;
     document.getElementById('bot-confidence').value = c.minConfidence;
     document.getElementById('bot-stoploss').value = c.stopLossCents;
+    const stopRecEl = document.getElementById('bot-stoprecovery');
+    if (stopRecEl) stopRecEl.value = c.stopRecoveryCents != null ? c.stopRecoveryCents : 8;
     document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 15;
     document.getElementById('bot-minentries').value = c.minEntryCents != null ? c.minEntryCents : 25;
     document.getElementById('bot-stake').value = c.stakeDollars;
@@ -1185,7 +1191,7 @@ async function loadBotConfigIntoForm() {
     document.getElementById('bot-paper-balance').value = c.paperStartingBalanceDollars;
     document.getElementById('bot-skim-mode').value = c.skimMode;
     document.getElementById('bot-skim-amount').value = c.skimMode === 'percent' ? c.skimPercent : c.skimFixedDollars;
-    ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-minentries', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach(updateSliderDisplay);
+    ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-stoprecovery', 'bot-takeprofit', 'bot-minentries', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach(updateSliderDisplay);
     updateSkimSliderDisplay();
   } catch {
     // Bot likely disabled or engine unreachable — form just stays blank.
@@ -1204,6 +1210,7 @@ async function saveBotConfig(opts = {}) {
     edgeThresholdPct: parseFloat(document.getElementById('bot-edge').value),
     minConfidence: parseFloat(document.getElementById('bot-confidence').value),
     stopLossCents: parseFloat(document.getElementById('bot-stoploss').value),
+    stopRecoveryCents: parseFloat(document.getElementById('bot-stoprecovery').value),
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
@@ -1278,6 +1285,7 @@ function readBacktestSettingsFromForm() {
     edgeThresholdPct: parseFloat(document.getElementById('bot-edge').value),
     minConfidence: parseFloat(document.getElementById('bot-confidence').value),
     stopLossCents: parseFloat(document.getElementById('bot-stoploss').value),
+    stopRecoveryCents: parseFloat(document.getElementById('bot-stoprecovery').value),
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
@@ -1297,9 +1305,13 @@ function applyHuntedSettingsToForm(settings) {
   if (settings.edgeThresholdPct != null) document.getElementById('bot-edge').value = settings.edgeThresholdPct;
   if (settings.minConfidence != null) document.getElementById('bot-confidence').value = settings.minConfidence;
   if (settings.stopLossCents != null) document.getElementById('bot-stoploss').value = settings.stopLossCents;
+  if (settings.stopRecoveryCents != null) {
+    const el = document.getElementById('bot-stoprecovery');
+    if (el) el.value = settings.stopRecoveryCents;
+  }
   if (settings.takeProfitCents != null) document.getElementById('bot-takeprofit').value = settings.takeProfitCents;
   if (settings.minEntryCents != null) document.getElementById('bot-minentries').value = settings.minEntryCents;
-  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-minentries'].forEach(updateSliderDisplay);
+  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-stoprecovery', 'bot-takeprofit', 'bot-minentries'].forEach(updateSliderDisplay);
 }
 
 function renderBacktestResults(data, dayLabel) {
@@ -1314,7 +1326,7 @@ function renderBacktestResults(data, dayLabel) {
   const pnlClass = (t.netPnlCents || 0) > 0 ? 'chip-positive' : (t.netPnlCents || 0) < 0 ? 'chip-negative' : '';
   const modeLabel = data.mode === 'AUTO' || t.mode === 'AUTO' ? 'AUTO' : data.symbol;
   const scanned = (data.symbolsScanned || t.symbolsScanned || [data.symbol]).join(', ');
-  const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Min entry ${s.minEntryCents != null ? s.minEntryCents + '¢' : '—'} · Stop −${s.stopLossCents}¢ · TP +${s.takeProfitCents != null ? s.takeProfitCents + '¢' : '—'} · Max pos ${s.maxOpenPositions} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
+  const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Min entry ${s.minEntryCents != null ? s.minEntryCents + '¢' : '—'} · Stop −${s.stopLossCents}¢ · Recovery +${s.stopRecoveryCents != null ? s.stopRecoveryCents + '¢' : '—'} · TP +${s.takeProfitCents != null ? s.takeProfitCents + '¢' : '—'} · Max pos ${s.maxOpenPositions} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
   const bySymbol = t.tradesBySymbol
     ? Object.entries(t.tradesBySymbol)
         .sort((a, b) => b[1] - a[1])

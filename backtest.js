@@ -3,6 +3,7 @@
 const { correlation } = require('./indicators');
 const { gatherIndicators, buildWindowPrediction, WINDOWS } = require('./prediction');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
+const { stopRecoveryCentsRequired, checkPostStopRecovery } = require('./bot');
 
 const LOOKBACK_MIN = 210;
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
@@ -35,6 +36,7 @@ function normalizeSettings(raw = {}) {
     stopLossCents: Number.isFinite(Number(raw.stopLossCents)) ? Number(raw.stopLossCents) : 23,
     takeProfitCents: Number.isFinite(Number(raw.takeProfitCents)) ? Number(raw.takeProfitCents) : 15,
     minEntryCents: Number.isFinite(Number(raw.minEntryCents)) ? Number(raw.minEntryCents) : 40,
+    stopRecoveryCents: Number.isFinite(Number(raw.stopRecoveryCents)) ? Number(raw.stopRecoveryCents) : 8,
     stakeDollars: Number.isFinite(Number(raw.stakeDollars)) ? Number(raw.stakeDollars) : 10,
     stakingStrategy: raw.stakingStrategy === 'halve-after-win' ? 'halve-after-win' : 'fixed',
     maxOpenPositions: Math.max(1, Math.round(Number(raw.maxOpenPositions) || 2)),
@@ -270,6 +272,7 @@ function backtestWithSettings(
     maxPositions: 0,
     insufficientCash: 0,
     notReady: 0,
+    postStopRecovery: 0,
   };
   const tradesBySymbol = {};
   const confidenceSamples = [];
@@ -493,6 +496,26 @@ function backtestWithSettings(
       }
 
       const side = edge > 0 ? 'yes' : 'no';
+
+      // Same-side post-stop recovery: use spot-implied mark (no historical Kalshi book).
+      const lastClosedForSymbol = [...closedTrades].reverse().find((t) => t.symbol === symbol) || null;
+      const markNow =
+        lastClosedForSymbol && lastClosedForSymbol.exitReason === 'stop_loss'
+          ? estimateMarkCents(side, lastClosedForSymbol.entrySpot, spot)
+          : entryCents;
+      const recoveryCheck = checkPostStopRecovery({
+        lastClosedForSymbol,
+        side,
+        priceCents: markNow,
+        window: prediction,
+        recoveryCents: stopRecoveryCentsRequired(settings),
+        symbol,
+      });
+      if (!recoveryCheck.ok) {
+        skipCounts.postStopRecovery += 1;
+        continue;
+      }
+
       candidates.push({
         symbol,
         side,

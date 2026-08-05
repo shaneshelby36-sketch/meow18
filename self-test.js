@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, checkPostStopRecovery } = require('./bot');
 const { KalshiClient, normalizeMarketPrices, priceInCents } = require('./kalshiClient');
 
 const ONLINE = process.env.ONLINE === '1' || process.env.ONLINE === 'true';
@@ -164,6 +164,7 @@ function makeBot(client, config = {}) {
     takeProfitCents: config.takeProfitCents ?? 15,
     minEntryCents: config.minEntryCents ?? 40,
     minMinutesToOpen: config.minMinutesToOpen ?? 5,
+    stopRecoveryCents: config.stopRecoveryCents ?? 8,
     stakeDollars: config.stakeDollars ?? 10,
     maxOpenPositions: config.maxOpenPositions ?? 1,
     skimMode: config.skimMode ?? 'off',
@@ -1121,6 +1122,117 @@ async function testBotTradingFlow() {
     const banned = await banBot._evaluateSymbolForEdge('ETH', fadePreds);
     checkEq(banned, null, 'min entry ban skips ~10¢ NO');
     check(/min entry|longshot/i.test(banBot.lastDecision || ''), 'decision mentions min entry');
+  }
+
+  // Post-stop recovery: same-side blocked until bid bounces (not a timer)
+  {
+    checkEq(stopRecoveryCentsRequired({ stopRecoveryCents: 0 }), 0, 'recovery 0 disables gate');
+    checkEq(stopRecoveryCentsRequired({ stopRecoveryCents: 8 }), 8, 'recovery uses configured cents');
+    check(stopRecoveryCentsRequired({ stopLossCents: 23 }) >= 5, 'auto recovery floors at 5¢');
+
+    const blocked = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 40,
+        entryPriceCents: 55,
+      },
+      side: 'yes',
+      priceCents: 42,
+      window: { probabilityUp: 60, probabilityDown: 40 },
+      recoveryCents: 8,
+      symbol: 'ETH',
+    });
+    check(!blocked.ok, 'blocks same-side when bid has not bounced enough');
+    check(/bounce|recovery|stopped/i.test(blocked.reason || ''), 'block reason mentions recovery');
+
+    const flipped = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 40,
+        entryPriceCents: 55,
+      },
+      side: 'no',
+      priceCents: 42,
+      window: { probabilityUp: 40, probabilityDown: 60 },
+      recoveryCents: 8,
+      symbol: 'ETH',
+    });
+    check(flipped.ok, 'allows opposite side immediately after stop');
+
+    const recovered = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 40,
+        entryPriceCents: 55,
+      },
+      side: 'yes',
+      priceCents: 49,
+      window: { probabilityUp: 62, probabilityDown: 38 },
+      recoveryCents: 8,
+      symbol: 'ETH',
+    });
+    check(recovered.ok, 'allows same-side after bounce + engine favor');
+
+    const noFavor = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 40,
+        entryPriceCents: 55,
+      },
+      side: 'yes',
+      priceCents: 55,
+      window: { probabilityUp: 40, probabilityDown: 60 },
+      recoveryCents: 8,
+      symbol: 'ETH',
+    });
+    check(!noFavor.ok, 'blocks when bid bounced but engine flipped against side');
+
+    const recBot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-REC',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(Date.now() + 12 * 60 * 1000).toISOString(),
+        yes_bid: 48,
+        yes_ask: 50,
+        no_bid: 50,
+        no_ask: 52,
+      }),
+      {
+        symbol: 'ETH',
+        edgeThresholdPct: 1,
+        minConfidence: 50,
+        minEntryCents: 20,
+        stopRecoveryCents: 8,
+        stopLossCents: 15,
+      }
+    );
+    recBot.ledger.trades = [
+      {
+        id: 't1',
+        status: 'closed',
+        symbol: 'ETH',
+        side: 'yes',
+        exitReason: 'stop_loss',
+        exitPriceCents: 45,
+        entryPriceCents: 60,
+        pnlCents: -150,
+      },
+    ];
+    const recPreds = {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: { w5: win(70, 80), w10: win(68, 75), w15: win(65, 70) },
+      },
+    };
+    const blockedOpp = await recBot._evaluateSymbolForEdge('ETH', recPreds);
+    checkEq(blockedOpp, null, 'evaluate blocks YES re-entry before recovery bounce');
+    check(/stopped|bounce|recovery/i.test(recBot.lastDecision || ''), 'decision explains post-stop wait');
   }
 
   // No new entries in the final 5 minutes of a window
