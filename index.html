@@ -275,20 +275,20 @@
             <span class="field-hint">The engine's own trust in its prediction (docked for volatility, conflicting signals, etc.) — must clear this before the bot acts.</span>
           </label>
 
-          <label>Stop-loss
+          <label>Stop-loss (¢ below entry)
             <div class="slider-row">
-              <input id="bot-stoploss" type="range" min="1" max="99" step="1" />
+              <input id="bot-stoploss" type="range" min="1" max="40" step="1" />
               <span class="slider-value" id="bot-stoploss-value">—</span>
             </div>
-            <span class="field-hint">Exit early if the held side's bid falls to this many cents. Paper fills at this exact stop; live uses the real bid. The bot will not open a new trade at or below this price.</span>
+            <span class="field-hint">Exit if the held side's bid drops this many cents from your entry (e.g. entry 55¢, stop 10 → exit near 45¢). Caps a loser before a full 0¢ settlement. Paper fills at that level; live uses the real bid.</span>
           </label>
 
-          <label>Take-profit
+          <label>Take-profit (¢ above entry)
             <div class="slider-row">
-              <input id="bot-takeprofit" type="range" min="51" max="99" step="1" />
+              <input id="bot-takeprofit" type="range" min="1" max="40" step="1" />
               <span class="slider-value" id="bot-takeprofit-value">—</span>
             </div>
-            <span class="field-hint">Exit when the held side's bid reaches this *and* is above your entry (real profit). The bot will not open a trade already at/above this price. In the last 5 minutes: if 0-5 confidence is still high in your favor, hold for settlement instead; if not, exit at breakeven-or-better when available.</span>
+            <span class="field-hint">Exit if the held side's bid rises this many cents above entry (e.g. entry 55¢, TP 15 → exit near 70¢). In the last 5 minutes: if 0-5 confidence is still high in your favor, hold for settlement instead; if not, exit at breakeven-or-better when available.</span>
           </label>
 
           <label>Stake per trade

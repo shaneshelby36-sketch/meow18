@@ -32,8 +32,8 @@ function normalizeSettings(raw = {}) {
   return {
     edgeThresholdPct: Number.isFinite(Number(raw.edgeThresholdPct)) ? Number(raw.edgeThresholdPct) : 1,
     minConfidence: Number.isFinite(Number(raw.minConfidence)) ? Number(raw.minConfidence) : 55,
-    stopLossCents: Number.isFinite(Number(raw.stopLossCents)) ? Number(raw.stopLossCents) : 35,
-    takeProfitCents: Number.isFinite(Number(raw.takeProfitCents)) ? Number(raw.takeProfitCents) : 83,
+    stopLossCents: Number.isFinite(Number(raw.stopLossCents)) ? Number(raw.stopLossCents) : 10,
+    takeProfitCents: Number.isFinite(Number(raw.takeProfitCents)) ? Number(raw.takeProfitCents) : 15,
     stakeDollars: Number.isFinite(Number(raw.stakeDollars)) ? Number(raw.stakeDollars) : 10,
     stakingStrategy: raw.stakingStrategy === 'halve-after-win' ? 'halve-after-win' : 'fixed',
     maxOpenPositions: Math.max(1, Math.round(Number(raw.maxOpenPositions) || 2)),
@@ -312,16 +312,23 @@ function backtestWithSettings(
       let reason = null;
       const mark = estimateMarkCents(trade.side, trade.entrySpot, spot);
 
-      if (mark <= settings.stopLossCents) {
-        exitPrice = settings.stopLossCents;
+      const stopLevel = Math.max(1, trade.entryPriceCents - settings.stopLossCents);
+      const takeProfitLevel =
+        settings.takeProfitCents > 0
+          ? Math.min(99, trade.entryPriceCents + settings.takeProfitCents)
+          : null;
+
+      if (mark <= stopLevel) {
+        exitPrice = stopLevel;
         reason = 'stop_loss';
       } else if (
-        settings.takeProfitCents > 0 &&
-        mark >= settings.takeProfitCents
+        takeProfitLevel != null &&
+        mark >= takeProfitLevel &&
+        mark > trade.entryPriceCents
       ) {
         // Simplified backtest TP (no live confidence override path here —
         // continuous search already filters entries by confidence).
-        exitPrice = settings.takeProfitCents;
+        exitPrice = takeProfitLevel;
         reason = 'take_profit';
       } else if (minute >= trade.closeTime || minute >= trade.settleMinute) {
         const settleCandle = spotAt(tradeIndex, trade.settleMinute) || candle;
@@ -683,9 +690,9 @@ function huntBestSettings(candlesBySymbol, baseSettings = {}, runOptions = {}) {
   const base = normalizeSettings(baseSettings);
   const edgeGrid = [5, 8, 10, 12, 15, 18, 22, 25];
   const confGrid = [50, 55, 60, 65, 70, 75, 80];
-  const stopGrid = [25, 30, 35, 40, 45].includes(base.stopLossCents)
-    ? [base.stopLossCents, 30, 35, 40].filter((v, i, arr) => arr.indexOf(v) === i)
-    : [base.stopLossCents, 30, 35, 40];
+  const stopGrid = [8, 10, 12, 15, 20].includes(base.stopLossCents)
+    ? [base.stopLossCents, 8, 10, 12, 15].filter((v, i, arr) => arr.indexOf(v) === i)
+    : [base.stopLossCents, 8, 10, 12, 15];
 
   const candidates = [];
   const huntOpts = {

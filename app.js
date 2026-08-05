@@ -1067,8 +1067,8 @@ function chip(label, value, colorClass) {
 const SLIDER_UNITS = {
   'bot-edge': (v) => `${(+v).toFixed(1)}%`,
   'bot-confidence': (v) => `${Math.round(v)}%`,
-  'bot-stoploss': (v) => `${Math.round(v)}¢`,
-  'bot-takeprofit': (v) => `${Math.round(v)}¢`,
+  'bot-stoploss': (v) => `−${Math.round(v)}¢`,
+  'bot-takeprofit': (v) => `+${Math.round(v)}¢`,
   'bot-stake': (v) => `$${Math.round(v)}`,
   'bot-maxpos': (v) => `${Math.round(v)}`,
   'bot-paper-balance': (v) => `$${Math.round(v)}`,
@@ -1163,7 +1163,7 @@ async function loadBotConfigIntoForm() {
     document.getElementById('bot-edge').value = c.edgeThresholdPct;
     document.getElementById('bot-confidence').value = c.minConfidence;
     document.getElementById('bot-stoploss').value = c.stopLossCents;
-    document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 83;
+    document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 15;
     document.getElementById('bot-stake').value = c.stakeDollars;
     document.getElementById('bot-maxpos').value = c.maxOpenPositions;
     document.getElementById('bot-paper-balance').value = c.paperStartingBalanceDollars;
@@ -1295,7 +1295,7 @@ function renderBacktestResults(data, dayLabel) {
   const pnlClass = (t.netPnlCents || 0) > 0 ? 'chip-positive' : (t.netPnlCents || 0) < 0 ? 'chip-negative' : '';
   const modeLabel = data.mode === 'AUTO' || t.mode === 'AUTO' ? 'AUTO' : data.symbol;
   const scanned = (data.symbolsScanned || t.symbolsScanned || [data.symbol]).join(', ');
-  const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Stop ${s.stopLossCents}¢ · TP ${s.takeProfitCents != null ? s.takeProfitCents + '¢' : '—'} · Max pos ${s.maxOpenPositions} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
+  const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Stop −${s.stopLossCents}¢ · TP +${s.takeProfitCents != null ? s.takeProfitCents + '¢' : '—'} · Max pos ${s.maxOpenPositions} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
   const bySymbol = t.tradesBySymbol
     ? Object.entries(t.tradesBySymbol)
         .sort((a, b) => b[1] - a[1])
@@ -1309,13 +1309,13 @@ function renderBacktestResults(data, dayLabel) {
     const topRows = (data.hunt.top || [])
       .map(
         (row, i) =>
-          `<div class="backtest-row"><span>#${i + 1} edge ${row.settings.edgeThresholdPct}% · conf ${row.settings.minConfidence}% · stop ${row.settings.stopLossCents}¢</span><span>${row.winRatePct != null ? row.winRatePct + '%' : '—'} WR · ${row.trades} trades · ${formatMoneyFromCents(row.netPnlCents, { signed: true })}</span></div>`
+          `<div class="backtest-row"><span>#${i + 1} edge ${row.settings.edgeThresholdPct}% · conf ${row.settings.minConfidence}% · stop −${row.settings.stopLossCents}¢</span><span>${row.winRatePct != null ? row.winRatePct + '%' : '—'} WR · ${row.trades} trades · ${formatMoneyFromCents(row.netPnlCents, { signed: true })}</span></div>`
       )
       .join('');
     huntBlock = `
       <div class="capital-ledger backtest-ledger">
         <div class="capital-ledger-title">Hunt result — best win rate + profit</div>
-        <p class="backtest-settings-line">Searched ${data.hunt.searched} setting combos. Winner: edge ${best.settings.edgeThresholdPct}% · confidence ${best.settings.minConfidence}% · stop ${best.settings.stopLossCents}¢</p>
+        <p class="backtest-settings-line">Searched ${data.hunt.searched} setting combos. Winner: edge ${best.settings.edgeThresholdPct}% · confidence ${best.settings.minConfidence}% · stop −${best.settings.stopLossCents}¢</p>
         <p class="backtest-settings-line">Those values were applied to the settings sliders above — save settings if you want the live bot to use them.</p>
         <div class="backtest-recent-title">Top combos</div>
         ${topRows}

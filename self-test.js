@@ -140,8 +140,8 @@ function makeBot(client, config = {}) {
       liveAuthorized: false,
       edgeThresholdPct: 8,
       minConfidence: 55,
-      stopLossCents: 35,
-      takeProfitCents: 70,
+      stopLossCents: 10,
+      takeProfitCents: 15,
       stakeDollars: 10,
       maxOpenPositions: 1,
       skimMode: 'off',
@@ -159,8 +159,8 @@ function makeBot(client, config = {}) {
     liveAuthorized: config.liveAuthorized === true,
     edgeThresholdPct: config.edgeThresholdPct ?? 8,
     minConfidence: config.minConfidence ?? 55,
-    stopLossCents: config.stopLossCents ?? 35,
-    takeProfitCents: config.takeProfitCents ?? 70,
+    stopLossCents: config.stopLossCents ?? 10,
+    takeProfitCents: config.takeProfitCents ?? 15,
     stakeDollars: config.stakeDollars ?? 10,
     maxOpenPositions: config.maxOpenPositions ?? 1,
     skimMode: config.skimMode ?? 'off',
@@ -676,7 +676,7 @@ async function testBotExits() {
     checkEq(trade.status, 'closed', 'ISO windowCloseTime settles');
   }
 
-  // Stop loss
+  // Stop loss — relative to entry (entry 50, stop −10 → level 40)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -686,15 +686,19 @@ async function testBotExits() {
         yes_bid: 80,
         no_bid: 20,
       }),
-      { stopLossCents: 35 }
+      { stopLossCents: 10, takeProfitCents: 40 }
     );
-    const trade = openTrade(bot, { side: 'no', windowCloseTime: now + 10 * 60 * 1000 });
+    const trade = openTrade(bot, {
+      side: 'no',
+      entryPriceCents: 50,
+      windowCloseTime: now + 10 * 60 * 1000,
+    });
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.exitReason, 'stop_loss', 'stop_loss');
-    checkEq(trade.exitPriceCents, 35, 'paper stop fills at configured stop, not worse bid');
+    checkEq(trade.exitPriceCents, 40, 'paper stop fills at entry−drop (50−10)');
   }
 
-  // Take profit
+  // Take profit — relative to entry (entry 50, TP +15 → level 65)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -704,11 +708,16 @@ async function testBotExits() {
         yes_bid: 20,
         no_bid: 75,
       }),
-      { takeProfitCents: 70 }
+      { stopLossCents: 40, takeProfitCents: 15 }
     );
-    const trade = openTrade(bot, { side: 'no', windowCloseTime: now + 10 * 60 * 1000 });
+    const trade = openTrade(bot, {
+      side: 'no',
+      entryPriceCents: 50,
+      windowCloseTime: now + 10 * 60 * 1000,
+    });
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.exitReason, 'take_profit', 'take_profit');
+    checkEq(trade.exitPriceCents, 65, 'paper TP fills at entry+rise (50+15)');
   }
 
   // Breakeven in final 5 without confidence hold
@@ -721,7 +730,7 @@ async function testBotExits() {
         yes_bid: 40,
         no_bid: 55,
       }),
-      { minConfidence: 80, takeProfitCents: 90 }
+      { minConfidence: 80, stopLossCents: 40, takeProfitCents: 40 }
     );
     const trade = openTrade(bot, {
       side: 'no',
@@ -745,7 +754,7 @@ async function testBotExits() {
         yes_bid: 45,
         no_bid: 50,
       }),
-      { minConfidence: 55, stopLossCents: 10, takeProfitCents: 99 }
+      { minConfidence: 55, stopLossCents: 40, takeProfitCents: 40 }
     );
     const trade = openTrade(bot, { side: 'no', windowCloseTime: now + 2 * 60 * 1000, entryPriceCents: 50 });
     await bot._manageOpenTrade(trade, predictions(3000, { w5: win(70, 60) })); // UP favored → against NO
@@ -762,7 +771,7 @@ async function testBotExits() {
         yes_bid: 40,
         no_bid: 55,
       }),
-      { stopLossCents: 10, takeProfitCents: 99 }
+      { stopLossCents: 40, takeProfitCents: 40 }
     );
     const trade = openTrade(bot, { side: 'no', windowCloseTime: now + 12 * 60 * 1000 });
     await bot._manageOpenTrade(
@@ -809,9 +818,13 @@ async function testBotExits() {
         yes_bid: 20,
         no_bid: 80,
       }),
-      { takeProfitCents: 70, minConfidence: 55 }
+      { stopLossCents: 40, takeProfitCents: 15, minConfidence: 55 }
     );
-    const trade = openTrade(bot, { side: 'no', windowCloseTime: now + 2 * 60 * 1000 });
+    const trade = openTrade(bot, {
+      side: 'no',
+      entryPriceCents: 50,
+      windowCloseTime: now + 2 * 60 * 1000,
+    });
     await bot._manageOpenTrade(trade, predictions(3000, { w5: win(30, 80) })); // DOWN favored strongly for NO
     checkEq(trade.status, 'open', 'hold through TP when confident');
   }
@@ -967,7 +980,7 @@ async function testBotTradingFlow() {
   });
   checkEq(badBot.openTrades.length, 0, 'rejects already-ending close time');
 
-  // Block entries at/under absolute stop (cheap fade death trap)
+  // Relative stops allow cheap entries (no absolute floor); stop is entry−drop
   {
     const stopBot = makeBot(
       mockClient({
@@ -975,7 +988,6 @@ async function testBotTradingFlow() {
         status: 'open',
         floor_strike: 3000,
         close_time: new Date(Date.now() + 12 * 60 * 1000).toISOString(),
-        // YES mid ~93 → engine UP 70 gives negative edge → would buy NO ~10¢
         yes_bid: 90,
         yes_ask: 96,
         no_bid: 4,
@@ -985,7 +997,8 @@ async function testBotTradingFlow() {
         symbol: 'ETH',
         edgeThresholdPct: 1,
         minConfidence: 50,
-        stopLossCents: 35,
+        stopLossCents: 10,
+        takeProfitCents: 15,
         stakeDollars: 10,
       }
     );
@@ -1001,63 +1014,13 @@ async function testBotTradingFlow() {
       },
     };
     const cheapOpp = await stopBot._evaluateSymbolForEdge('ETH', fadePreds);
-    checkEq(cheapOpp, null, 'skips NO @ ~10¢ when stop is 35¢');
-    check(/stop/i.test(stopBot.lastDecision || ''), 'decision mentions stop floor');
-    await stopBot.runCycle(fadePreds);
-    checkEq(stopBot.openTrades.length, 0, 'runCycle does not open under-stop fade');
-
-    await stopBot._openPosition({
-      symbol: 'ETH',
-      ticker: 'FORCE-CHEAP',
-      side: 'no',
-      priceCents: 7,
-      floorStrike: 3000,
-      closeTime: Date.now() + 600_000,
-      engineProbability: 30,
-      engineConfidence: 70,
-    });
-    checkEq(stopBot.openTrades.length, 0, 'hard guard blocks open at/under stop');
+    check(cheapOpp && cheapOpp.side === 'no', 'relative stop still allows cheap NO fade entry');
+    checkEq(stopBot._stopLevelCents({ entryPriceCents: 10 }), 1, 'cheap entry stop clamps to 1¢');
+    checkEq(stopBot._takeProfitLevelCents({ entryPriceCents: 10 }), 25, 'cheap entry TP is entry+rise');
   }
 
-  // Block entries at/above absolute take-profit (flat "TP" death trap)
+  // Relative TP: flat at entry does not take profit; need entry+rise
   {
-    const tpBot = makeBot(
-      mockClient({
-        ticker: 'KXETH15M-RICH',
-        status: 'open',
-        floor_strike: 3000,
-        close_time: new Date(Date.now() + 12 * 60 * 1000).toISOString(),
-        // YES mid ~91 → engine UP 98 → buy YES @ 92 ask, above TP 83
-        yes_bid: 90,
-        yes_ask: 92,
-        no_bid: 8,
-        no_ask: 10,
-      }),
-      {
-        symbol: 'ETH',
-        edgeThresholdPct: 1,
-        minConfidence: 50,
-        stopLossCents: 35,
-        takeProfitCents: 83,
-        stakeDollars: 10,
-      }
-    );
-    const richPreds = {
-      ETH: {
-        ready: true,
-        price: 3010,
-        windows: {
-          w5: win(98, 90),
-          w10: win(95, 85),
-          w15: win(92, 80),
-        },
-      },
-    };
-    const richOpp = await tpBot._evaluateSymbolForEdge('ETH', richPreds);
-    checkEq(richOpp, null, 'skips YES @ 92¢ when take-profit is 83¢');
-    check(/take-profit|take profit/i.test(tpBot.lastDecision || ''), 'decision mentions take-profit ceiling');
-
-    // Already-open rich entry: bid at/above TP but not above entry → no flat TP
     const flatBot = makeBot(
       mockClient({
         status: 'open',
@@ -1065,7 +1028,7 @@ async function testBotTradingFlow() {
         yes_bid: 90,
         no_bid: 10,
       }),
-      { takeProfitCents: 83 }
+      { stopLossCents: 40, takeProfitCents: 15 }
     );
     const flatTrade = openTrade(flatBot, {
       side: 'yes',
@@ -1073,7 +1036,7 @@ async function testBotTradingFlow() {
       windowCloseTime: Date.now() + 10 * 60 * 1000,
     });
     await flatBot._manageOpenTrade(flatTrade, predictions(3010));
-    checkEq(flatTrade.status, 'open', 'does not take_profit at flat 90→90');
+    checkEq(flatTrade.status, 'open', 'does not take_profit at flat 90→90 (needs +15 → 99)');
   }
 
   // Expired markets skipped

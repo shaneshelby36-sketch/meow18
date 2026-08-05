@@ -18,8 +18,8 @@ const ARCHIVE_DIR = dataPath('archive');
 const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
-// doesn't keep old edge/TP/skim values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 3;
+// doesn't keep old absolute stop/TP values after deploy.
+const SETTINGS_DEFAULTS_VERSION = 4;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -268,8 +268,8 @@ class TradingBot {
       symbol: 'BTC', // 'BTC' | 'XRP' — which asset the bot is currently trading
       edgeThresholdPct: 1, // minimum probability-point edge vs Kalshi to bother trading
       minConfidence: 55, // engine confidence (0-100) required to act
-      stopLossCents: 35, // exit if our held side's price falls to this many cents
-      takeProfitCents: 83, // exit if our held side's bid rises to this many cents (see final-5 override)
+      stopLossCents: 10, // exit if held bid falls this many cents below entry
+      takeProfitCents: 15, // exit if held bid rises this many cents above entry (see final-5 override)
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -813,13 +813,13 @@ class TradingBot {
     const w15AgainstUs = w15 && (heldIsYes ? w15.probabilityDown : w15.probabilityUp) >= REVERSAL_THRESHOLD_PCT;
     const strongReversalSignal = w10AgainstUs && w15AgainstUs;
 
+    const stopLevel = this._stopLevelCents(trade);
+    const takeProfitLevel = this._takeProfitLevelCents(trade);
+
     const takeProfitHit =
       heldSideBidCents != null &&
-      Number.isFinite(this.config.takeProfitCents) &&
-      this.config.takeProfitCents > 0 &&
-      heldSideBidCents >= this.config.takeProfitCents &&
-      // Must be real profit vs entry — otherwise buying at 90¢ with an 83¢
-      // TP fires "take_profit" immediately at ~flat (90→90).
+      takeProfitLevel != null &&
+      heldSideBidCents >= takeProfitLevel &&
       Number.isFinite(trade.entryPriceCents) &&
       heldSideBidCents > trade.entryPriceCents;
 
@@ -831,20 +831,18 @@ class TradingBot {
       heldSideBidCents != null &&
       heldSideBidCents >= trade.entryPriceCents;
 
-    if (heldSideBidCents != null && heldSideBidCents <= this.config.stopLossCents) {
-      // Trigger on the live bid. Paper books the configured stop (same as
-      // backtest). Live books the real bid — markets don't owe you the stop.
-      const stopFill =
-        this.config.mode === 'paper' && Number.isFinite(this.config.stopLossCents)
-          ? this.config.stopLossCents
-          : heldSideBidCents;
+    if (heldSideBidCents != null && stopLevel != null && heldSideBidCents <= stopLevel) {
+      // Trigger on the live bid. Paper books the stop level (entry − drop).
+      // Live books the real bid — markets don't owe you the stop price.
+      const stopFill = this.config.mode === 'paper' ? stopLevel : heldSideBidCents;
       await this._closePosition(trade, stopFill, 'stop_loss');
     } else if (strongReversalSignal && heldSideBidCents != null) {
       await this._closePosition(trade, heldSideBidCents, 'reversal_signal');
     } else if (signalFlipped && heldSideBidCents != null) {
       await this._closePosition(trade, heldSideBidCents, 'signal_flip');
     } else if (takeProfitHit && !holdThroughForConfidence) {
-      await this._closePosition(trade, heldSideBidCents, 'take_profit');
+      const tpFill = this.config.mode === 'paper' ? takeProfitLevel : heldSideBidCents;
+      await this._closePosition(trade, tpFill, 'take_profit');
     } else if (canExitEven) {
       await this._closePosition(trade, heldSideBidCents, 'breakeven');
     }
@@ -877,6 +875,25 @@ class TradingBot {
     }
   }
 
+  /**
+   * Stop / take-profit are relative to this trade's entry:
+   *   stop level = max(1, entry − stopLossCents)
+   *   TP level   = min(99, entry + takeProfitCents)
+   */
+  _stopLevelCents(trade) {
+    const entry = Number(trade.entryPriceCents);
+    const drop = Number(this.config.stopLossCents);
+    if (!Number.isFinite(entry) || entry < 1 || !Number.isFinite(drop) || drop <= 0) return null;
+    return Math.max(1, Math.round(entry - drop));
+  }
+
+  _takeProfitLevelCents(trade) {
+    const entry = Number(trade.entryPriceCents);
+    const rise = Number(this.config.takeProfitCents);
+    if (!Number.isFinite(entry) || entry < 1 || !Number.isFinite(rise) || rise <= 0) return null;
+    return Math.min(99, Math.round(entry + rise));
+  }
+
   _hasOpenOnSymbol(symbol) {
     return this.openTrades.some((t) => t.symbol === symbol);
   }
@@ -902,24 +919,6 @@ class TradingBot {
     // on the same symbol (or ticker) just doubles correlated exposure.
     if (this._hasOpenOnSymbol(symbol) || this._hasOpenOnTicker(ticker)) {
       this.lastDecision = `Skipped ${symbol}: already have an open position on this coin/market.`;
-      return;
-    }
-    if (
-      Number.isFinite(this.config.stopLossCents) &&
-      this.config.stopLossCents > 0 &&
-      priceCents <= this.config.stopLossCents
-    ) {
-      this.lastDecision =
-        `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: entry is at/under the ${this.config.stopLossCents}¢ stop.`;
-      return;
-    }
-    if (
-      Number.isFinite(this.config.takeProfitCents) &&
-      this.config.takeProfitCents > 0 &&
-      priceCents >= this.config.takeProfitCents
-    ) {
-      this.lastDecision =
-        `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: entry is at/above the ${this.config.takeProfitCents}¢ take-profit.`;
       return;
     }
     // Each Kalshi contract costs `priceCents` cents and pays out $1 if it
@@ -1129,29 +1128,6 @@ class TradingBot {
     const priceCents = side === 'yes' ? yesAsk : 100 - yesBid;
     if (!Number.isFinite(priceCents) || priceCents < 1 || priceCents > 99) {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
-      return null;
-    }
-    // Absolute stop is "exit when bid ≤ stopLossCents". Entries already at
-    // or below that floor (cheap fades at 7¢ with a 35¢ stop) are dead on
-    // arrival — skip them instead of buying longshots that auto-stop out.
-    if (
-      Number.isFinite(this.config.stopLossCents) &&
-      this.config.stopLossCents > 0 &&
-      priceCents <= this.config.stopLossCents
-    ) {
-      this.lastDecision =
-        `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢, at/under the ${this.config.stopLossCents}¢ stop — skipping (would stop out immediately).`;
-      return null;
-    }
-    // Same trap upside-down: entry already at/above the absolute TP means
-    // the next cycle would "take profit" at ~entry with no real gain.
-    if (
-      Number.isFinite(this.config.takeProfitCents) &&
-      this.config.takeProfitCents > 0 &&
-      priceCents >= this.config.takeProfitCents
-    ) {
-      this.lastDecision =
-        `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢, at/above the ${this.config.takeProfitCents}¢ take-profit — skipping (would exit flat immediately).`;
       return null;
     }
 
