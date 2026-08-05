@@ -840,6 +840,15 @@ class TradingBot {
       this.lastDecision = `Skipped ${symbol}: already have an open position on this coin/market.`;
       return;
     }
+    if (
+      Number.isFinite(this.config.stopLossCents) &&
+      this.config.stopLossCents > 0 &&
+      priceCents <= this.config.stopLossCents
+    ) {
+      this.lastDecision =
+        `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: entry is at/under the ${this.config.stopLossCents}¢ stop.`;
+      return;
+    }
     // Each Kalshi contract costs `priceCents` cents and pays out $1 if it
     // wins, so buying (stakeDollars * 100 / priceCents) contracts risks
     // approximately stakeDollars. Always at least 1 contract.
@@ -1049,6 +1058,18 @@ class TradingBot {
     const priceCents = side === 'yes' ? yesAsk : 100 - yesBid;
     if (!Number.isFinite(priceCents) || priceCents < 1 || priceCents > 99) {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
+      return null;
+    }
+    // Absolute stop is "exit when bid ≤ stopLossCents". Entries already at
+    // or below that floor (cheap fades at 7¢ with a 35¢ stop) are dead on
+    // arrival — skip them instead of buying longshots that auto-stop out.
+    if (
+      Number.isFinite(this.config.stopLossCents) &&
+      this.config.stopLossCents > 0 &&
+      priceCents <= this.config.stopLossCents
+    ) {
+      this.lastDecision =
+        `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢, at/under the ${this.config.stopLossCents}¢ stop — skipping (would stop out immediately).`;
       return null;
     }
 

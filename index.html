@@ -280,7 +280,7 @@
               <input id="bot-stoploss" type="range" min="1" max="99" step="1" />
               <span class="slider-value" id="bot-stoploss-value">—</span>
             </div>
-            <span class="field-hint">Exit early if the held side's bid falls to this many cents.</span>
+            <span class="field-hint">Exit early if the held side's bid falls to this many cents. The bot will not open a new trade at or below this price (cheap fades that would instantly stop out are skipped).</span>
           </label>
 
           <label>Take-profit

@@ -906,6 +906,58 @@ async function testBotTradingFlow() {
   });
   checkEq(badBot.openTrades.length, 0, 'rejects already-ending close time');
 
+  // Block entries at/under absolute stop (cheap fade death trap)
+  {
+    const stopBot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-CHEAP',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(Date.now() + 12 * 60 * 1000).toISOString(),
+        // YES mid ~93 → engine UP 70 gives negative edge → would buy NO ~10¢
+        yes_bid: 90,
+        yes_ask: 96,
+        no_bid: 4,
+        no_ask: 10,
+      }),
+      {
+        symbol: 'ETH',
+        edgeThresholdPct: 1,
+        minConfidence: 50,
+        stopLossCents: 35,
+        stakeDollars: 10,
+      }
+    );
+    const fadePreds = {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: {
+          w5: win(70, 80),
+          w10: win(68, 75),
+          w15: win(65, 70),
+        },
+      },
+    };
+    const cheapOpp = await stopBot._evaluateSymbolForEdge('ETH', fadePreds);
+    checkEq(cheapOpp, null, 'skips NO @ ~10¢ when stop is 35¢');
+    check(/stop/i.test(stopBot.lastDecision || ''), 'decision mentions stop floor');
+    await stopBot.runCycle(fadePreds);
+    checkEq(stopBot.openTrades.length, 0, 'runCycle does not open under-stop fade');
+
+    await stopBot._openPosition({
+      symbol: 'ETH',
+      ticker: 'FORCE-CHEAP',
+      side: 'no',
+      priceCents: 7,
+      floorStrike: 3000,
+      closeTime: Date.now() + 600_000,
+      engineProbability: 30,
+      engineConfidence: 70,
+    });
+    checkEq(stopBot.openTrades.length, 0, 'hard guard blocks open at/under stop');
+  }
+
   // Expired markets skipped
   const expiredClient = mockClient(null, {
     openMarkets: [
