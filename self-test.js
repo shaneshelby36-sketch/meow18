@@ -803,6 +803,65 @@ async function testBotTradingFlow() {
   await bot.runCycle(preds);
   checkEq(bot.openTrades.length, 1, 'maxOpenPositions blocks second open');
 
+  // One open per coin: max 2 slots must not stack both on ETH
+  {
+    const diversifyClient = {
+      hasCredentials: false,
+      async getOpenMarkets(series) {
+        const close = new Date(Date.now() + 12 * 60 * 1000).toISOString();
+        if (series.includes('ETH')) {
+          return [{ ticker: 'ETH-A', close_time: close, floor_strike: 3000, yes_bid: 40, yes_ask: 42, no_bid: 58, no_ask: 60 }];
+        }
+        if (series.includes('BTC')) {
+          return [{ ticker: 'BTC-A', close_time: close, floor_strike: 60000, yes_bid: 40, yes_ask: 42, no_bid: 58, no_ask: 60 }];
+        }
+        return [];
+      },
+      async getMarket() {
+        return null;
+      },
+      async createOrder() {
+        throw new Error('no');
+      },
+      async getBalance() {
+        return { balance: 0, portfolio_value: 0 };
+      },
+    };
+    const diversifyBot = makeBot(diversifyClient, {
+      symbol: 'AUTO',
+      maxOpenPositions: 2,
+      edgeThresholdPct: 5,
+      minConfidence: 50,
+      stakeDollars: 10,
+      skimMode: 'off',
+    });
+    const multiStrong = {
+      ETH: { ready: true, price: 3010, windows: { w5: win(85, 90), w10: win(80, 85), w15: win(75, 80) } },
+      BTC: { ready: true, price: 60100, windows: { w5: win(80, 85), w10: win(75, 80), w15: win(70, 75) } },
+    };
+    await diversifyBot.runCycle(multiStrong);
+    checkEq(diversifyBot.openTrades.length, 1, 'first AUTO open fills one slot');
+    const firstSym = diversifyBot.openTrades[0].symbol;
+    await diversifyBot.runCycle(multiStrong);
+    checkEq(diversifyBot.openTrades.length, 2, 'second slot opens on a different coin');
+    const symbols = diversifyBot.openTrades.map((t) => t.symbol).sort();
+    checkEq(symbols.join(','), 'BTC,ETH', 'max 2 diversifies across BTC+ETH, not same coin twice');
+    check(!diversifyBot.openTrades.every((t) => t.symbol === firstSym), 'second open is not the same coin as first');
+
+    // Explicit same-symbol stack still blocked even if forced
+    await diversifyBot._openPosition({
+      symbol: firstSym,
+      ticker: `${firstSym}-DUP`,
+      side: 'yes',
+      priceCents: 42,
+      floorStrike: 1,
+      closeTime: Date.now() + 600_000,
+      engineProbability: 70,
+      engineConfidence: 70,
+    });
+    checkEq(diversifyBot.openTrades.length, 2, 'hard guard blocks third open on an occupied coin');
+  }
+
   // Settle and skim (stop entries so a replacement trade isn't opened same cycle)
   const trade = bot.openTrades[0];
   const tradeId = trade.id;

@@ -813,6 +813,14 @@ class TradingBot {
     }
   }
 
+  _hasOpenOnSymbol(symbol) {
+    return this.openTrades.some((t) => t.symbol === symbol);
+  }
+
+  _hasOpenOnTicker(ticker) {
+    return Boolean(ticker) && this.openTrades.some((t) => t.ticker === ticker);
+  }
+
   async _openPosition({ symbol, ticker, side, priceCents, floorStrike, closeTime, engineProbability, engineConfidence }) {
     // A paper trade must obey the same price rules as a live order. Without
     // this guard an empty Kalshi quote could be stored as `null` and then
@@ -824,6 +832,12 @@ class TradingBot {
     const closeAt = Number(closeTime);
     if (!Number.isFinite(closeAt) || closeAt <= Date.now() + 5000) {
       this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: market close time is missing or already ending.`;
+      return;
+    }
+    // Max positions is a concurrency cap across coins — stacking two opens
+    // on the same symbol (or ticker) just doubles correlated exposure.
+    if (this._hasOpenOnSymbol(symbol) || this._hasOpenOnTicker(ticker)) {
+      this.lastDecision = `Skipped ${symbol}: already have an open position on this coin/market.`;
       return;
     }
     // Each Kalshi contract costs `priceCents` cents and pays out $1 if it
@@ -963,6 +977,11 @@ class TradingBot {
    * worth acting on (or the market/prediction data isn't available).
    */
   async _evaluateSymbolForEdge(symbol, predictions) {
+    if (this._hasOpenOnSymbol(symbol)) {
+      this.lastDecision = `Waiting: already holding an open ${symbol} position (one open per coin).`;
+      return null;
+    }
+
     const assetPrediction = predictions[symbol];
     if (!assetPrediction || !assetPrediction.ready) {
       this.lastDecision = `Waiting: ${symbol} prediction data is still seeding.`;
@@ -990,6 +1009,10 @@ class TradingBot {
     }
     if (!market) {
       this.lastDecision = `Waiting: no open Kalshi market found for ${symbol}.`;
+      return null;
+    }
+    if (this._hasOpenOnTicker(market.ticker)) {
+      this.lastDecision = `Waiting: already holding an open position on ${market.ticker}.`;
       return null;
     }
 
@@ -1050,10 +1073,13 @@ class TradingBot {
    * clears both thresholds — so instead of being locked into trading one
    * asset every 15 minutes whether or not it's a good setup, the bot only
    * acts on whichever market currently has the strongest, most trustworthy
-   * edge across everything it's watching.
+   * edge across everything it's watching. Symbols that already have an open
+   * position are skipped so a second slot diversifies instead of doubling up.
    */
   async _findBestOpportunity(predictions) {
-    const candidates = Object.keys(SERIES_BY_SYMBOL).filter((sym) => predictions[sym]);
+    const candidates = Object.keys(SERIES_BY_SYMBOL).filter(
+      (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
+    );
     const evaluations = await Promise.all(
       candidates.map((sym) => this._evaluateSymbolForEdge(sym, predictions))
     );
