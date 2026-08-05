@@ -76,6 +76,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'minConfidence',
   'stopLossCents',
   'takeProfitCents',
+  'minEntryCents',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -270,6 +271,7 @@ class TradingBot {
       minConfidence: 55, // engine confidence (0-100) required to act
       stopLossCents: 10, // exit if held bid falls this many cents below entry
       takeProfitCents: 15, // exit if held bid rises this many cents above entry (see final-5 override)
+      minEntryCents: 25, // never buy a side cheaper than this — blocks longshot lottery tickets
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -921,6 +923,12 @@ class TradingBot {
       this.lastDecision = `Skipped ${symbol}: already have an open position on this coin/market.`;
       return;
     }
+    const minEntry = Number(this.config.minEntryCents);
+    if (Number.isFinite(minEntry) && minEntry > 0 && priceCents < minEntry) {
+      this.lastDecision =
+        `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: below min entry ${minEntry}¢ (longshot ban).`;
+      return;
+    }
     // Each Kalshi contract costs `priceCents` cents and pays out $1 if it
     // wins, so buying (stakeDollars * 100 / priceCents) contracts risks
     // approximately stakeDollars. Always at least 1 contract.
@@ -1128,6 +1136,12 @@ class TradingBot {
     const priceCents = side === 'yes' ? yesAsk : 100 - yesBid;
     if (!Number.isFinite(priceCents) || priceCents < 1 || priceCents > 99) {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
+      return null;
+    }
+    const minEntry = Number(this.config.minEntryCents);
+    if (Number.isFinite(minEntry) && minEntry > 0 && priceCents < minEntry) {
+      this.lastDecision =
+        `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — below min entry ${minEntry}¢ (skipping longshots even if confidence is high).`;
       return null;
     }
 

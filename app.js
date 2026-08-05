@@ -1069,6 +1069,7 @@ const SLIDER_UNITS = {
   'bot-confidence': (v) => `${Math.round(v)}%`,
   'bot-stoploss': (v) => `−${Math.round(v)}¢`,
   'bot-takeprofit': (v) => `+${Math.round(v)}¢`,
+  'bot-minentries': (v) => `${Math.round(v)}¢`,
   'bot-stake': (v) => `$${Math.round(v)}`,
   'bot-maxpos': (v) => `${Math.round(v)}`,
   'bot-paper-balance': (v) => `$${Math.round(v)}`,
@@ -1097,7 +1098,7 @@ function formatSkimLabel(config) {
 }
 
 function wireSliderDisplays() {
-  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach((id) => {
+  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-minentries', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach((id) => {
     const input = document.getElementById(id);
     if (input) input.addEventListener('input', () => updateSliderDisplay(id));
   });
@@ -1133,6 +1134,7 @@ function wireBotConfigAutoSave() {
     'bot-confidence',
     'bot-stoploss',
     'bot-takeprofit',
+    'bot-minentries',
     'bot-stake',
     'bot-maxpos',
     'bot-paper-balance',
@@ -1164,12 +1166,13 @@ async function loadBotConfigIntoForm() {
     document.getElementById('bot-confidence').value = c.minConfidence;
     document.getElementById('bot-stoploss').value = c.stopLossCents;
     document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 15;
+    document.getElementById('bot-minentries').value = c.minEntryCents != null ? c.minEntryCents : 25;
     document.getElementById('bot-stake').value = c.stakeDollars;
     document.getElementById('bot-maxpos').value = c.maxOpenPositions;
     document.getElementById('bot-paper-balance').value = c.paperStartingBalanceDollars;
     document.getElementById('bot-skim-mode').value = c.skimMode;
     document.getElementById('bot-skim-amount').value = c.skimMode === 'percent' ? c.skimPercent : c.skimFixedDollars;
-    ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach(updateSliderDisplay);
+    ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-minentries', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach(updateSliderDisplay);
     updateSkimSliderDisplay();
   } catch {
     // Bot likely disabled or engine unreachable — form just stays blank.
@@ -1189,6 +1192,7 @@ async function saveBotConfig(opts = {}) {
     minConfidence: parseFloat(document.getElementById('bot-confidence').value),
     stopLossCents: parseFloat(document.getElementById('bot-stoploss').value),
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
+    minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),
@@ -1262,6 +1266,7 @@ function readBacktestSettingsFromForm() {
     minConfidence: parseFloat(document.getElementById('bot-confidence').value),
     stopLossCents: parseFloat(document.getElementById('bot-stoploss').value),
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
+    minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),
@@ -1280,7 +1285,8 @@ function applyHuntedSettingsToForm(settings) {
   if (settings.minConfidence != null) document.getElementById('bot-confidence').value = settings.minConfidence;
   if (settings.stopLossCents != null) document.getElementById('bot-stoploss').value = settings.stopLossCents;
   if (settings.takeProfitCents != null) document.getElementById('bot-takeprofit').value = settings.takeProfitCents;
-  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit'].forEach(updateSliderDisplay);
+  if (settings.minEntryCents != null) document.getElementById('bot-minentries').value = settings.minEntryCents;
+  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-minentries'].forEach(updateSliderDisplay);
 }
 
 function renderBacktestResults(data, dayLabel) {
@@ -1295,7 +1301,7 @@ function renderBacktestResults(data, dayLabel) {
   const pnlClass = (t.netPnlCents || 0) > 0 ? 'chip-positive' : (t.netPnlCents || 0) < 0 ? 'chip-negative' : '';
   const modeLabel = data.mode === 'AUTO' || t.mode === 'AUTO' ? 'AUTO' : data.symbol;
   const scanned = (data.symbolsScanned || t.symbolsScanned || [data.symbol]).join(', ');
-  const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Stop −${s.stopLossCents}¢ · TP +${s.takeProfitCents != null ? s.takeProfitCents + '¢' : '—'} · Max pos ${s.maxOpenPositions} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
+  const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Min entry ${s.minEntryCents != null ? s.minEntryCents + '¢' : '—'} · Stop −${s.stopLossCents}¢ · TP +${s.takeProfitCents != null ? s.takeProfitCents + '¢' : '—'} · Max pos ${s.maxOpenPositions} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
   const bySymbol = t.tradesBySymbol
     ? Object.entries(t.tradesBySymbol)
         .sort((a, b) => b[1] - a[1])

@@ -161,6 +161,7 @@ function makeBot(client, config = {}) {
     minConfidence: config.minConfidence ?? 55,
     stopLossCents: config.stopLossCents ?? 10,
     takeProfitCents: config.takeProfitCents ?? 15,
+    minEntryCents: config.minEntryCents ?? 25,
     stakeDollars: config.stakeDollars ?? 10,
     maxOpenPositions: config.maxOpenPositions ?? 1,
     skimMode: config.skimMode ?? 'off',
@@ -999,6 +1000,7 @@ async function testBotTradingFlow() {
         minConfidence: 50,
         stopLossCents: 10,
         takeProfitCents: 15,
+        minEntryCents: 1,
         stakeDollars: 10,
       }
     );
@@ -1017,6 +1019,39 @@ async function testBotTradingFlow() {
     check(cheapOpp && cheapOpp.side === 'no', 'relative stop still allows cheap NO fade entry');
     checkEq(stopBot._stopLevelCents({ entryPriceCents: 10 }), 1, 'cheap entry stop clamps to 1¢');
     checkEq(stopBot._takeProfitLevelCents({ entryPriceCents: 10 }), 25, 'cheap entry TP is entry+rise');
+  }
+
+  // Min entry ban blocks longshots even with high confidence
+  {
+    const banBot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-CHEAP2',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(Date.now() + 12 * 60 * 1000).toISOString(),
+        yes_bid: 90,
+        yes_ask: 96,
+        no_bid: 4,
+        no_ask: 10,
+      }),
+      {
+        symbol: 'ETH',
+        edgeThresholdPct: 1,
+        minConfidence: 50,
+        minEntryCents: 25,
+        stakeDollars: 10,
+      }
+    );
+    const fadePreds = {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: { w5: win(70, 80), w10: win(68, 75), w15: win(65, 70) },
+      },
+    };
+    const banned = await banBot._evaluateSymbolForEdge('ETH', fadePreds);
+    checkEq(banned, null, 'min entry ban skips ~10¢ NO');
+    check(/min entry|longshot/i.test(banBot.lastDecision || ''), 'decision mentions min entry');
   }
 
   // Relative TP: flat at entry does not take profit; need entry+rise

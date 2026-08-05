@@ -291,6 +291,14 @@
             <span class="field-hint">Exit if the held side's bid rises this many cents above entry (e.g. entry 55¢, TP 15 → exit near 70¢). In the last 5 minutes: if 0-5 confidence is still high in your favor, hold for settlement instead; if not, exit at breakeven-or-better when available.</span>
           </label>
 
+          <label>Min entry price
+            <div class="slider-row">
+              <input id="bot-minentries" type="range" min="1" max="50" step="1" />
+              <span class="slider-value" id="bot-minentries-value">—</span>
+            </div>
+            <span class="field-hint">Never buy a side cheaper than this, even with high confidence. Blocks longshot tickets (e.g. 7¢ NO fades) that blow up dollar P&amp;L.</span>
+          </label>
+
           <label>Stake per trade
             <div class="slider-row">
               <input id="bot-stake" type="range" min="1" max="500" step="1" />
