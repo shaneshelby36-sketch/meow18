@@ -142,6 +142,7 @@ function makeBot(client, config = {}) {
       minConfidence: 55,
       stopLossCents: 10,
       takeProfitCents: 15,
+      minEntryCents: 25,
       stakeDollars: 10,
       maxOpenPositions: 1,
       skimMode: 'off',
@@ -828,6 +829,48 @@ async function testBotExits() {
     });
     await bot._manageOpenTrade(trade, predictions(3000, { w5: win(30, 80) })); // DOWN favored strongly for NO
     checkEq(trade.status, 'open', 'hold through TP when confident');
+  }
+
+  // Last ~1 minute: bank green bid even if confidence would have held for settle
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 50 * 1000).toISOString(),
+        yes_bid: 20,
+        no_bid: 70,
+      }),
+      { stopLossCents: 40, takeProfitCents: 40, minConfidence: 55 }
+    );
+    const trade = openTrade(bot, {
+      side: 'no',
+      entryPriceCents: 50,
+      windowCloseTime: now + 50 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000, { w5: win(30, 80) }));
+    checkEq(trade.exitReason, 'pre_close_bank', 'pre_close_bank in last minute when green');
+  }
+
+  // Near-certain ~97¢: bank even mid-window / during confidence hold
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 8 * 60 * 1000).toISOString(),
+        yes_bid: 2,
+        no_bid: 97,
+      }),
+      { stopLossCents: 40, takeProfitCents: 40, minConfidence: 55, nearCertainExitCents: 97 }
+    );
+    const trade = openTrade(bot, {
+      side: 'no',
+      entryPriceCents: 50,
+      windowCloseTime: now + 8 * 60 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.exitReason, 'near_certain', 'near_certain at 97¢');
   }
 }
 

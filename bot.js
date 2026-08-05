@@ -76,6 +76,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'minConfidence',
   'stopLossCents',
   'takeProfitCents',
+  'nearCertainExitCents',
   'minEntryCents',
   'stakeDollars',
   'maxOpenPositions',
@@ -271,6 +272,7 @@ class TradingBot {
       minConfidence: 55, // engine confidence (0-100) required to act
       stopLossCents: 10, // exit if held bid falls this many cents below entry
       takeProfitCents: 15, // exit if held bid rises this many cents above entry (see final-5 override)
+      nearCertainExitCents: 97, // if held bid reaches this, bank it — don't wait on settlement for the last few ¢
       minEntryCents: 25, // never buy a side cheaper than this — blocks longshot lottery tickets
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
@@ -781,6 +783,8 @@ class TradingBot {
     // and checking it any earlier (e.g. with 12 minutes still on the
     // clock) doesn't correspond to what that window is predicting.
     const inFinalFiveMinutes = minutesRemaining <= 5;
+    // Last 30s–60s: stop holding for settlement — you're just waiting on Kalshi.
+    const inPreCloseTakeProfitWindow = minutesRemaining <= 1;
     const shortWindow = inFinalFiveMinutes && predictions && predictions[trade.symbol] && predictions[trade.symbol].ready
       ? predictions[trade.symbol].windows.w5
       : null;
@@ -789,14 +793,15 @@ class TradingBot {
       ((trade.side === 'yes' && shortWindow.probabilityDown > shortWindow.probabilityUp) ||
         (trade.side === 'no' && shortWindow.probabilityUp > shortWindow.probabilityDown));
 
-    // Final-5 confidence in OUR direction: if the 0-5 window still trusts
-    // the held side strongly, ride settlement instead of clipping a take-profit.
+    // Final-5 confidence hold: ride settlement only before the last minute.
+    // Inside the last ~60s (and at near-certain bids), take the money instead.
     const heldFavoredByShortWindow =
       shortWindow &&
       shortWindow.confidence >= this.config.minConfidence &&
       ((trade.side === 'yes' && shortWindow.probabilityUp >= shortWindow.probabilityDown) ||
         (trade.side === 'no' && shortWindow.probabilityDown >= shortWindow.probabilityUp));
-    const holdThroughForConfidence = inFinalFiveMinutes && heldFavoredByShortWindow;
+    const holdThroughForConfidence =
+      inFinalFiveMinutes && !inPreCloseTakeProfitWindow && heldFavoredByShortWindow;
 
     // Stronger early-warning exit: if BOTH of the next two windows (5-10
     // and 10-15 min out) strongly agree the price is heading the opposite
@@ -817,6 +822,17 @@ class TradingBot {
 
     const stopLevel = this._stopLevelCents(trade);
     const takeProfitLevel = this._takeProfitLevelCents(trade);
+    // ~97¢ = market basically sure — don't sit for settlement lag over 3¢.
+    const nearCertainExitCents = Number.isFinite(Number(this.config.nearCertainExitCents))
+      ? Number(this.config.nearCertainExitCents)
+      : 97;
+    const nearCertainHit =
+      heldSideBidCents != null &&
+      Number.isFinite(nearCertainExitCents) &&
+      nearCertainExitCents > 0 &&
+      heldSideBidCents >= nearCertainExitCents &&
+      Number.isFinite(trade.entryPriceCents) &&
+      heldSideBidCents > trade.entryPriceCents;
 
     const takeProfitHit =
       heldSideBidCents != null &&
@@ -838,6 +854,12 @@ class TradingBot {
       // Live books the real bid — markets don't owe you the stop price.
       const stopFill = this.config.mode === 'paper' ? stopLevel : heldSideBidCents;
       await this._closePosition(trade, stopFill, 'stop_loss');
+    } else if (nearCertainHit) {
+      const fill =
+        this.config.mode === 'paper'
+          ? Math.min(99, Math.max(nearCertainExitCents, heldSideBidCents))
+          : heldSideBidCents;
+      await this._closePosition(trade, fill, 'near_certain');
     } else if (strongReversalSignal && heldSideBidCents != null) {
       await this._closePosition(trade, heldSideBidCents, 'reversal_signal');
     } else if (signalFlipped && heldSideBidCents != null) {
@@ -845,6 +867,14 @@ class TradingBot {
     } else if (takeProfitHit && !holdThroughForConfidence) {
       const tpFill = this.config.mode === 'paper' ? takeProfitLevel : heldSideBidCents;
       await this._closePosition(trade, tpFill, 'take_profit');
+    } else if (
+      inPreCloseTakeProfitWindow &&
+      heldSideBidCents != null &&
+      Number.isFinite(trade.entryPriceCents) &&
+      heldSideBidCents > trade.entryPriceCents
+    ) {
+      // ~30s–60s left and already green: bank it rather than await settle.
+      await this._closePosition(trade, heldSideBidCents, 'pre_close_bank');
     } else if (canExitEven) {
       await this._closePosition(trade, heldSideBidCents, 'breakeven');
     }

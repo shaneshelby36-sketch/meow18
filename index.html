@@ -288,7 +288,7 @@
               <input id="bot-takeprofit" type="range" min="1" max="40" step="1" />
               <span class="slider-value" id="bot-takeprofit-value">—</span>
             </div>
-            <span class="field-hint">Exit if the held side's bid rises this many cents above entry (e.g. entry 55¢, TP 15 → exit near 70¢). In the last 5 minutes: if 0-5 confidence is still high in your favor, hold for settlement instead; if not, exit at breakeven-or-better when available.</span>
+            <span class="field-hint">Exit if the held side's bid rises this many cents above entry (e.g. entry 55¢, TP 15 → exit near 70¢). Also banks immediately at ~97¢ (near-certain). Last ~60s before close: take TP / bank a green bid instead of waiting on settlement.</span>
           </label>
 
           <label>Min entry price
