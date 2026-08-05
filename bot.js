@@ -488,6 +488,162 @@ class TradingBot {
       }
     }
     this._persist();
+    this.lastDecision = `Closed ${trade.symbol} ${String(trade.side).toUpperCase()} via ${reason} at ${exitPriceCents}¢ (P&L $${(trade.pnlCents / 100).toFixed(2)}).`;
+  }
+
+  /**
+   * Resolve settlement payout for a trade that has reached its window end.
+   * Prefer Kalshi's official result; fall back to price-vs-strike for paper
+   * when result hasn't landed yet; never leave the trade open into the next session.
+   */
+  async _settleClosedWindow(trade, predictions, market) {
+    if (market && market.result) {
+      const settleCents = market.result === trade.side ? 100 : 0;
+      await this._closePosition(trade, settleCents, 'settled');
+      return;
+    }
+
+    const strike = trade.floorStrike != null ? Number(trade.floorStrike) : Number(market && market.floor_strike);
+    const livePrice =
+      predictions &&
+      predictions[trade.symbol] &&
+      Number.isFinite(predictions[trade.symbol].price)
+        ? predictions[trade.symbol].price
+        : null;
+
+    if (Number.isFinite(strike) && Number.isFinite(livePrice)) {
+      const settledUp = livePrice >= strike;
+      const won = trade.side === 'yes' ? settledUp : !settledUp;
+      await this._closePosition(trade, won ? 100 : 0, 'settled');
+      this.lastDecision =
+        `Settled ${trade.symbol} ${String(trade.side).toUpperCase()} via price-vs-strike ` +
+        `(${livePrice} vs ${strike}) — Kalshi result not yet posted.`;
+      return;
+    }
+
+    // Absolute last resort: scratch the trade rather than carrying it forever.
+    const fallback =
+      (market && (trade.side === 'yes' ? market.yes_bid : market.no_bid)) ?? trade.entryPriceCents;
+    await this._closePosition(trade, fallback, 'settled_timeout');
+  }
+
+  async _manageOpenTrade(trade, predictions) {
+    const now = Date.now();
+    const storedClose = Number(trade.windowCloseTime);
+    let market = null;
+
+    try {
+      market = await this.client.getMarket(trade.ticker);
+    } catch (err) {
+      // Past the trade's own close time: settle without the API rather than
+      // leaving an open position into the next 15-minute session.
+      if (Number.isFinite(storedClose) && now >= storedClose) {
+        console.warn(`[bot] market fetch failed after close for ${trade.ticker}; force-settling: ${err.message}`);
+        await this._settleClosedWindow(trade, predictions, null);
+        return;
+      }
+      this.lastError = `Failed to fetch open position's market (${trade.ticker}): ${err.message}`;
+      console.error('[bot]', this.lastError);
+      return;
+    }
+
+    if (!market) {
+      if (Number.isFinite(storedClose) && now >= storedClose) {
+        await this._settleClosedWindow(trade, predictions, null);
+      }
+      return;
+    }
+
+    const heldSideBidCents = trade.side === 'yes' ? market.yes_bid : market.no_bid;
+    const marketClose = market.close_time ? new Date(market.close_time).getTime() : NaN;
+    // Use the earlier of stored open-time close and live close so a stale /
+    // missing API close_time can never keep a trade open past its session.
+    const candidates = [storedClose, marketClose].filter((t) => Number.isFinite(t) && t > 0);
+    const closeTime = candidates.length ? Math.min(...candidates) : NaN;
+
+    if (!Number.isFinite(closeTime)) {
+      // No usable close time — if the market already has a result, settle now.
+      if (market.result) {
+        await this._settleClosedWindow(trade, predictions, market);
+      }
+      return;
+    }
+
+    if (now >= closeTime) {
+      await this._settleClosedWindow(trade, predictions, market);
+      return;
+    }
+
+    const minutesRemaining = (closeTime - now) / 60000;
+
+    // Early warning exit: if the engine's own 0-5 minute signal has
+    // flipped to favor the opposite side of what we're holding — even by
+    // a small margin — get out now rather than waiting for Kalshi's own
+    // odds to grind all the way down to the stop-loss threshold. Only
+    // meaningful once the actual Kalshi window has 5 minutes or less left
+    // — that's what the 0-5 min window's prediction is actually about,
+    // and checking it any earlier (e.g. with 12 minutes still on the
+    // clock) doesn't correspond to what that window is predicting.
+    const inFinalFiveMinutes = minutesRemaining <= 5;
+    const shortWindow = inFinalFiveMinutes && predictions && predictions[trade.symbol] && predictions[trade.symbol].ready
+      ? predictions[trade.symbol].windows.w5
+      : null;
+    const signalFlipped =
+      shortWindow &&
+      ((trade.side === 'yes' && shortWindow.probabilityDown > shortWindow.probabilityUp) ||
+        (trade.side === 'no' && shortWindow.probabilityUp > shortWindow.probabilityDown));
+
+    // Final-5 confidence in OUR direction: if the 0-5 window still trusts
+    // the held side strongly, ride settlement instead of clipping a take-profit.
+    const heldFavoredByShortWindow =
+      shortWindow &&
+      shortWindow.confidence >= this.config.minConfidence &&
+      ((trade.side === 'yes' && shortWindow.probabilityUp >= shortWindow.probabilityDown) ||
+        (trade.side === 'no' && shortWindow.probabilityDown >= shortWindow.probabilityUp));
+    const holdThroughForConfidence = inFinalFiveMinutes && heldFavoredByShortWindow;
+
+    // Stronger early-warning exit: if BOTH of the next two windows (5-10
+    // and 10-15 min out) strongly agree the price is heading the opposite
+    // way from our held position — not just a marginal >50% flip, but a
+    // real majority on both — that's a much more serious reversal signal
+    // than a single-window flip, so it's checked at ANY point in the
+    // trade's life, not gated to the final 5 minutes.
+    const REVERSAL_THRESHOLD_PCT = 65;
+    const assetPred = predictions && predictions[trade.symbol] && predictions[trade.symbol].ready
+      ? predictions[trade.symbol]
+      : null;
+    const w10 = assetPred ? assetPred.windows.w10 : null;
+    const w15 = assetPred ? assetPred.windows.w15 : null;
+    const heldIsYes = trade.side === 'yes';
+    const w10AgainstUs = w10 && (heldIsYes ? w10.probabilityDown : w10.probabilityUp) >= REVERSAL_THRESHOLD_PCT;
+    const w15AgainstUs = w15 && (heldIsYes ? w15.probabilityDown : w15.probabilityUp) >= REVERSAL_THRESHOLD_PCT;
+    const strongReversalSignal = w10AgainstUs && w15AgainstUs;
+
+    const takeProfitHit =
+      heldSideBidCents != null &&
+      Number.isFinite(this.config.takeProfitCents) &&
+      this.config.takeProfitCents > 0 &&
+      heldSideBidCents >= this.config.takeProfitCents;
+
+    // Breakeven in the last 5 minutes when confidence is NOT high in our
+    // favor: lock even-or-better instead of gambling settlement.
+    const canExitEven =
+      inFinalFiveMinutes &&
+      !holdThroughForConfidence &&
+      heldSideBidCents != null &&
+      heldSideBidCents >= trade.entryPriceCents;
+
+    if (heldSideBidCents != null && heldSideBidCents <= this.config.stopLossCents) {
+      await this._closePosition(trade, heldSideBidCents, 'stop_loss');
+    } else if (strongReversalSignal && heldSideBidCents != null) {
+      await this._closePosition(trade, heldSideBidCents, 'reversal_signal');
+    } else if (signalFlipped && heldSideBidCents != null) {
+      await this._closePosition(trade, heldSideBidCents, 'signal_flip');
+    } else if (takeProfitHit && !holdThroughForConfidence) {
+      await this._closePosition(trade, heldSideBidCents, 'take_profit');
+    } else if (canExitEven) {
+      await this._closePosition(trade, heldSideBidCents, 'breakeven');
+    }
   }
 
   async _openPosition({ symbol, ticker, side, priceCents, floorStrike, closeTime, engineProbability, engineConfidence }) {
@@ -496,6 +652,11 @@ class TradingBot {
     // appear in the dashboard as e.g. "BTC @ NO null".
     if (!Number.isFinite(priceCents) || priceCents < 1 || priceCents > 99) {
       this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: no valid Kalshi quote is available.`;
+      return;
+    }
+    const closeAt = Number(closeTime);
+    if (!Number.isFinite(closeAt) || closeAt <= Date.now() + 5000) {
+      this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: market close time is missing or already ending.`;
       return;
     }
     // Each Kalshi contract costs `priceCents` cents and pays out $1 if it
@@ -528,7 +689,7 @@ class TradingBot {
       entryPriceCents: priceCents,
       floorStrike,
       openedAt: Date.now(),
-      windowCloseTime: closeTime,
+      windowCloseTime: closeAt,
       engineProbability,
       engineConfidence,
       status: 'open',
@@ -581,96 +742,7 @@ class TradingBot {
     // --- first, manage every currently open trade by its own ticker,
     // regardless of what symbol is currently selected to trade next ---
     for (const trade of this.openTrades) {
-      let market;
-      try {
-        market = await this.client.getMarket(trade.ticker);
-      } catch (err) {
-        this.lastError = `Failed to fetch open position's market (${trade.ticker}): ${err.message}`;
-        console.error('[bot]', this.lastError);
-        continue;
-      }
-      if (!market) continue;
-
-      const heldSideBidCents = trade.side === 'yes' ? market.yes_bid : market.no_bid;
-      const closeTime = new Date(market.close_time).getTime();
-      const now = Date.now();
-      const minutesRemaining = (closeTime - now) / 60000;
-
-      // Early warning exit: if the engine's own 0-5 minute signal has
-      // flipped to favor the opposite side of what we're holding — even by
-      // a small margin — get out now rather than waiting for Kalshi's own
-      // odds to grind all the way down to the stop-loss threshold. Only
-      // meaningful once the actual Kalshi window has 5 minutes or less left
-      // — that's what the 0-5 min window's prediction is actually about,
-      // and checking it any earlier (e.g. with 12 minutes still on the
-      // clock) doesn't correspond to what that window is predicting.
-      const inFinalFiveMinutes = minutesRemaining <= 5;
-      const shortWindow = inFinalFiveMinutes && predictions && predictions[trade.symbol] && predictions[trade.symbol].ready
-        ? predictions[trade.symbol].windows.w5
-        : null;
-      const signalFlipped =
-        shortWindow &&
-        ((trade.side === 'yes' && shortWindow.probabilityDown > shortWindow.probabilityUp) ||
-          (trade.side === 'no' && shortWindow.probabilityUp > shortWindow.probabilityDown));
-
-      // Final-5 confidence in OUR direction: if the 0-5 window still trusts
-      // the held side strongly, ride settlement instead of clipping a take-profit.
-      const heldFavoredByShortWindow =
-        shortWindow &&
-        shortWindow.confidence >= this.config.minConfidence &&
-        ((trade.side === 'yes' && shortWindow.probabilityUp >= shortWindow.probabilityDown) ||
-          (trade.side === 'no' && shortWindow.probabilityDown >= shortWindow.probabilityUp));
-      const holdThroughForConfidence = inFinalFiveMinutes && heldFavoredByShortWindow;
-
-      // Stronger early-warning exit: if BOTH of the next two windows (5-10
-      // and 10-15 min out) strongly agree the price is heading the opposite
-      // way from our held position — not just a marginal >50% flip, but a
-      // real majority on both — that's a much more serious reversal signal
-      // than a single-window flip, so it's checked at ANY point in the
-      // trade's life, not gated to the final 5 minutes.
-      const REVERSAL_THRESHOLD_PCT = 65;
-      const assetPred = predictions && predictions[trade.symbol] && predictions[trade.symbol].ready
-        ? predictions[trade.symbol]
-        : null;
-      const w10 = assetPred ? assetPred.windows.w10 : null;
-      const w15 = assetPred ? assetPred.windows.w15 : null;
-      const heldIsYes = trade.side === 'yes';
-      const w10AgainstUs = w10 && (heldIsYes ? w10.probabilityDown : w10.probabilityUp) >= REVERSAL_THRESHOLD_PCT;
-      const w15AgainstUs = w15 && (heldIsYes ? w15.probabilityDown : w15.probabilityUp) >= REVERSAL_THRESHOLD_PCT;
-      const strongReversalSignal = w10AgainstUs && w15AgainstUs;
-
-      const takeProfitHit =
-        heldSideBidCents != null &&
-        Number.isFinite(this.config.takeProfitCents) &&
-        this.config.takeProfitCents > 0 &&
-        heldSideBidCents >= this.config.takeProfitCents;
-
-      // Breakeven in the last 5 minutes when confidence is NOT high in our
-      // favor: lock even-or-better instead of gambling settlement.
-      const canExitEven =
-        inFinalFiveMinutes &&
-        !holdThroughForConfidence &&
-        heldSideBidCents != null &&
-        heldSideBidCents >= trade.entryPriceCents;
-
-      if (heldSideBidCents != null && heldSideBidCents <= this.config.stopLossCents) {
-        await this._closePosition(trade, heldSideBidCents, 'stop_loss');
-      } else if (strongReversalSignal && heldSideBidCents != null) {
-        await this._closePosition(trade, heldSideBidCents, 'reversal_signal');
-      } else if (signalFlipped && heldSideBidCents != null) {
-        await this._closePosition(trade, heldSideBidCents, 'signal_flip');
-      } else if (takeProfitHit && !holdThroughForConfidence) {
-        await this._closePosition(trade, heldSideBidCents, 'take_profit');
-      } else if (canExitEven) {
-        await this._closePosition(trade, heldSideBidCents, 'breakeven');
-      } else if (now >= closeTime) {
-        const settleCents = market.result === trade.side ? 100 : 0;
-        await this._closePosition(
-          trade,
-          market.result ? settleCents : heldSideBidCents ?? trade.entryPriceCents,
-          'settled'
-        );
-      }
+      await this._manageOpenTrade(trade, predictions);
     }
 
     if (!this.isRunning) {
