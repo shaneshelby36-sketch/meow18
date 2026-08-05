@@ -33,14 +33,14 @@ Render’s default disk is **ephemeral**: every deploy or restart wipes local fi
 1. In the Render service → **Disks** → add a disk (e.g. 1 GB).
 2. Mount path: `/var/data`
 3. Environment → add:
-   - `DATA_DIR=/var/data`
+   - `DATA_DIR=/var/data` (optional if the disk is mounted at `/var/data` — the app auto-detects that path)
    - `KALSHI_ENABLED=true` (if you want the bot on)
    - plus any Kalshi live-trading vars you need
 4. Redeploy.
 
-After that, **Save settings** in the dashboard writes to `/var/data/bot-config.json` and survives restarts.
+Settings auto-save from the dashboard (and again on every server boot) into `bot-config.json` under that data dir, so reboots keep your current edge/confidence/stake/etc.
 
-Check `/api/health` — you want `"dataDirFromEnv": true` and after saving settings `"configFileExists": true`.
+Check `/api/health` — you want `"dataDirEphemeral": false` and `"configFileExists": true`.
 
 ### Optional: bake defaults into env
 
@@ -55,3 +55,20 @@ At most **3** browser windows: best crypto, second-best, bot. Use **Open other w
 ## Backtests
 
 Bot settings: **1 / 2 / 3 day** runs, plus **Auto** and **Hunt best**.
+
+## Before putting real money in
+
+1. Keep `KALSHI_LIVE_TRADING=false` (paper mode). Paper uses live Kalshi quotes but never places orders.
+2. Run the offline exit/settlement suite:
+
+```bash
+npm test
+```
+
+That checks settle-on-result, price-vs-strike, fetch-fail force-settle, legacy max-age settle, stop-loss, take-profit, and skipping expired markets — without touching your real ledger.
+3. In the dashboard, run **1 / 2 / 3 day** backtests (and **Hunt best**) with the settings you plan to use.
+4. Let paper mode run through several full 15-minute windows and confirm:
+   - open trades close (settled / stop / TP) instead of carrying forever
+   - countdown moves to the next window (not stuck)
+   - P&L / win rate look sane
+5. Only then set live env vars + confirm string, restart, and start with a tiny stake / tight guardrail.

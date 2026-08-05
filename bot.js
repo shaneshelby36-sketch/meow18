@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { dataPath, ensureDataDir } = require('./paths');
+const { dataPath, ensureDataDir, writeJsonAtomic } = require('./paths');
 
 ensureDataDir();
 
@@ -37,8 +37,7 @@ function loadCalibration() {
 
 function saveCalibration(calibration) {
   try {
-    fs.mkdirSync(path.dirname(CALIBRATION_PATH), { recursive: true });
-    fs.writeFileSync(CALIBRATION_PATH, JSON.stringify(calibration, null, 2));
+    writeJsonAtomic(CALIBRATION_PATH, calibration);
   } catch (err) {
     console.error('[bot] failed to persist calibration data:', err.message);
   }
@@ -102,8 +101,7 @@ function loadModeState() {
 
 function saveModeState(mode) {
   try {
-    fs.mkdirSync(path.dirname(MODE_STATE_PATH), { recursive: true });
-    fs.writeFileSync(MODE_STATE_PATH, JSON.stringify({ mode }));
+    writeJsonAtomic(MODE_STATE_PATH, { mode });
   } catch (err) {
     console.error('[bot] failed to persist mode state:', err.message);
   }
@@ -120,8 +118,7 @@ function loadRunState() {
 
 function saveRunState(state) {
   try {
-    fs.mkdirSync(path.dirname(RUN_STATE_PATH), { recursive: true });
-    fs.writeFileSync(RUN_STATE_PATH, JSON.stringify(state, null, 2));
+    writeJsonAtomic(RUN_STATE_PATH, state);
   } catch (err) {
     console.error('[bot] failed to persist run state:', err.message);
   }
@@ -138,10 +135,16 @@ function loadConfigOverrides() {
   return {};
 }
 
+function collectConfigOverrides(config) {
+  const overrides = {};
+  for (const field of EDITABLE_NUMERIC_FIELDS) overrides[field] = config[field];
+  for (const field of Object.keys(EDITABLE_STRING_FIELDS)) overrides[field] = config[field];
+  return overrides;
+}
+
 function saveConfigOverrides(overrides) {
   try {
-    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(overrides, null, 2));
+    writeJsonAtomic(CONFIG_PATH, overrides);
   } catch (err) {
     console.error('[bot] failed to persist config:', err.message);
   }
@@ -163,8 +166,7 @@ function loadLedger() {
 
 function saveLedger(ledger) {
   try {
-    fs.mkdirSync(path.dirname(LEDGER_PATH), { recursive: true });
-    fs.writeFileSync(LEDGER_PATH, JSON.stringify(ledger, null, 2));
+    writeJsonAtomic(LEDGER_PATH, ledger);
   } catch (err) {
     // Non-fatal — on some hosts (e.g. free-tier Render) disk is ephemeral
     // across deploys anyway, so this is best-effort durability only.
@@ -236,6 +238,10 @@ class TradingBot {
     this.livePortfolioValueCents = null;
     this.liveBalanceUpdatedAt = null;
     this._removeInvalidPaperTrades();
+    // Always flush the effective settings so a reboot reloads exactly what
+    // this process is running (env defaults and/or last dashboard save).
+    saveConfigOverrides(collectConfigOverrides(this.config));
+    saveRunState({ isRunning: this.isRunning, runningSince: this.runningSince });
   }
 
   /**
@@ -293,10 +299,7 @@ class TradingBot {
       this.config[field] = value;
       applied[field] = value;
     }
-    const overrides = {};
-    for (const field of EDITABLE_NUMERIC_FIELDS) overrides[field] = this.config[field];
-    for (const field of Object.keys(EDITABLE_STRING_FIELDS)) overrides[field] = this.config[field];
-    saveConfigOverrides(overrides);
+    saveConfigOverrides(collectConfigOverrides(this.config));
     return { applied, config: this.config };
   }
 
@@ -497,8 +500,9 @@ class TradingBot {
    * when result hasn't landed yet; never leave the trade open into the next session.
    */
   async _settleClosedWindow(trade, predictions, market) {
-    if (market && market.result) {
-      const settleCents = market.result === trade.side ? 100 : 0;
+    const result = market && market.result ? String(market.result).toLowerCase() : '';
+    if (result === 'yes' || result === 'no') {
+      const settleCents = result === trade.side ? 100 : 0;
       await this._closePosition(trade, settleCents, 'settled');
       return;
     }
@@ -522,22 +526,33 @@ class TradingBot {
     }
 
     // Absolute last resort: scratch the trade rather than carrying it forever.
-    const fallback =
-      (market && (trade.side === 'yes' ? market.yes_bid : market.no_bid)) ?? trade.entryPriceCents;
-    await this._closePosition(trade, fallback, 'settled_timeout');
+    const sideBid = market && (trade.side === 'yes' ? market.yes_bid : market.no_bid);
+    const fallback = Number.isFinite(sideBid) ? sideBid : trade.entryPriceCents;
+    await this._closePosition(trade, Number.isFinite(fallback) ? fallback : trade.entryPriceCents, 'settled_timeout');
+  }
+
+  _tradeCloseDeadline(trade) {
+    const stored = Number(trade.windowCloseTime);
+    if (Number.isFinite(stored) && stored > 0) return stored;
+    const opened = Number(trade.openedAt);
+    // Legacy trades without windowCloseTime: assume a standard 15m window.
+    if (Number.isFinite(opened) && opened > 0) return opened + 15 * 60 * 1000;
+    return NaN;
   }
 
   async _manageOpenTrade(trade, predictions) {
     const now = Date.now();
-    const storedClose = Number(trade.windowCloseTime);
+    const storedClose = this._tradeCloseDeadline(trade);
+    const openedAt = Number(trade.openedAt);
+    // Hard ceiling: never keep a 15m crypto contract open more than ~16.5 min.
+    const maxAgeMs = 16.5 * 60 * 1000;
+    const tooOld = Number.isFinite(openedAt) && now - openedAt >= maxAgeMs;
     let market = null;
 
     try {
       market = await this.client.getMarket(trade.ticker);
     } catch (err) {
-      // Past the trade's own close time: settle without the API rather than
-      // leaving an open position into the next 15-minute session.
-      if (Number.isFinite(storedClose) && now >= storedClose) {
+      if ((Number.isFinite(storedClose) && now >= storedClose) || tooOld) {
         console.warn(`[bot] market fetch failed after close for ${trade.ticker}; force-settling: ${err.message}`);
         await this._settleClosedWindow(trade, predictions, null);
         return;
@@ -548,7 +563,7 @@ class TradingBot {
     }
 
     if (!market) {
-      if (Number.isFinite(storedClose) && now >= storedClose) {
+      if ((Number.isFinite(storedClose) && now >= storedClose) || tooOld) {
         await this._settleClosedWindow(trade, predictions, null);
       }
       return;
@@ -556,21 +571,25 @@ class TradingBot {
 
     const heldSideBidCents = trade.side === 'yes' ? market.yes_bid : market.no_bid;
     const marketClose = market.close_time ? new Date(market.close_time).getTime() : NaN;
+    const status = market.status ? String(market.status).toLowerCase() : '';
+    const marketDone = status === 'closed' || status === 'settled' || status === 'determined' || status === 'finalized';
     // Use the earlier of stored open-time close and live close so a stale /
     // missing API close_time can never keep a trade open past its session.
     const candidates = [storedClose, marketClose].filter((t) => Number.isFinite(t) && t > 0);
     const closeTime = candidates.length ? Math.min(...candidates) : NaN;
+    const pastClose = (Number.isFinite(closeTime) && now >= closeTime) || marketDone || tooOld;
 
-    if (!Number.isFinite(closeTime)) {
-      // No usable close time — if the market already has a result, settle now.
-      if (market.result) {
-        await this._settleClosedWindow(trade, predictions, market);
-      }
+    if (pastClose) {
+      await this._settleClosedWindow(trade, predictions, market);
       return;
     }
 
-    if (now >= closeTime) {
-      await this._settleClosedWindow(trade, predictions, market);
+    if (!Number.isFinite(closeTime)) {
+      // No usable close time and market still looks open — wait one more cycle
+      // unless we already have an official result.
+      if (market.result) {
+        await this._settleClosedWindow(trade, predictions, market);
+      }
       return;
     }
 
@@ -792,8 +811,12 @@ class TradingBot {
 
     let market;
     try {
-      const markets = await this.client.getOpenMarkets(seriesTicker, 1);
-      market = markets[0];
+      const markets = await this.client.getOpenMarkets(seriesTicker, 5);
+      const nowMs = Date.now();
+      market = (markets || []).find((m) => {
+        const closeMs = m.close_time ? new Date(m.close_time).getTime() : NaN;
+        return Number.isFinite(closeMs) && closeMs > nowMs + 5000;
+      });
     } catch (err) {
       this.lastError = `Failed to fetch Kalshi market for ${seriesTicker}: ${err.message}`;
       console.error('[bot]', this.lastError);

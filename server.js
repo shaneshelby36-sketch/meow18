@@ -15,7 +15,7 @@ const { SignalAccumulatorManager } = require('./signalAccumulator');
 const { KalshiClient } = require('./kalshiClient');
 const { TradingBot, SERIES_BY_SYMBOL } = require('./bot');
 const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
-const { DATA_DIR, dataPath, ensureDataDir } = require('./paths');
+const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir } = require('./paths');
 
 ensureDataDir();
 
@@ -207,11 +207,17 @@ async function fetchKalshiTargets() {
   await Promise.all(
     Object.entries(series).map(async ([symbol, ticker]) => {
       try {
-        const markets = await kalshiClient.getOpenMarkets(ticker, 1);
+        const markets = await kalshiClient.getOpenMarkets(ticker, 5);
+        const now = Date.now();
+        // Skip markets that are already past close — during the settlement
+        // gap Kalshi can still list one with status=open briefly, which made
+        // the dashboard countdown stick on "Settling…" forever.
+        const m = (Array.isArray(markets) ? markets : []).find((market) => {
+          const closeMs = market.close_time ? new Date(market.close_time).getTime() : NaN;
+          return Number.isFinite(closeMs) && closeMs > now + 1500;
+        });
 
-        if (Array.isArray(markets) && markets.length > 0) {
-          const m = markets[0];
-
+        if (m) {
           targets[symbol] = {
             price: m.floor_strike,
             closeTime: new Date(m.close_time).getTime(),
@@ -344,8 +350,9 @@ app.get("/", (req, res) => {
       // Closing the browser/dashboard does not pause them.
       dashboardIndependent: true,
       dataDir: DATA_DIR,
-      // Without DATA_DIR on Render, restarts wipe settings/ledger.
-      dataDirFromEnv: Boolean(process.env.DATA_DIR),
+      // Without a persistent disk on Render, restarts wipe settings/ledger.
+      dataDirFromEnv: DATA_DIR_FROM_ENV,
+      dataDirEphemeral: DATA_DIR_EPHEMERAL,
       configFileExists: fs.existsSync(configPath),
       uptimeMs: Date.now() - SERVER_START_TIME,
       time: new Date().toISOString(),
@@ -595,7 +602,7 @@ app.get("/", (req, res) => {
   app.listen(PORT, () => {
     console.log(`[startup] prediction engine API listening on http://0.0.0.0:${PORT}`);
     console.log(`[startup] compute loop every ${COMPUTE_INTERVAL_MS / 1000}s — continues whether or not any dashboard is open`);
-    console.log(`[startup] data dir: ${DATA_DIR}${process.env.DATA_DIR ? '' : ' (ephemeral — set DATA_DIR to a persistent disk on Render or settings reset on restart)'}`);
+    console.log(`[startup] data dir: ${DATA_DIR}${DATA_DIR_EPHEMERAL ? ' (ephemeral on Render — attach a Persistent Disk at /var/data or set DATA_DIR)' : ''}`);
     if (bot) {
       console.log(`[startup] trading bot is ${bot.isRunning ? 'RUNNING' : 'STOPPED'} on the server (dashboard is optional)`);
     }

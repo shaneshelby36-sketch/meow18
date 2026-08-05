@@ -501,7 +501,7 @@ function updateCountdownEl(card) {
   }
   const remainingMs = target - Date.now();
   if (remainingMs <= 0) {
-    el.textContent = 'Settling…';
+    el.textContent = 'Next window…';
     el.classList.add('settling');
     return;
   }
@@ -530,7 +530,9 @@ function updateBigCountdown(panel) {
   }
   const remainingMs = target - Date.now();
   if (remainingMs <= 0) {
-    el.textContent = 'Settling…';
+    // Gap between Kalshi windows (or a stale close time). Do not sit on
+    // "Settling…" forever — the next poll should pick up a fresh market.
+    el.textContent = 'Next window…';
     el.classList.add('settling');
     return;
   }
@@ -710,17 +712,17 @@ async function refreshBotStatus() {
     const healthRes = await fetch(`${engineUrl}/api/health`, { cache: 'no-store' });
     if (healthRes.ok && persistLine) {
       const health = await healthRes.json();
-      if (!health.dataDirFromEnv) {
+      if (health.dataDirEphemeral) {
         persistLine.hidden = false;
         persistLine.style.color = 'var(--wait)';
         persistLine.textContent =
-          'Warning: no persistent DATA_DIR is set. On Render, settings/ledger reset on every restart until you attach a Persistent Disk and set DATA_DIR=/var/data.';
+          'Warning: Render is using ephemeral disk. Attach a Persistent Disk (mount /var/data) or settings/ledger reset on every restart.';
       } else {
         persistLine.hidden = false;
         persistLine.style.color = 'var(--up)';
         persistLine.textContent = health.configFileExists
-          ? `Settings are persisting on disk (${health.dataDir}).`
-          : `Persistent disk ready (${health.dataDir}) — save settings once to create the config file.`;
+          ? `Settings persist across reboots (${health.dataDir}).`
+          : `Durable data dir ready (${health.dataDir}) — settings will auto-save here.`;
       }
     }
 
@@ -910,8 +912,42 @@ function wireSliderDisplays() {
   if (skimMode) skimMode.addEventListener('change', updateSkimSliderDisplay);
 }
 
+let botFormHydrating = false;
+let botAutoSaveTimer = null;
+
+function scheduleAutoSaveBotConfig() {
+  if (botFormHydrating) return;
+  clearTimeout(botAutoSaveTimer);
+  botAutoSaveTimer = setTimeout(() => {
+    saveBotConfig({ auto: true });
+  }, 700);
+}
+
+function wireBotConfigAutoSave() {
+  const ids = [
+    'bot-symbol',
+    'bot-edge',
+    'bot-confidence',
+    'bot-stoploss',
+    'bot-takeprofit',
+    'bot-stake',
+    'bot-maxpos',
+    'bot-guardrail',
+    'bot-paper-balance',
+    'bot-skim-mode',
+    'bot-skim-amount',
+  ];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.addEventListener('change', scheduleAutoSaveBotConfig);
+    if (el.tagName === 'INPUT') el.addEventListener('input', scheduleAutoSaveBotConfig);
+  }
+}
+
 async function loadBotConfigIntoForm() {
   const { engineUrl } = loadSettings();
+  botFormHydrating = true;
   try {
     const res = await fetch(`${engineUrl}/api/bot/config`, { cache: 'no-store' });
     if (!res.ok) return;
@@ -936,10 +972,12 @@ async function loadBotConfigIntoForm() {
     updateSkimSliderDisplay();
   } catch {
     // Bot likely disabled or engine unreachable — form just stays blank.
+  } finally {
+    botFormHydrating = false;
   }
 }
 
-async function saveBotConfig() {
+async function saveBotConfig(opts = {}) {
   const { engineUrl } = loadSettings();
   const feedback = document.getElementById('bot-settings-feedback');
   const skimMode = document.getElementById('bot-skim-mode').value;
@@ -971,9 +1009,9 @@ async function saveBotConfig() {
       feedback.style.color = 'var(--down)';
       return;
     }
-    feedback.textContent = '✓ Settings saved.';
+    feedback.textContent = opts.auto ? '✓ Settings auto-saved (survive reboot).' : '✓ Settings saved.';
     feedback.style.color = 'var(--up)';
-    refreshBotStatus();
+    if (!opts.auto) refreshBotStatus();
   } catch (err) {
     feedback.textContent = `Not saved — could not reach the engine: ${err.message}`;
     feedback.style.color = 'var(--down)';
@@ -1262,7 +1300,7 @@ function wireBotUI() {
     refreshBotStatus();
     loadBotConfigIntoForm();
   });
-  document.getElementById('bot-settings-save').addEventListener('click', saveBotConfig);
+  document.getElementById('bot-settings-save').addEventListener('click', () => saveBotConfig());
   document.getElementById('bot-running-toggle').addEventListener('click', () => {
     const isRunning = document.getElementById('bot-running-toggle').textContent !== 'Start bot';
     setBotRunning(!isRunning);
@@ -1280,6 +1318,7 @@ function wireBotUI() {
   document.getElementById('kalshi-creds-save').addEventListener('click', saveKalshiCredentials);
   document.getElementById('mode-btn-paper').addEventListener('click', () => switchMode('paper'));
   document.getElementById('mode-btn-live').addEventListener('click', () => switchMode('live'));
+  wireBotConfigAutoSave();
   wireSliderDisplays();
 }
 
