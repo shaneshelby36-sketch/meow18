@@ -3,9 +3,10 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { dataPath, ensureDataDir, writeJsonAtomic } = require('./paths');
+const { dataPath, ensureDataDir, writeJsonAtomic, pruneArchiveFiles } = require('./paths');
 
 ensureDataDir();
+pruneArchiveFiles();
 
 const LEDGER_PATH = dataPath('bot-ledger.json');
 const TRADE_LOG_PATH = dataPath('trade-log.json');
@@ -497,6 +498,7 @@ class TradingBot {
         const fileName = `bot-ledger-${new Date(this.ledger.periodStartTime).toISOString().replace(/[:.]/g, '-')}.json`;
         fs.writeFileSync(path.join(ARCHIVE_DIR, fileName), JSON.stringify(archive, null, 2));
         console.log(`[bot] archived ${closedTrades.length} closed trades from the last 12h to data/archive/${fileName}`);
+        pruneArchiveFiles({ now });
       } catch (err) {
         console.error('[bot] failed to archive ledger before rotation:', err.message);
       }
@@ -680,7 +682,13 @@ class TradingBot {
   }
 
   _tradeCloseDeadline(trade) {
-    const stored = Number(trade.windowCloseTime);
+    const raw = trade.windowCloseTime;
+    let stored = Number(raw);
+    // Ledger reloads / hand-edits sometimes store an ISO string; Number("2026-…") is NaN.
+    if ((!Number.isFinite(stored) || stored <= 0) && raw != null && raw !== '') {
+      const parsed = Date.parse(String(raw));
+      if (Number.isFinite(parsed) && parsed > 0) stored = parsed;
+    }
     if (Number.isFinite(stored) && stored > 0) return stored;
     const opened = Number(trade.openedAt);
     // Legacy trades without windowCloseTime: assume a standard 15m window.
@@ -688,19 +696,45 @@ class TradingBot {
     return NaN;
   }
 
+  _marketCloseMs(market) {
+    if (!market || !market.close_time) return NaN;
+    const ms = new Date(market.close_time).getTime();
+    return Number.isFinite(ms) && ms > 0 ? ms : NaN;
+  }
+
+  _isMarketSettledStatus(market) {
+    const status = market && market.status ? String(market.status).toLowerCase() : '';
+    // Kalshi lifecycle: closed → determined → finalized (legacy docs also said settled).
+    return status === 'closed' || status === 'settled' || status === 'determined' || status === 'finalized';
+  }
+
+  /**
+   * True when this trade's own session is over. Uses OR of every signal —
+   * never wait on a still-"active" Kalshi payload if our saved close already passed.
+   */
+  _isTradePastDeadline(trade, market, now = Date.now()) {
+    const storedClose = this._tradeCloseDeadline(trade);
+    const marketClose = this._marketCloseMs(market);
+    const openedAt = Number(trade.openedAt);
+    const maxAgeMs = 16.5 * 60 * 1000;
+    const tooOld = Number.isFinite(openedAt) && now - openedAt >= maxAgeMs;
+    const pastStored = Number.isFinite(storedClose) && now >= storedClose;
+    const pastMarket = Number.isFinite(marketClose) && now >= marketClose;
+    return pastStored || pastMarket || this._isMarketSettledStatus(market) || tooOld;
+  }
+
   async _manageOpenTrade(trade, predictions) {
     const now = Date.now();
     const storedClose = this._tradeCloseDeadline(trade);
-    const openedAt = Number(trade.openedAt);
-    // Hard ceiling: never keep a 15m crypto contract open more than ~16.5 min.
-    const maxAgeMs = 16.5 * 60 * 1000;
-    const tooOld = Number.isFinite(openedAt) && now - openedAt >= maxAgeMs;
-    let market = null;
+    const dueWithoutMarket =
+      (Number.isFinite(storedClose) && now >= storedClose) ||
+      (Number.isFinite(Number(trade.openedAt)) && now - Number(trade.openedAt) >= 16.5 * 60 * 1000);
 
+    let market = null;
     try {
       market = await this.client.getMarket(trade.ticker);
     } catch (err) {
-      if ((Number.isFinite(storedClose) && now >= storedClose) || tooOld) {
+      if (dueWithoutMarket) {
         console.warn(`[bot] market fetch failed after close for ${trade.ticker}; force-settling: ${err.message}`);
         await this._settleClosedWindow(trade, predictions, null);
         return;
@@ -711,30 +745,23 @@ class TradingBot {
     }
 
     if (!market) {
-      if ((Number.isFinite(storedClose) && now >= storedClose) || tooOld) {
+      if (dueWithoutMarket) {
         await this._settleClosedWindow(trade, predictions, null);
       }
       return;
     }
 
-    const heldSideBidCents = trade.side === 'yes' ? market.yes_bid : market.no_bid;
-    const marketClose = market.close_time ? new Date(market.close_time).getTime() : NaN;
-    const status = market.status ? String(market.status).toLowerCase() : '';
-    const marketDone = status === 'closed' || status === 'settled' || status === 'determined' || status === 'finalized';
-    // Use the earlier of stored open-time close and live close so a stale /
-    // missing API close_time can never keep a trade open past its session.
-    const candidates = [storedClose, marketClose].filter((t) => Number.isFinite(t) && t > 0);
-    const closeTime = candidates.length ? Math.min(...candidates) : NaN;
-    const pastClose = (Number.isFinite(closeTime) && now >= closeTime) || marketDone || tooOld;
-
-    if (pastClose) {
+    if (this._isTradePastDeadline(trade, market, now)) {
       await this._settleClosedWindow(trade, predictions, market);
       return;
     }
 
+    const heldSideBidCents = trade.side === 'yes' ? market.yes_bid : market.no_bid;
+    // For stop/TP timing use the earliest known close so we don't hold into the next session.
+    const closeCandidates = [storedClose, this._marketCloseMs(market)].filter((t) => Number.isFinite(t) && t > 0);
+    const closeTime = closeCandidates.length ? Math.min(...closeCandidates) : NaN;
+
     if (!Number.isFinite(closeTime)) {
-      // No usable close time and market still looks open — wait one more cycle
-      // unless we already have an official result.
       if (market.result) {
         await this._settleClosedWindow(trade, predictions, market);
       }
@@ -814,6 +841,33 @@ class TradingBot {
       await this._closePosition(trade, heldSideBidCents, 'take_profit');
     } else if (canExitEven) {
       await this._closePosition(trade, heldSideBidCents, 'breakeven');
+    }
+  }
+
+  /**
+   * Manage open trades only (no new entries). Safe to call when prediction
+   * compute failed — settlement must not depend on a healthy Coinbase cycle.
+   */
+  async manageOpenPositions(predictions) {
+    this._maybeRotateLedger(Date.now());
+    for (const trade of [...this.openTrades]) {
+      try {
+        await this._manageOpenTrade(trade, predictions);
+      } catch (err) {
+        console.error(`[bot] manage open ${trade.symbol} ${trade.ticker} failed:`, err.message);
+        const now = Date.now();
+        if (this._isTradePastDeadline(trade, null, now) && trade.status === 'open') {
+          try {
+            await this._closePosition(
+              trade,
+              Number.isFinite(trade.entryPriceCents) ? trade.entryPriceCents : 50,
+              'settled_timeout'
+            );
+          } catch (closeErr) {
+            console.error(`[bot] emergency close failed for ${trade.ticker}:`, closeErr.message);
+          }
+        }
+      }
     }
   }
 
@@ -962,9 +1016,7 @@ class TradingBot {
 
     // --- first, manage every currently open trade by its own ticker,
     // regardless of what symbol is currently selected to trade next ---
-    for (const trade of this.openTrades) {
-      await this._manageOpenTrade(trade, predictions);
-    }
+    await this.manageOpenPositions(predictions);
 
     if (!this.isRunning) {
       this.lastDecision = 'Bot is stopped; it will continue monitoring any already-open positions but will not open new ones.';

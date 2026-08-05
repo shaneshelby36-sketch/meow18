@@ -19,7 +19,7 @@ process.env.DATA_DIR = tmpDir;
 delete process.env.RENDER;
 delete process.env.RENDER_SERVICE_ID;
 
-const { DATA_DIR, ensureDataDir, dataPath, writeJsonAtomic } = require('./paths');
+const { DATA_DIR, ensureDataDir, dataPath, writeJsonAtomic, pruneArchiveFiles } = require('./paths');
 const indicators = require('./indicators');
 const { CandleSeries } = require('./candles');
 const { OrderBook } = require('./orderBook');
@@ -239,6 +239,23 @@ function testPaths() {
   checkEq(read.ok, true, 'atomic write readable');
   checkEq(read.n, 42, 'atomic write payload intact');
   check(fs.existsSync(dataPath('archive')), 'archive dir created');
+
+  const archiveDir = dataPath('archive');
+  const oldFile = path.join(archiveDir, 'bot-ledger-old.json');
+  const newFile = path.join(archiveDir, 'bot-ledger-new.json');
+  fs.writeFileSync(oldFile, '{"trades":[]}');
+  fs.writeFileSync(newFile, '{"trades":[]}');
+  const twentyDaysAgo = Date.now() - 20 * 24 * 60 * 60 * 1000;
+  fs.utimesSync(oldFile, new Date(twentyDaysAgo / 1000), new Date(twentyDaysAgo / 1000));
+  const pruned = pruneArchiveFiles({ now: Date.now() });
+  check(!fs.existsSync(oldFile), 'prune deletes archive older than retention');
+  check(fs.existsSync(newFile), 'prune keeps recent archive');
+  check(pruned.deleted >= 1, 'prune reports deleted count');
+  try {
+    fs.unlinkSync(newFile);
+  } catch {
+    // ignore
+  }
 }
 
 // ───────────────────────────── indicators ─────────────────────────────
@@ -614,6 +631,46 @@ async function testBotExits() {
     delete trade.windowCloseTime;
     await bot._manageOpenTrade(trade, predictions(2900));
     checkEq(trade.status, 'closed', 'max-age force settle');
+  }
+
+  // Saved close in the past must settle even if Kalshi still says active + future close
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'active',
+        close_time: new Date(now + 14 * 60 * 1000).toISOString(),
+        result: '',
+        floor_strike: 3000,
+        yes_bid: 40,
+        no_bid: 55,
+      })
+    );
+    const trade = openTrade(bot, {
+      side: 'no',
+      floorStrike: 3000,
+      windowCloseTime: now - 5000,
+    });
+    await bot._manageOpenTrade(trade, predictions(2950));
+    checkEq(trade.status, 'closed', 'past saved close settles despite active+future API close');
+  }
+
+  // ISO string windowCloseTime still parses
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'active',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        result: 'no',
+      })
+    );
+    const trade = openTrade(bot, {
+      side: 'no',
+      windowCloseTime: new Date(now - 2000).toISOString(),
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.status, 'closed', 'ISO windowCloseTime settles');
   }
 
   // Stop loss

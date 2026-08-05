@@ -42,6 +42,8 @@ Settings auto-save from the dashboard (and again on every server boot) into `bot
 
 Check `/api/health` — you want `"dataDirEphemeral": false` and `"configFileExists": true`.
 
+Disk use: live `trade-log.json` is capped at 5000 events; the 12h ledger/tracker rotations write into `data/archive/`. Those archive files are **auto-deleted after 14 days** by default (`ARCHIVE_RETENTION_DAYS`). Set that env to `0` to keep archives forever, or another number of days if you want a different retention window. Live config, open trades, reserve, and calibration are never pruned.
+
 ### Optional: bake defaults into env
 
 You can also set starting defaults via env (the dashboard can still override them once `DATA_DIR` persists):

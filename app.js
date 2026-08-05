@@ -874,7 +874,13 @@ function formatTradeTime(ms) {
 function formatCloseCountdown(closeTime) {
   if (!Number.isFinite(closeTime)) return '—';
   const remainingMs = closeTime - Date.now();
-  if (remainingMs <= 0) return 'settling';
+  if (remainingMs <= 0) {
+    // Past close: bot should force-settle within a cycle. Don't imply a
+    // forever "Settling…" hang on the open-positions list.
+    const overdueSec = Math.round(-remainingMs / 1000);
+    if (overdueSec > 20) return `overdue ${overdueSec}s`;
+    return 'closing…';
+  }
   const totalSeconds = Math.round(remainingMs / 1000);
   const mm = Math.floor(totalSeconds / 60);
   const ss = totalSeconds % 60;

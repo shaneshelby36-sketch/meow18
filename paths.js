@@ -45,6 +45,63 @@ function dataPath(...parts) {
   return path.join(DATA_DIR, ...parts);
 }
 
+/**
+ * How long to keep rotated ledger/tracker/trade-log snapshots under
+ * data/archive/. Default 14 days (matches a biweekly top-up cadence).
+ * Set ARCHIVE_RETENTION_DAYS=0 to disable pruning.
+ */
+const ARCHIVE_RETENTION_DAYS = (() => {
+  const raw = process.env.ARCHIVE_RETENTION_DAYS;
+  if (raw === undefined || raw === '') return 14;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 14;
+})();
+
+/**
+ * Deletes archive/*.json older than ARCHIVE_RETENTION_DAYS.
+ * Live files (bot-ledger.json, trade-log.json, config, calibration) are never touched.
+ */
+function pruneArchiveFiles({ now = Date.now() } = {}) {
+  if (!ARCHIVE_RETENTION_DAYS || ARCHIVE_RETENTION_DAYS <= 0) {
+    return { deleted: 0, kept: 0, retentionDays: ARCHIVE_RETENTION_DAYS };
+  }
+  const archiveDir = path.join(DATA_DIR, 'archive');
+  const cutoff = now - ARCHIVE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  let deleted = 0;
+  let kept = 0;
+  try {
+    if (!fs.existsSync(archiveDir)) return { deleted: 0, kept: 0, retentionDays: ARCHIVE_RETENTION_DAYS };
+    for (const name of fs.readdirSync(archiveDir)) {
+      if (!name.endsWith('.json')) continue;
+      const full = path.join(archiveDir, name);
+      let mtime;
+      try {
+        mtime = fs.statSync(full).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (mtime < cutoff) {
+        try {
+          fs.unlinkSync(full);
+          deleted += 1;
+        } catch (err) {
+          console.error(`[paths] failed to prune archive ${name}:`, err.message);
+        }
+      } else {
+        kept += 1;
+      }
+    }
+  } catch (err) {
+    console.error('[paths] archive prune failed:', err.message);
+  }
+  if (deleted > 0) {
+    console.log(
+      `[paths] pruned ${deleted} archive file(s) older than ${ARCHIVE_RETENTION_DAYS}d (${kept} kept)`
+    );
+  }
+  return { deleted, kept, retentionDays: ARCHIVE_RETENTION_DAYS };
+}
+
 /** Atomic JSON write so a crash mid-save cannot leave a half-written config. */
 function writeJsonAtomic(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -57,7 +114,9 @@ module.exports = {
   DATA_DIR,
   DATA_DIR_EPHEMERAL,
   DATA_DIR_FROM_ENV,
+  ARCHIVE_RETENTION_DAYS,
   ensureDataDir,
   dataPath,
+  pruneArchiveFiles,
   writeJsonAtomic,
 };

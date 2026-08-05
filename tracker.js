@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { dataPath, ensureDataDir } = require('./paths');
+const { dataPath, ensureDataDir, pruneArchiveFiles } = require('./paths');
 
 ensureDataDir();
 
@@ -149,6 +149,7 @@ class PredictionTracker {
       const fileName = `tracker-${new Date(this.periodStartTime).toISOString().replace(/[:.]/g, '-')}.json`;
       fs.writeFileSync(path.join(ARCHIVE_DIR, fileName), JSON.stringify(archive, null, 2));
       console.log(`[tracker] archived the last 12h of accuracy history to data/archive/${fileName}`);
+      pruneArchiveFiles({ now });
     } catch (err) {
       console.error('[tracker] failed to archive history before rotation:', err.message);
     }

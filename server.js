@@ -15,7 +15,7 @@ const { SignalAccumulatorManager } = require('./signalAccumulator');
 const { KalshiClient } = require('./kalshiClient');
 const { TradingBot, SERIES_BY_SYMBOL } = require('./bot');
 const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
-const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir } = require('./paths');
+const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir, ARCHIVE_RETENTION_DAYS } = require('./paths');
 
 ensureDataDir();
 
@@ -307,6 +307,14 @@ async function recompute() {
   } catch (err) {
     lastComputeError = err.message;
     console.error('[predict] compute failed:', err);
+    // Settlement must not depend on a healthy prediction cycle — still
+    // force-manage any open paper/live trades when Coinbase/Kalshi target
+    // fetches blow up mid-window.
+    if (bot) {
+      await bot.manageOpenPositions(latestPrediction).catch((botErr) => {
+        console.error('[bot] manage-open after compute failure:', botErr.message);
+      });
+    }
   } finally {
     recomputeInFlight = false;
   }
@@ -354,6 +362,7 @@ app.get("/", (req, res) => {
       // Without a persistent disk on Render, restarts wipe settings/ledger.
       dataDirFromEnv: DATA_DIR_FROM_ENV,
       dataDirEphemeral: DATA_DIR_EPHEMERAL,
+      archiveRetentionDays: ARCHIVE_RETENTION_DAYS,
       configFileExists: fs.existsSync(configPath),
       uptimeMs: Date.now() - SERVER_START_TIME,
       time: new Date().toISOString(),
