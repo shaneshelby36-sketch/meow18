@@ -59,16 +59,21 @@ Bot settings: **1 / 2 / 3 day** runs, plus **Auto** and **Hunt best**.
 ## Before putting real money in
 
 1. Keep `KALSHI_LIVE_TRADING=false` (paper mode). Paper uses live Kalshi quotes but never places orders.
-2. Run the offline exit/settlement suite:
+2. Run the full offline suite (paths, indicators, candles, order book, tracker, predictions, backtest, every bot exit/settle/open path):
 
 ```bash
 npm test
 ```
 
-That checks settle-on-result, price-vs-strike, fetch-fail force-settle, legacy max-age settle, stop-loss, take-profit, and skipping expired markets — without touching your real ledger.
-3. In the dashboard, run **1 / 2 / 3 day** backtests (and **Hunt best**) with the settings you plan to use.
-4. Let paper mode run through several full 15-minute windows and confirm:
+3. Optional live public-API smoke (Coinbase candles + Kalshi market read — still no orders):
+
+```bash
+ONLINE=1 npm test
+```
+
+4. In the dashboard, run **1 / 2 / 3 day** backtests (and **Hunt best**) with the settings you plan to use.
+5. Let paper mode run through several full 15-minute windows and confirm:
    - open trades close (settled / stop / TP) instead of carrying forever
    - countdown moves to the next window (not stuck)
    - P&L / win rate look sane
-5. Only then set live env vars + confirm string, restart, and start with a tiny stake / tight guardrail.
+6. Only then set live env vars + confirm string, restart, and start with a tiny stake.

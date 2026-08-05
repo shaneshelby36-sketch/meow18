@@ -518,6 +518,7 @@ function tickAllCountdowns() {
     updateBigCountdown(panel);
     updateActivePhase(panel);
   });
+  updateBotRuntimeDisplays();
 }
 
 function updateBigCountdown(panel) {
@@ -716,13 +717,13 @@ async function refreshBotStatus() {
         persistLine.hidden = false;
         persistLine.style.color = 'var(--wait)';
         persistLine.textContent =
-          'Warning: Render is using ephemeral disk. Attach a Persistent Disk (mount /var/data) or settings/ledger reset on every restart.';
+          'Warning: Render disk is ephemeral — Save works until the next restart, then settings reset. Attach a Persistent Disk at /var/data.';
       } else {
         persistLine.hidden = false;
         persistLine.style.color = 'var(--up)';
         persistLine.textContent = health.configFileExists
-          ? `Settings persist across reboots (${health.dataDir}).`
-          : `Durable data dir ready (${health.dataDir}) — settings will auto-save here.`;
+          ? `Settings persist on disk (${health.dataDir}).`
+          : `Durable data dir ready (${health.dataDir}) — save settings once to create the config file.`;
       }
     }
 
@@ -739,13 +740,7 @@ async function refreshBotStatus() {
     updateModeButtons(mode, data.config.liveAuthorized);
 
     const chips = [];
-    const open = data.openTrades && data.openTrades[0];
-    const hasValidEntryPrice = open && Number.isFinite(open.entryPriceCents) && open.entryPriceCents > 0;
-    const side = open && typeof open.side === 'string' ? open.side.toUpperCase() : '—';
-    const stake = open && Number.isFinite(open.stakeDollars) ? open.stakeDollars.toFixed(2) : '—';
-    chips.push(chip('Open position', open
-      ? hasValidEntryPrice ? `${open.symbol || 'Unknown'} ${side} @ ${open.entryPriceCents}¢ ($${stake})` : `${open.symbol || 'Unknown'} ${side} · awaiting a valid quote`
-      : 'None'));
+    chips.push(chip('Lifetime trades', data.tradeLogTotal != null ? data.tradeLogTotal : '—'));
     chips.push(chip('Trades opened', data.stats.totalAttempts));
     chips.push(chip('Settled', data.stats.totalTrades));
     chips.push(chip('Profitable exits', data.stats.profitableExits));
@@ -753,15 +748,18 @@ async function refreshBotStatus() {
     chips.push(chip('Current streak', `${data.stats.currentWinStreak} win${data.stats.currentWinStreak === 1 ? '' : 's'}`));
     chips.push(chip('Best streak', `${data.stats.longestWinStreak} win${data.stats.longestWinStreak === 1 ? '' : 's'}`));
     const capital = data.capital;
-    if (capital) {
-      chips.push(chip('Guardrail remaining', `$${((capital.guardrailRemainingCents || 0) / 100).toFixed(2)} / $${((capital.guardrailCents || 0) / 100).toFixed(2)}`));
-      if (data.config.mode === 'live') {
-        chips.push(chip('Kalshi available', capital.liveAvailableCents == null ? 'Checking…' : `$${(capital.liveAvailableCents / 100).toFixed(2)}`));
-      }
+    if (capital && data.config.mode === 'live') {
+      chips.push(chip('Kalshi available', capital.liveAvailableCents == null ? 'Checking…' : `$${(capital.liveAvailableCents / 100).toFixed(2)}`));
     }
     if (data.lastDecision) chips.push(chip('Decision', data.lastDecision));
     if (data.lastError) chips.push(chip('Last error', data.lastError));
-    body.innerHTML = `${buildCapitalLedgerHtml(capital)}${chips.join('')}`;
+    body.innerHTML = [
+      buildCapitalLedgerHtml(capital),
+      buildOpenPositionsHtml(data.openTrades),
+      `<div class="bot-stat-chips">${chips.join('')}</div>`,
+      buildTradeLogHtml(data.tradeLog, data.tradeLogTotal),
+      buildActivityLogHtml(data.activityLog, data.recentTrades),
+    ].join('');
     renderBotDashboard(data);
   } catch (err) {
     modeLine.textContent = 'Could not reach the engine to check bot status.';
@@ -775,7 +773,27 @@ function formatBotRuntime(runningSince) {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const secs = seconds % 60;
-  return `Running ${hours}h ${String(minutes).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`;
+  return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`;
+}
+
+let lastBotRunningSince = null;
+let lastBotIsRunning = false;
+
+function updateBotRuntimeDisplays() {
+  const runtimeText = lastBotIsRunning ? formatBotRuntime(lastBotRunningSince) : 'Stopped';
+  const runtimeEl = document.getElementById('bot-runtime-value');
+  if (runtimeEl) {
+    runtimeEl.textContent = lastBotIsRunning ? `Running ${runtimeText}` : 'Stopped';
+    runtimeEl.classList.toggle('is-running', lastBotIsRunning);
+    runtimeEl.classList.toggle('is-stopped', !lastBotIsRunning);
+  }
+  const banner = document.getElementById('bot-runtime-banner');
+  if (banner) {
+    banner.hidden = false;
+    banner.classList.toggle('is-running', lastBotIsRunning);
+  }
+  const timer = document.getElementById('bot-running-timer');
+  if (timer) timer.textContent = lastBotIsRunning ? `Running ${runtimeText}` : 'Stopped';
 }
 
 function renderBotDashboard(data) {
@@ -798,23 +816,33 @@ function renderBotDashboard(data) {
     state.textContent = data.message || 'Bot not enabled on the server (set KALSHI_ENABLED=true).';
     stats.innerHTML = '';
     toggle.hidden = true;
+    lastBotIsRunning = false;
+    lastBotRunningSince = null;
+    updateBotRuntimeDisplays();
     return;
   }
   toggle.hidden = false;
+  lastBotIsRunning = !!data.isRunning;
+  lastBotRunningSince = data.isRunning ? (Number(data.runningSince) || Date.now()) : null;
+  updateBotRuntimeDisplays();
+
   const mode = data.config.mode === 'live' ? 'LIVE' : 'PAPER';
-  state.textContent = `${mode} · ${data.isRunning ? formatBotRuntime(data.runningSince) : 'Stopped'} · ${data.lastDecision || ''}`;
+  state.textContent = `${mode} · ${data.config.symbol || '—'} · ${formatSkimLabel(data.config)} · ${data.lastDecision || ''}`;
   const capital = data.capital || {};
+  const openCount = (data.openTrades || []).length;
   stats.innerHTML = [
     buildCapitalLedgerHtml(capital),
+    buildOpenPositionsHtml(data.openTrades),
+    chip('Open', openCount),
     chip('Trades opened', data.stats.totalAttempts),
+    chip('Lifetime log', data.tradeLogTotal != null ? data.tradeLogTotal : data.stats.lifetimeTrades || 0),
     chip('Profitable exits', data.stats.profitableExits),
+    buildTradeLogHtml(data.tradeLog, data.tradeLogTotal),
   ].join('');
   toggle.textContent = data.isRunning ? 'Stop new trades' : 'Start bot';
   toggle.dataset.running = String(!data.isRunning);
   const overlayToggle = document.getElementById('bot-running-toggle');
-  const timer = document.getElementById('bot-running-timer');
   if (overlayToggle) overlayToggle.textContent = toggle.textContent;
-  if (timer) timer.textContent = data.isRunning ? formatBotRuntime(data.runningSince) : 'Stopped';
 }
 
 async function setBotRunning(running) {
@@ -829,6 +857,157 @@ async function setBotRunning(running) {
   } catch (err) {
     console.error('[dashboard] bot state update failed:', err.message);
   }
+}
+
+function formatTradeTime(ms) {
+  if (!Number.isFinite(ms)) return '—';
+  const d = new Date(ms);
+  return d.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function formatCloseCountdown(closeTime) {
+  if (!Number.isFinite(closeTime)) return '—';
+  const remainingMs = closeTime - Date.now();
+  if (remainingMs <= 0) return 'settling';
+  const totalSeconds = Math.round(remainingMs / 1000);
+  const mm = Math.floor(totalSeconds / 60);
+  const ss = totalSeconds % 60;
+  return `${mm}:${String(ss).padStart(2, '0')} left`;
+}
+
+function buildOpenPositionsHtml(openTrades) {
+  const opens = (openTrades || []).filter(Boolean);
+  if (!opens.length) {
+    return `
+      <div class="bot-positions">
+        <div class="bot-panel-title">Open positions <span>0</span></div>
+        <p class="bot-empty-line">No open positions.</p>
+      </div>`;
+  }
+  const rows = opens
+    .map((t) => {
+      const side = String(t.side || '').toUpperCase();
+      const entry = Number.isFinite(t.entryPriceCents) ? `${t.entryPriceCents}¢` : '—';
+      const stake = Number.isFinite(t.stakeDollars) ? `$${Number(t.stakeDollars).toFixed(2)}` : '—';
+      const contracts = Number.isFinite(t.contracts) ? t.contracts : '—';
+      const conf = Number.isFinite(t.engineConfidence) ? `${t.engineConfidence}%` : '—';
+      return `
+        <div class="bot-position-row">
+          <div class="bot-position-main">
+            <strong>${t.symbol || '?'} ${side}</strong>
+            <span>${entry} · ${contracts} ct · ${stake}</span>
+          </div>
+          <div class="bot-position-meta">
+            <span>Opened ${formatTradeTime(t.openedAt)}</span>
+            <span>${formatCloseCountdown(Number(t.windowCloseTime))}</span>
+            <span>Conf ${conf}</span>
+          </div>
+        </div>`;
+    })
+    .join('');
+  return `
+    <div class="bot-positions">
+      <div class="bot-panel-title">Open positions <span>${opens.length}</span></div>
+      ${rows}
+    </div>`;
+}
+
+function buildTradeLogHtml(tradeLog, tradeLogTotal) {
+  const trades = Array.isArray(tradeLog) ? tradeLog : [];
+  const total = Number.isFinite(tradeLogTotal) ? tradeLogTotal : trades.length;
+  if (!trades.length) {
+    return `
+      <div class="bot-log bot-trade-log">
+        <div class="bot-panel-title">Trade log <span>0</span></div>
+        <p class="bot-empty-line">No trades saved yet. Every open/close is written to disk and stays after the 12h stats rotation.</p>
+      </div>`;
+  }
+
+  const rows = trades
+    .map((t) => {
+      const side = String(t.side || '').toUpperCase();
+      const status = t.status === 'open' ? 'OPEN' : String(t.exitReason || 'closed').toUpperCase();
+      const entry = Number.isFinite(t.entryPriceCents) ? `${t.entryPriceCents}¢` : '—';
+      const exit = Number.isFinite(t.exitPriceCents) ? `${t.exitPriceCents}¢` : '—';
+      const pnl = t.status === 'closed' && Number.isFinite(t.pnlCents) ? t.pnlCents : null;
+      const pnlClass =
+        pnl != null && pnl > 0 ? 'chip-positive' : pnl != null && pnl < 0 ? 'chip-negative' : '';
+      const skim =
+        Number.isFinite(t.skimmedCents) && t.skimmedCents > 0
+          ? ` · skim $${(t.skimmedCents / 100).toFixed(2)}`
+          : '';
+      const conf = Number.isFinite(t.engineConfidence) ? ` · conf ${t.engineConfidence}%` : '';
+      return `
+        <div class="bot-log-row kind-${t.status === 'open' ? 'open' : 'close'}">
+          <span class="bot-log-time">${formatTradeTime(t.closedAt || t.openedAt)}</span>
+          <span class="bot-log-msg">
+            <strong>${t.symbol || '?'} ${side}</strong>
+            ${status} · ${entry}${t.status === 'closed' ? ` → ${exit}` : ''}
+            ${Number.isFinite(t.stakeDollars) ? ` · $${Number(t.stakeDollars).toFixed(2)}` : ''}${conf}${skim}
+            <span class="bot-log-sub">opened ${formatTradeTime(t.openedAt)}${t.mode ? ` · ${t.mode}` : ''}</span>
+          </span>
+          <span class="bot-log-pnl ${pnlClass}">${pnl != null ? formatMoneyCents(pnl, { signed: true }) : t.status === 'open' ? 'open' : ''}</span>
+        </div>`;
+    })
+    .join('');
+
+  return `
+    <div class="bot-log bot-trade-log">
+      <div class="bot-panel-title">Trade log <span>${total}</span></div>
+      <p class="bot-empty-line">Saved on disk (survives reboot + 12h rotation). Showing latest ${trades.length}${total > trades.length ? ` of ${total}` : ''}.</p>
+      <div class="bot-log-list">${rows}</div>
+    </div>`;
+}
+
+function buildActivityLogHtml(activityLog, recentTrades) {
+  const events = Array.isArray(activityLog) ? activityLog.slice(0, 30) : [];
+  // Fallback: synthesize from trades if log is empty (pre-upgrade ledgers).
+  const rows = events.length
+    ? events
+    : (recentTrades || []).slice(0, 20).map((t) => ({
+        at: t.closedAt || t.openedAt,
+        kind: t.status === 'open' ? 'open' : 'close',
+        message:
+          t.status === 'open'
+            ? `Open ${t.symbol} ${String(t.side || '').toUpperCase()} @ ${t.entryPriceCents}¢`
+            : `Closed ${t.symbol} ${String(t.side || '').toUpperCase()} via ${t.exitReason || 'exit'} (P&L $${((t.pnlCents || 0) / 100).toFixed(2)})`,
+        pnlCents: t.pnlCents,
+      }));
+
+  if (!rows.length) {
+    return `
+      <div class="bot-log">
+        <div class="bot-panel-title">Activity log</div>
+        <p class="bot-empty-line">No activity yet — opens, closes, and mode changes show up here.</p>
+      </div>`;
+  }
+
+  const html = rows
+    .map((e) => {
+      const pnl = e.pnlCents;
+      const pnlClass =
+        Number.isFinite(pnl) && pnl > 0 ? 'chip-positive' : Number.isFinite(pnl) && pnl < 0 ? 'chip-negative' : '';
+      const kind = e.kind || 'info';
+      return `
+        <div class="bot-log-row kind-${kind}">
+          <span class="bot-log-time">${formatTradeTime(e.at)}</span>
+          <span class="bot-log-msg">${e.message || ''}</span>
+          ${Number.isFinite(pnl) ? `<span class="bot-log-pnl ${pnlClass}">${formatMoneyCents(pnl, { signed: true })}</span>` : '<span class="bot-log-pnl"></span>'}
+        </div>`;
+    })
+    .join('');
+
+  return `
+    <div class="bot-log">
+      <div class="bot-panel-title">Activity log</div>
+      <div class="bot-log-list">${html}</div>
+    </div>`;
 }
 
 function formatMoneyCents(cents, { signed = false } = {}) {
@@ -854,18 +1033,23 @@ function buildCapitalLedgerHtml(capital) {
   const totalEquity = available + openPositions + reserved;
   const netPnl = totalEquity - starting;
   const pnlClass = netPnl > 0 ? 'chip-positive' : netPnl < 0 ? 'chip-negative' : '';
+  const reservedClass = reserved > 0 ? 'chip-positive' : '';
 
   return `
     <div class="capital-ledger">
       <div class="capital-ledger-title">Capital</div>
+      <div class="capital-row capital-reserved">
+        <span>Reserved Profit <em>(locked skim)</em></span>
+        <span class="${reservedClass}">${formatMoneyCents(reserved)}</span>
+      </div>
+      <div class="capital-divider"></div>
       <div class="capital-row"><span>Starting Bankroll</span><span>${formatMoneyCents(starting)}</span></div>
       <div class="capital-row"><span>Available Cash</span><span>${formatMoneyCents(available)}</span></div>
       <div class="capital-row"><span>Open Positions Value</span><span>${formatMoneyCents(openPositions)}</span></div>
-      <div class="capital-row"><span>Reserved Profit</span><span>${formatMoneyCents(reserved)}</span></div>
       <div class="capital-divider"></div>
       <div class="capital-row capital-total"><span>Total Equity</span><span>${formatMoneyCents(totalEquity)}</span></div>
       <div class="capital-row capital-pnl"><span>Net P&amp;L</span><span class="${pnlClass}">${formatMoneyCents(netPnl, { signed: true })}</span></div>
-      <p class="capital-formula">Total Equity = Available Cash + Open Positions + Reserved Profit</p>
+      <p class="capital-formula">Default skim: 50% of each win → Reserved (stays locked), 50% stays in Available. Losses hit Available only — Reserved is not drawn down. Total Equity = Available Cash + Open Positions + Reserved Profit</p>
     </div>`;
 }
 
@@ -881,7 +1065,6 @@ const SLIDER_UNITS = {
   'bot-takeprofit': (v) => `${Math.round(v)}¢`,
   'bot-stake': (v) => `$${Math.round(v)}`,
   'bot-maxpos': (v) => `${Math.round(v)}`,
-  'bot-guardrail': (v) => `$${Math.round(v)}`,
   'bot-paper-balance': (v) => `$${Math.round(v)}`,
 };
 
@@ -898,18 +1081,32 @@ function updateSkimSliderDisplay() {
   const input = document.getElementById('bot-skim-amount');
   const display = document.getElementById('bot-skim-amount-value');
   if (!input || !display) return;
-  display.textContent = mode === 'percent' ? `${Math.round(input.value)}%` : `$${Math.round(input.value)}`;
+  display.textContent = mode === 'percent' ? `${Math.round(input.value)}%` : mode === 'off' ? 'off' : `$${Math.round(input.value)}`;
+}
+
+function formatSkimLabel(config) {
+  if (!config || config.skimMode === 'off') return 'skim off';
+  if (config.skimMode === 'percent') return `skim ${config.skimPercent}% of each win → Reserved`;
+  return `skim $${Number(config.skimFixedDollars || 0).toFixed(0)} per win → Reserved`;
 }
 
 function wireSliderDisplays() {
-  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-stake', 'bot-maxpos', 'bot-guardrail', 'bot-paper-balance'].forEach((id) => {
+  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach((id) => {
     const input = document.getElementById(id);
     if (input) input.addEventListener('input', () => updateSliderDisplay(id));
   });
   const skimAmount = document.getElementById('bot-skim-amount');
   if (skimAmount) skimAmount.addEventListener('input', updateSkimSliderDisplay);
   const skimMode = document.getElementById('bot-skim-mode');
-  if (skimMode) skimMode.addEventListener('change', updateSkimSliderDisplay);
+  if (skimMode) {
+    skimMode.addEventListener('change', () => {
+      const input = document.getElementById('bot-skim-amount');
+      // Avoid the common footgun: slider at "50" while still on Fixed = $50/win, not 50%.
+      if (input && skimMode.value === 'percent' && Number(input.value) === 5) input.value = 50;
+      if (input && skimMode.value === 'fixed' && Number(input.value) === 50) input.value = 5;
+      updateSkimSliderDisplay();
+    });
+  }
 }
 
 let botFormHydrating = false;
@@ -932,7 +1129,6 @@ function wireBotConfigAutoSave() {
     'bot-takeprofit',
     'bot-stake',
     'bot-maxpos',
-    'bot-guardrail',
     'bot-paper-balance',
     'bot-skim-mode',
     'bot-skim-amount',
@@ -961,14 +1157,13 @@ async function loadBotConfigIntoForm() {
     document.getElementById('bot-edge').value = c.edgeThresholdPct;
     document.getElementById('bot-confidence').value = c.minConfidence;
     document.getElementById('bot-stoploss').value = c.stopLossCents;
-    document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 70;
+    document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 83;
     document.getElementById('bot-stake').value = c.stakeDollars;
     document.getElementById('bot-maxpos').value = c.maxOpenPositions;
-    document.getElementById('bot-guardrail').value = c.guardrailDollars;
     document.getElementById('bot-paper-balance').value = c.paperStartingBalanceDollars;
     document.getElementById('bot-skim-mode').value = c.skimMode;
     document.getElementById('bot-skim-amount').value = c.skimMode === 'percent' ? c.skimPercent : c.skimFixedDollars;
-    ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-stake', 'bot-maxpos', 'bot-guardrail', 'bot-paper-balance'].forEach(updateSliderDisplay);
+    ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-takeprofit', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach(updateSliderDisplay);
     updateSkimSliderDisplay();
   } catch {
     // Bot likely disabled or engine unreachable — form just stays blank.
@@ -990,7 +1185,6 @@ async function saveBotConfig(opts = {}) {
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
-    guardrailDollars: parseFloat(document.getElementById('bot-guardrail').value),
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),
     skimMode,
     ...(skimMode === 'percent' ? { skimPercent: skimAmount } : { skimFixedDollars: skimAmount }),
@@ -1009,8 +1203,26 @@ async function saveBotConfig(opts = {}) {
       feedback.style.color = 'var(--down)';
       return;
     }
-    feedback.textContent = opts.auto ? '✓ Settings auto-saved (survive reboot).' : '✓ Settings saved.';
-    feedback.style.color = 'var(--up)';
+    const saved = await res.json().catch(() => ({}));
+    const skimText = formatSkimLabel(saved.config || payload);
+    let msg = opts.auto ? `✓ Auto-saved — ${skimText}.` : `✓ Saved — ${skimText}.`;
+    try {
+      const healthRes = await fetch(`${engineUrl}/api/health`, { cache: 'no-store' });
+      if (healthRes.ok) {
+        const health = await healthRes.json();
+        if (health.dataDirEphemeral) {
+          msg += ' Warning: disk is ephemeral — this will reset on next Render restart until you add a Persistent Disk.';
+          feedback.style.color = 'var(--wait)';
+        } else {
+          feedback.style.color = 'var(--up)';
+        }
+      } else {
+        feedback.style.color = 'var(--up)';
+      }
+    } catch {
+      feedback.style.color = 'var(--up)';
+    }
+    feedback.textContent = msg;
     if (!opts.auto) refreshBotStatus();
   } catch (err) {
     feedback.textContent = `Not saved — could not reach the engine: ${err.message}`;
@@ -1046,7 +1258,6 @@ function readBacktestSettingsFromForm() {
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
-    guardrailDollars: parseFloat(document.getElementById('bot-guardrail').value),
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),
     skimMode,
     ...(skimMode === 'percent' ? { skimPercent: skimAmount } : { skimFixedDollars: skimAmount }),
@@ -1078,7 +1289,7 @@ function renderBacktestResults(data, dayLabel) {
   const pnlClass = (t.netPnlCents || 0) > 0 ? 'chip-positive' : (t.netPnlCents || 0) < 0 ? 'chip-negative' : '';
   const modeLabel = data.mode === 'AUTO' || t.mode === 'AUTO' ? 'AUTO' : data.symbol;
   const scanned = (data.symbolsScanned || t.symbolsScanned || [data.symbol]).join(', ');
-  const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Stop ${s.stopLossCents}¢ · TP ${s.takeProfitCents != null ? s.takeProfitCents + '¢' : '—'} · Max pos ${s.maxOpenPositions} · Guardrail $${s.guardrailDollars} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
+  const settingsLine = `Edge ≥ ${s.edgeThresholdPct}% · Confidence ≥ ${s.minConfidence}% · Stake $${s.stakeDollars} · Stop ${s.stopLossCents}¢ · TP ${s.takeProfitCents != null ? s.takeProfitCents + '¢' : '—'} · Max pos ${s.maxOpenPositions} · Skim ${skimLabel} · Bankroll $${s.paperStartingBalanceDollars}`;
   const bySymbol = t.tradesBySymbol
     ? Object.entries(t.tradesBySymbol)
         .sort((a, b) => b[1] - a[1])
@@ -1120,10 +1331,11 @@ function renderBacktestResults(data, dayLabel) {
       <div class="capital-row"><span>Take-profit exits</span><span>${t.takeProfitExits ?? 0}</span></div>
       <div class="capital-row"><span>Breakeven exits</span><span>${t.breakevenExits ?? 0}</span></div>
       <div class="capital-divider"></div>
+      <div class="capital-row capital-reserved"><span>Reserved Profit <em>(locked skim)</em></span><span class="${(t.reservedProfitCents || 0) > 0 ? 'chip-positive' : ''}">${formatMoneyFromCents(t.reservedProfitCents)}</span></div>
+      <div class="capital-divider"></div>
       <div class="capital-row"><span>Starting Bankroll</span><span>${formatMoneyFromCents(t.startingBankrollCents)}</span></div>
       <div class="capital-row"><span>Available Cash</span><span>${formatMoneyFromCents(t.availableCashCents)}</span></div>
       <div class="capital-row"><span>Open Positions Value</span><span>${formatMoneyFromCents(t.openPositionsValueCents)}</span></div>
-      <div class="capital-row"><span>Reserved Profit</span><span>${formatMoneyFromCents(t.reservedProfitCents)}</span></div>
       <div class="capital-divider"></div>
       <div class="capital-row capital-total"><span>Total Equity</span><span>${formatMoneyFromCents(t.totalEquityCents)}</span></div>
       <div class="capital-row capital-pnl"><span>Net P&amp;L</span><span class="${pnlClass}">${formatMoneyFromCents(t.netPnlCents, { signed: true })}</span></div>
@@ -1132,7 +1344,7 @@ function renderBacktestResults(data, dayLabel) {
   const skips = t.skipCounts || {};
   const skipBlock = `
     <div class="backtest-skips">
-      <span>Skipped setups — low confidence: ${skips.lowConfidence || 0}, low edge: ${skips.lowEdge || 0}, guardrail: ${skips.guardrail || 0}, cash: ${skips.insufficientCash || 0}</span>
+      <span>Skipped setups — low confidence: ${skips.lowConfidence || 0}, low edge: ${skips.lowEdge || 0}, cash: ${skips.insufficientCash || 0}</span>
     </div>`;
 
   const recent = (t.recentTrades || [])

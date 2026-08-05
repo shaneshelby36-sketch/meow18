@@ -59,6 +59,10 @@
           <button class="btn-primary" id="bot-dashboard-open" type="button">Open bot</button>
         </div>
         <p class="bot-dashboard-server-note">Runs on the VPS. Closing the dashboard does not pause the bot.</p>
+        <div class="bot-runtime-banner" id="bot-runtime-banner">
+          <span class="stat-label">Bot runtime</span>
+          <span class="bot-runtime-value" id="bot-runtime-value">—</span>
+        </div>
         <p class="bot-dashboard-state" id="bot-dashboard-state">Checking bot status…</p>
         <div class="bot-dashboard-stats" id="bot-dashboard-stats"></div>
         <button class="btn-secondary" id="bot-dashboard-toggle" type="button">Start bot</button>
@@ -300,29 +304,21 @@
               <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
               <span class="slider-value" id="bot-maxpos-value">—</span>
             </div>
-            <span class="field-hint">How many trades can be open at the same time. Keep at 1 unless you specifically want to stack bets.</span>
-          </label>
-
-          <label>Guardrail (max deployed)
-            <div class="slider-row">
-              <input id="bot-guardrail" type="range" min="10" max="1000" step="5" />
-              <span class="slider-value" id="bot-guardrail-value">â€”</span>
-            </div>
-            <span class="field-hint">The bot will not open a trade if its total open capital would exceed this amount.</span>
+            <span class="field-hint">How many trades can be open at once. Default 2 so you can take another setup while one is still held.</span>
           </label>
 
           <label>Starting Bankroll
             <div class="slider-row">
               <input id="bot-paper-balance" type="range" min="10" max="10000" step="10" />
-              <span class="slider-value" id="bot-paper-balance-value">â€”</span>
+              <span class="slider-value" id="bot-paper-balance-value">—</span>
             </div>
-            <span class="field-hint">Simulated starting bankroll. Available Cash excludes Reserved Profit and Open Positions Value.</span>
+            <span class="field-hint">Your trading bankroll. Available Cash = bankroll + closed P&amp;L − Reserved − Open Positions. New trades can only use Available Cash.</span>
           </label>
 
           <label>Profit skim mode
             <select id="bot-skim-mode">
+              <option value="percent">Percent of profit per win (default 50/50)</option>
               <option value="fixed">Fixed amount per win</option>
-              <option value="percent">Percent of profit per win</option>
               <option value="off">Off</option>
             </select>
           </label>
@@ -332,6 +328,7 @@
               <input id="bot-skim-amount" type="range" min="0" max="100" step="1" />
               <span class="slider-value" id="bot-skim-amount-value">—</span>
             </div>
+            <span class="field-hint">Default 50%: half of each win → Reserved (locked), half stays in Available Cash. Losses do not draw from Reserved.</span>
           </label>
         </div>
         <div class="settings-actions">

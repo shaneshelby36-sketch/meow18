@@ -1,6 +1,8 @@
 'use strict';
 
-const fetch = require('node-fetch');
+const fetch = globalThis.fetch
+  ? (...args) => globalThis.fetch(...args)
+  : require('node-fetch');
 
 const CANDLE_SECONDS = 60; // 1-minute candles
 const MAX_CANDLES = 300; // enough history for EMA200 + lookback

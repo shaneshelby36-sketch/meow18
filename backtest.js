@@ -28,19 +28,18 @@ function makeSeries(historySlice) {
 }
 
 function normalizeSettings(raw = {}) {
-  const skimMode = ['percent', 'fixed', 'off'].includes(raw.skimMode) ? raw.skimMode : 'fixed';
+  const skimMode = ['percent', 'fixed', 'off'].includes(raw.skimMode) ? raw.skimMode : 'percent';
   return {
-    edgeThresholdPct: Number.isFinite(Number(raw.edgeThresholdPct)) ? Number(raw.edgeThresholdPct) : 8,
+    edgeThresholdPct: Number.isFinite(Number(raw.edgeThresholdPct)) ? Number(raw.edgeThresholdPct) : 1,
     minConfidence: Number.isFinite(Number(raw.minConfidence)) ? Number(raw.minConfidence) : 55,
     stopLossCents: Number.isFinite(Number(raw.stopLossCents)) ? Number(raw.stopLossCents) : 35,
-    takeProfitCents: Number.isFinite(Number(raw.takeProfitCents)) ? Number(raw.takeProfitCents) : 70,
+    takeProfitCents: Number.isFinite(Number(raw.takeProfitCents)) ? Number(raw.takeProfitCents) : 83,
     stakeDollars: Number.isFinite(Number(raw.stakeDollars)) ? Number(raw.stakeDollars) : 10,
     stakingStrategy: raw.stakingStrategy === 'halve-after-win' ? 'halve-after-win' : 'fixed',
-    maxOpenPositions: Math.max(1, Math.round(Number(raw.maxOpenPositions) || 1)),
+    maxOpenPositions: Math.max(1, Math.round(Number(raw.maxOpenPositions) || 2)),
     skimMode,
-    skimPercent: Number.isFinite(Number(raw.skimPercent)) ? Number(raw.skimPercent) : 20,
+    skimPercent: Number.isFinite(Number(raw.skimPercent)) ? Number(raw.skimPercent) : 50,
     skimFixedDollars: Number.isFinite(Number(raw.skimFixedDollars)) ? Number(raw.skimFixedDollars) : 5,
-    guardrailDollars: Number.isFinite(Number(raw.guardrailDollars)) ? Number(raw.guardrailDollars) : 70,
     paperStartingBalanceDollars: Number.isFinite(Number(raw.paperStartingBalanceDollars))
       ? Number(raw.paperStartingBalanceDollars)
       : 100,
@@ -61,6 +60,23 @@ function computeSkim(pnlCents, settings) {
     return Math.min(Math.round(settings.skimFixedDollars * 100), pnlCents);
   }
   return Math.round(pnlCents * (settings.skimPercent / 100));
+}
+
+/** Wins skim into reserve; losses do not touch reserve (it stays locked). */
+function applyReserveFlow(pnlCents, reserveCents, settings) {
+  if (pnlCents <= 0) {
+    return {
+      reserveCents,
+      skimmedCents: 0,
+      reserveDrawnCents: 0,
+    };
+  }
+  const skimmedCents = computeSkim(pnlCents, settings);
+  return {
+    reserveCents: reserveCents + skimmedCents,
+    skimmedCents,
+    reserveDrawnCents: 0,
+  };
 }
 
 function computeNextStake(settings, lastClosed) {
@@ -239,7 +255,6 @@ function backtestWithSettings(
     : [focusSymbol && indexes[focusSymbol] ? focusSymbol : symbols.find((s) => s !== 'BTC') || symbols[0]].filter(Boolean);
 
   const startingCents = Math.round(settings.paperStartingBalanceDollars * 100);
-  const guardrailCents = Math.round(settings.guardrailDollars * 100);
   const entryCents = clamp(Math.round(settings.assumedEntryCents), 1, 99);
 
   let reserveCents = 0;
@@ -250,7 +265,6 @@ function backtestWithSettings(
     lowConfidence: 0,
     lowEdge: 0,
     maxPositions: 0,
-    guardrail: 0,
     insufficientCash: 0,
     notReady: 0,
   };
@@ -310,15 +324,16 @@ function backtestWithSettings(
       if (exitPrice == null) continue;
 
       const pnlCents = exitPrice * trade.contracts - trade.entryPriceCents * trade.contracts;
-      const skimmedCents = computeSkim(pnlCents, settings);
-      reserveCents += skimmedCents;
+      const flow = applyReserveFlow(pnlCents, reserveCents, settings);
+      reserveCents = flow.reserveCents;
       closedPnlCents += pnlCents;
       closedTrades.push({
         ...trade,
         exitPriceCents: exitPrice,
         exitReason: reason,
         pnlCents,
-        skimmedCents,
+        skimmedCents: flow.skimmedCents,
+        reserveDrawnCents: flow.reserveDrawnCents,
         closedAt: minute,
       });
       openTrades.splice(t, 1);
@@ -459,10 +474,6 @@ function backtestWithSettings(
     const contracts = Math.max(1, Math.floor((stakeDollars * 100) / entryCents));
     const entryCostCents = entryCents * contracts;
 
-    if (entryCostCents > guardrailCents - openExposure()) {
-      skipCounts.guardrail += 1;
-      continue;
-    }
     if (entryCostCents > availableCash()) {
       skipCounts.insufficientCash += 1;
       continue;
@@ -503,15 +514,16 @@ function backtestWithSettings(
     const won = trade.side === 'yes' ? settledUp : !settledUp;
     const exitPrice = won ? 100 : 0;
     const pnlCents = exitPrice * trade.contracts - trade.entryPriceCents * trade.contracts;
-    const skimmedCents = computeSkim(pnlCents, settings);
-    reserveCents += skimmedCents;
+    const flow = applyReserveFlow(pnlCents, reserveCents, settings);
+    reserveCents = flow.reserveCents;
     closedPnlCents += pnlCents;
     closedTrades.push({
       ...trade,
       exitPriceCents: exitPrice,
       exitReason: 'end_of_data',
       pnlCents,
-      skimmedCents,
+      skimmedCents: flow.skimmedCents,
+      reserveDrawnCents: flow.reserveDrawnCents,
       closedAt: endMinute,
     });
   }
@@ -624,7 +636,6 @@ function huntBestSettings(candlesBySymbol, baseSettings = {}, runOptions = {}) {
             takeProfitCents: base.takeProfitCents,
             stakeDollars: base.stakeDollars,
             maxOpenPositions: base.maxOpenPositions,
-            guardrailDollars: base.guardrailDollars,
             paperStartingBalanceDollars: base.paperStartingBalanceDollars,
             skimMode: base.skimMode,
             skimPercent: base.skimPercent,

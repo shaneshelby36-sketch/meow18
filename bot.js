@@ -8,12 +8,17 @@ const { dataPath, ensureDataDir, writeJsonAtomic } = require('./paths');
 ensureDataDir();
 
 const LEDGER_PATH = dataPath('bot-ledger.json');
+const TRADE_LOG_PATH = dataPath('trade-log.json');
 const CONFIG_PATH = dataPath('bot-config.json');
 const CALIBRATION_PATH = dataPath('calibration.json');
 const MODE_STATE_PATH = dataPath('bot-mode-state.json');
 const RUN_STATE_PATH = dataPath('bot-run-state.json');
 const ARCHIVE_DIR = dataPath('archive');
 const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
+const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
+// Bump when shipping intentional default resets so stale bot-config.json
+// doesn't keep old edge/TP/skim values after deploy.
+const SETTINGS_DEFAULTS_VERSION = 3;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -74,7 +79,6 @@ const EDITABLE_NUMERIC_FIELDS = [
   'maxOpenPositions',
   'skimPercent',
   'skimFixedDollars',
-  'guardrailDollars',
   'paperStartingBalanceDollars',
 ];
 const EDITABLE_STRING_FIELDS = {
@@ -127,16 +131,25 @@ function saveRunState(state) {
 function loadConfigOverrides() {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
-      return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      const data = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      // Stale saved settings from before a defaults bump — ignore knobs so
+      // the new code defaults apply once, then the next boot/save rewrites.
+      if (data.settingsVersion !== SETTINGS_DEFAULTS_VERSION) {
+        console.log(
+          `[bot] settings defaults v${SETTINGS_DEFAULTS_VERSION} — ignoring stale saved knobs (was v${data.settingsVersion ?? 'none'})`
+        );
+        return { settingsVersion: SETTINGS_DEFAULTS_VERSION };
+      }
+      return data;
     }
   } catch (err) {
     console.error('[bot] failed to load saved config, using defaults/env:', err.message);
   }
-  return {};
+  return { settingsVersion: SETTINGS_DEFAULTS_VERSION };
 }
 
 function collectConfigOverrides(config) {
-  const overrides = {};
+  const overrides = { settingsVersion: SETTINGS_DEFAULTS_VERSION };
   for (const field of EDITABLE_NUMERIC_FIELDS) overrides[field] = config[field];
   for (const field of Object.keys(EDITABLE_STRING_FIELDS)) overrides[field] = config[field];
   return overrides;
@@ -156,12 +169,13 @@ function loadLedger() {
       const data = JSON.parse(fs.readFileSync(LEDGER_PATH, 'utf8'));
       if (data.reserveCents == null) data.reserveCents = 0;
       if (data.periodStartTime == null) data.periodStartTime = Date.now();
+      if (!Array.isArray(data.activityLog)) data.activityLog = [];
       return data;
     }
   } catch (err) {
     console.error('[bot] failed to load ledger, starting fresh:', err.message);
   }
-  return { trades: [], reserveCents: 0, periodStartTime: Date.now() };
+  return { trades: [], reserveCents: 0, periodStartTime: Date.now(), activityLog: [] };
 }
 
 function saveLedger(ledger) {
@@ -172,6 +186,65 @@ function saveLedger(ledger) {
     // across deploys anyway, so this is best-effort durability only.
     console.error('[bot] failed to persist ledger:', err.message);
   }
+}
+
+/**
+ * Permanent trade history — survives the 12h live-ledger rotation.
+ * Newest first. Never cleared by rotation (only by explicit paper reset).
+ */
+function loadTradeLog() {
+  try {
+    if (fs.existsSync(TRADE_LOG_PATH)) {
+      const data = JSON.parse(fs.readFileSync(TRADE_LOG_PATH, 'utf8'));
+      if (Array.isArray(data)) return data;
+      if (Array.isArray(data.trades)) return data.trades;
+    }
+  } catch (err) {
+    console.error('[bot] failed to load trade log:', err.message);
+  }
+  return [];
+}
+
+function saveTradeLog(trades) {
+  try {
+    writeJsonAtomic(TRADE_LOG_PATH, {
+      updatedAt: new Date().toISOString(),
+      count: trades.length,
+      trades,
+    });
+  } catch (err) {
+    console.error('[bot] failed to persist trade log:', err.message);
+  }
+}
+
+function upsertTradeLog(entry) {
+  if (!entry || !entry.id) return;
+  const trades = loadTradeLog();
+  const idx = trades.findIndex((t) => t.id === entry.id);
+  if (idx >= 0) {
+    trades[idx] = { ...trades[idx], ...entry, updatedAt: Date.now() };
+  } else {
+    trades.unshift({ ...entry, updatedAt: Date.now() });
+  }
+  if (trades.length > TRADE_LOG_MAX) trades.length = TRADE_LOG_MAX;
+  saveTradeLog(trades);
+}
+
+function clearTradeLog({ archive = true } = {}) {
+  const existing = loadTradeLog();
+  if (archive && existing.length) {
+    try {
+      fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+      const fileName = `trade-log-reset-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      writeJsonAtomic(path.join(ARCHIVE_DIR, fileName), {
+        archivedAt: new Date().toISOString(),
+        trades: existing,
+      });
+    } catch (err) {
+      console.error('[bot] failed to archive trade log before clear:', err.message);
+    }
+  }
+  saveTradeLog([]);
 }
 
 /**
@@ -192,18 +265,17 @@ class TradingBot {
     this.client = kalshiClient;
     this.config = {
       symbol: 'BTC', // 'BTC' | 'XRP' — which asset the bot is currently trading
-      edgeThresholdPct: 8, // minimum probability-point edge vs Kalshi to bother trading
+      edgeThresholdPct: 1, // minimum probability-point edge vs Kalshi to bother trading
       minConfidence: 55, // engine confidence (0-100) required to act
       stopLossCents: 35, // exit if our held side's price falls to this many cents
-      takeProfitCents: 70, // exit if our held side's bid rises to this many cents (see final-5 override)
+      takeProfitCents: 83, // exit if our held side's bid rises to this many cents (see final-5 override)
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
-      maxOpenPositions: 1,
-      skimMode: 'fixed', // 'percent' | 'fixed' | 'off' — how much profit gets set aside per win
-      skimPercent: 20, // used when skimMode === 'percent'
+      maxOpenPositions: 2,
+      skimMode: 'percent', // 'percent' | 'fixed' | 'off' — how much profit gets set aside per win
+      skimPercent: 50, // used when skimMode === 'percent' — default 50% reserved / 50% stays available
       skimFixedDollars: 5, // used when skimMode === 'fixed' ($5.00 per win), capped at that trade's own profit
-      guardrailDollars: 70, // maximum capital this bot may have at risk at once
-      paperStartingBalanceDollars: 100, // simulated bankroll, excluding skimmed reserve
+      paperStartingBalanceDollars: 100, // trading bankroll (also the capital backing paper trades)
       mode: 'paper', // 'paper' | 'live'
       liveAuthorized: false,
       ...config,
@@ -238,10 +310,21 @@ class TradingBot {
     this.livePortfolioValueCents = null;
     this.liveBalanceUpdatedAt = null;
     this._removeInvalidPaperTrades();
+    this._seedTradeLogFromLedger();
     // Always flush the effective settings so a reboot reloads exactly what
     // this process is running (env defaults and/or last dashboard save).
     saveConfigOverrides(collectConfigOverrides(this.config));
     saveRunState({ isRunning: this.isRunning, runningSince: this.runningSince });
+  }
+
+  /** One-time backfill so existing ledger trades appear in the permanent log. */
+  _seedTradeLogFromLedger() {
+    const log = loadTradeLog();
+    if (log.length > 0) return;
+    const fromLedger = (this.ledger.trades || []).filter((t) => t && t.id);
+    if (!fromLedger.length) return;
+    saveTradeLog(fromLedger.map((t) => ({ ...t, updatedAt: Date.now() })));
+    console.log(`[bot] seeded permanent trade log with ${fromLedger.length} existing ledger trade(s)`);
   }
 
   /**
@@ -266,6 +349,8 @@ class TradingBot {
     }
     this.config.mode = requestedMode;
     saveModeState(requestedMode);
+    this._logActivity(`Switched to ${requestedMode} mode.`, { kind: 'mode' });
+    this._persist();
     return { ok: true, mode: this.config.mode };
   }
 
@@ -275,6 +360,8 @@ class TradingBot {
     this.runningSince = requestedRunning ? Date.now() : null;
     saveRunState({ isRunning: this.isRunning, runningSince: this.runningSince });
     this.lastDecision = requestedRunning ? 'Bot started; it will evaluate new entries on the next server cycle.' : 'Bot stopped; no new positions will be opened.';
+    this._logActivity(this.lastDecision, { kind: requestedRunning ? 'start' : 'stop' });
+    this._persist();
     return { ok: true, isRunning: this.isRunning, runningSince: this.runningSince, message: this.lastDecision };
   }
 
@@ -307,13 +394,29 @@ class TradingBot {
     if (this.config.mode !== 'paper') {
       return { ok: false, message: 'Paper history can only be reset while the bot is in paper mode.' };
     }
-    this.ledger = { trades: [], reserveCents: 0, periodStartTime: Date.now() };
+    this.ledger = { trades: [], reserveCents: 0, periodStartTime: Date.now(), activityLog: [] };
     this.calibration = { buckets: {} };
     this.lastError = null;
     this.lastDecision = 'Paper trading history and statistics were reset.';
+    clearTradeLog({ archive: true });
+    this._logActivity(this.lastDecision, { kind: 'reset' });
     this._persist();
     saveCalibration(this.calibration);
     return { ok: true, message: 'Paper trading history and statistics were reset.' };
+  }
+
+  _logActivity(message, meta = {}) {
+    if (!this.ledger.activityLog) this.ledger.activityLog = [];
+    this.ledger.activityLog.unshift({
+      at: Date.now(),
+      message: String(message || ''),
+      kind: meta.kind || 'info',
+      symbol: meta.symbol || null,
+      side: meta.side || null,
+      pnlCents: meta.pnlCents != null ? meta.pnlCents : null,
+      tradeId: meta.tradeId || null,
+    });
+    if (this.ledger.activityLog.length > 100) this.ledger.activityLog.length = 100;
   }
 
   get openTrades() {
@@ -338,8 +441,6 @@ class TradingBot {
       reserveCents,
       openExposureCents,
       paperAvailableCents: Math.max(0, paperTotalCents - reserveCents - openExposureCents),
-      guardrailCents: Math.round(this.config.guardrailDollars * 100),
-      guardrailRemainingCents: Math.max(0, Math.round(this.config.guardrailDollars * 100) - openExposureCents),
     };
   }
 
@@ -459,6 +560,25 @@ class TradingBot {
     return Math.round(pnlCents * (this.config.skimPercent / 100));
   }
 
+  /**
+   * Wins: skim a slice of profit into Reserved (stays locked — not spent on
+   * new trades and not drawn down by losses). The unskimmed share of the win
+   * remains in the spendable pool / Available Cash.
+   */
+  _applyReserveFlow(trade) {
+    const pnlCents = Number(trade.pnlCents) || 0;
+    trade.reserveDrawnCents = 0;
+    if (pnlCents <= 0) {
+      trade.skimmedCents = 0;
+      return;
+    }
+    const skimmedCents = this._computeSkim(pnlCents);
+    trade.skimmedCents = skimmedCents;
+    if (skimmedCents > 0) {
+      this.ledger.reserveCents = (this.ledger.reserveCents || 0) + skimmedCents;
+    }
+  }
+
   async _closePosition(trade, exitPriceCents, reason) {
     trade.status = 'closed';
     trade.closedAt = Date.now();
@@ -468,11 +588,7 @@ class TradingBot {
     const exitProceeds = exitPriceCents * trade.contracts;
     trade.pnlCents = exitProceeds - entryCost;
 
-    const skimmedCents = this._computeSkim(trade.pnlCents);
-    trade.skimmedCents = skimmedCents;
-    if (skimmedCents > 0) {
-      this.ledger.reserveCents = (this.ledger.reserveCents || 0) + skimmedCents;
-    }
+    this._applyReserveFlow(trade);
 
     this._recordCalibration(trade);
 
@@ -490,8 +606,40 @@ class TradingBot {
         console.error('[bot]', this.lastError);
       }
     }
+    let decision = `Closed ${trade.symbol} ${String(trade.side).toUpperCase()} via ${reason} at ${exitPriceCents}¢ (P&L $${(trade.pnlCents / 100).toFixed(2)}).`;
+    if (trade.skimmedCents > 0) {
+      decision += ` Skimmed $${(trade.skimmedCents / 100).toFixed(2)} to Reserved.`;
+    }
+    this.lastDecision = decision;
+    this._logActivity(this.lastDecision, {
+      kind: 'close',
+      symbol: trade.symbol,
+      side: trade.side,
+      pnlCents: trade.pnlCents,
+      tradeId: trade.id,
+    });
+    upsertTradeLog({
+      id: trade.id,
+      mode: trade.mode,
+      symbol: trade.symbol,
+      ticker: trade.ticker,
+      side: trade.side,
+      contracts: trade.contracts,
+      stakeDollars: trade.stakeDollars,
+      entryPriceCents: trade.entryPriceCents,
+      exitPriceCents: trade.exitPriceCents,
+      floorStrike: trade.floorStrike,
+      openedAt: trade.openedAt,
+      closedAt: trade.closedAt,
+      windowCloseTime: trade.windowCloseTime,
+      engineProbability: trade.engineProbability,
+      engineConfidence: trade.engineConfidence,
+      status: 'closed',
+      exitReason: trade.exitReason,
+      pnlCents: trade.pnlCents,
+      skimmedCents: trade.skimmedCents || 0,
+    });
     this._persist();
-    this.lastDecision = `Closed ${trade.symbol} ${String(trade.side).toUpperCase()} via ${reason} at ${exitPriceCents}¢ (P&L $${(trade.pnlCents / 100).toFixed(2)}).`;
   }
 
   /**
@@ -685,10 +833,6 @@ class TradingBot {
     const contracts = Math.max(1, Math.floor((stakeDollars * 100) / priceCents));
     const entryCostCents = contracts * priceCents;
     const capital = this._capitalStatus();
-    if (entryCostCents > capital.guardrailRemainingCents) {
-      this.lastDecision = `Guardrail reached: $${(capital.openExposureCents / 100).toFixed(2)} is already deployed of the $${(capital.guardrailCents / 100).toFixed(2)} limit.`;
-      return;
-    }
     if (this.config.mode === 'paper' && entryCostCents > capital.paperAvailableCents) {
       this.lastDecision = `Insufficient paper funds: $${(capital.paperAvailableCents / 100).toFixed(2)} is spendable after the reserved skim.`;
       return;
@@ -733,8 +877,30 @@ class TradingBot {
 
     this.ledger.trades.unshift(trade);
     if (this.ledger.trades.length > 200) this.ledger.trades.length = 200;
+    this.lastDecision = `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${priceCents}¢ (confidence ${engineConfidence}%).`;
+    this._logActivity(this.lastDecision, {
+      kind: 'open',
+      symbol,
+      side,
+      tradeId: trade.id,
+    });
+    upsertTradeLog({
+      id: trade.id,
+      mode: trade.mode,
+      symbol: trade.symbol,
+      ticker: trade.ticker,
+      side: trade.side,
+      contracts: trade.contracts,
+      stakeDollars: trade.stakeDollars,
+      entryPriceCents: trade.entryPriceCents,
+      floorStrike: trade.floorStrike,
+      openedAt: trade.openedAt,
+      windowCloseTime: trade.windowCloseTime,
+      engineProbability: trade.engineProbability,
+      engineConfidence: trade.engineConfidence,
+      status: 'open',
+    });
     this._persist();
-    this.lastDecision = `Opened ${symbol} ${side.toUpperCase()} paper position at ${priceCents}¢ (confidence ${engineConfidence}%).`;
   }
 
   /**
@@ -946,6 +1112,17 @@ class TradingBot {
     return { guidance: CALIBRATION_GUIDANCE, buckets: rows };
   }
 
+  getTradeLog({ limit = 100, offset = 0 } = {}) {
+    const all = loadTradeLog();
+    const start = Math.max(0, Number(offset) || 0);
+    const take = Math.min(500, Math.max(1, Number(limit) || 100));
+    return {
+      total: all.length,
+      trades: all.slice(start, start + take),
+      path: TRADE_LOG_PATH,
+    };
+  }
+
   status() {
     const closed = this.ledger.trades.filter((t) => t.status === 'closed');
     const wins = closed.filter((t) => t.pnlCents > 0).length;
@@ -970,6 +1147,7 @@ class TradingBot {
     }
 
     const capital = this._capitalStatus();
+    const permanentLog = loadTradeLog();
     return {
       mode: this.config.mode,
       isRunning: this.isRunning,
@@ -979,9 +1157,13 @@ class TradingBot {
       lastDecision: this.lastDecision,
       openTrades: this.openTrades,
       recentTrades: this.ledger.trades.slice(0, 20),
+      activityLog: (this.ledger.activityLog || []).slice(0, 40),
+      // Permanent history (survives 12h ledger rotation). Newest first.
+      tradeLog: permanentLog.slice(0, 50),
+      tradeLogTotal: permanentLog.length,
       stats: {
-        totalAttempts: this.ledger.trades.length, // every trade ever opened, open + closed
-        totalTrades: closed.length, // settled/closed trades only
+        totalAttempts: this.ledger.trades.length, // current period open + closed
+        totalTrades: closed.length, // settled/closed trades only (current period)
         wins,
         profitableExits: wins,
         losses: closed.length - wins,
@@ -990,6 +1172,7 @@ class TradingBot {
         longestWinStreak,
         netPnlCents: closed.reduce((sum, t) => sum + (t.pnlCents || 0), 0),
         reserveCents: this.ledger.reserveCents || 0,
+        lifetimeTrades: permanentLog.length,
       },
       capital: {
         ...capital,

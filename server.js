@@ -82,15 +82,16 @@ const bot = KALSHI_ENABLED
       kalshiClient,
       config: {
         symbol: (process.env.KALSHI_SYMBOL || 'BTC').toUpperCase(),
-        edgeThresholdPct: parseFloat(process.env.KALSHI_EDGE_THRESHOLD_PCT || '8'),
+        edgeThresholdPct: parseFloat(process.env.KALSHI_EDGE_THRESHOLD_PCT || '1'),
         minConfidence: parseFloat(process.env.KALSHI_MIN_CONFIDENCE || '55'),
         stopLossCents: parseInt(process.env.KALSHI_STOP_LOSS_CENTS || '35', 10),
-        takeProfitCents: parseInt(process.env.KALSHI_TAKE_PROFIT_CENTS || '70', 10),
+        takeProfitCents: parseInt(process.env.KALSHI_TAKE_PROFIT_CENTS || '83', 10),
         stakeDollars: parseFloat(process.env.KALSHI_STAKE_DOLLARS || '10'),
-        maxOpenPositions: parseInt(process.env.KALSHI_MAX_OPEN_POSITIONS || '1', 10),
-        skimMode: process.env.KALSHI_SKIM_MODE || 'fixed',
+        maxOpenPositions: parseInt(process.env.KALSHI_MAX_OPEN_POSITIONS || '2', 10),
+        skimMode: process.env.KALSHI_SKIM_MODE || 'percent',
         skimFixedDollars: parseFloat(process.env.KALSHI_SKIM_FIXED_DOLLARS || '5'),
-        skimPercent: parseFloat(process.env.KALSHI_SKIM_PERCENT || '20'),
+        skimPercent: parseFloat(process.env.KALSHI_SKIM_PERCENT || '50'),
+        paperStartingBalanceDollars: parseFloat(process.env.KALSHI_PAPER_STARTING_BALANCE || '100'),
         mode: wantsLive ? 'live' : 'paper',
         // Fixed ceiling for this process's lifetime, set only from the
         // server-side env vars — never editable from the dashboard. The
@@ -382,6 +383,16 @@ app.get("/", (req, res) => {
     res.json(bot.calibrationReport());
   });
 
+  app.get('/api/bot/trades', (req, res) => {
+    if (!bot) {
+      res.status(404).json({ enabled: false, message: 'Bot is not enabled (set KALSHI_ENABLED=true).' });
+      return;
+    }
+    const limit = parseInt(req.query.limit || '100', 10);
+    const offset = parseInt(req.query.offset || '0', 10);
+    res.json({ enabled: true, ...bot.getTradeLog({ limit, offset }) });
+  });
+
   // Engine-level calibration: every prediction the engine has ever made for
   // this symbol, whether or not the bot actually traded it — a broader,
   // complementary view to /api/bot/calibration (which only covers actual
@@ -478,7 +489,6 @@ app.get("/", (req, res) => {
       skimMode: source.skimMode ?? live.skimMode,
       skimPercent: source.skimPercent ?? live.skimPercent,
       skimFixedDollars: source.skimFixedDollars ?? live.skimFixedDollars,
-      guardrailDollars: source.guardrailDollars ?? live.guardrailDollars,
       paperStartingBalanceDollars: source.paperStartingBalanceDollars ?? live.paperStartingBalanceDollars,
       assumedEntryCents: source.assumedEntryCents ?? 50,
     };

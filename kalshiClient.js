@@ -2,15 +2,21 @@
 
 const crypto = require('crypto');
 const fs = require('fs');
-const fetch = require('node-fetch');
+const fetch = globalThis.fetch
+  ? (...args) => globalThis.fetch(...args)
+  : require('node-fetch');
 
 // Kalshi's current market endpoints return decimal-dollar strings such as
 // "0.5600" in `yes_bid_dollars`; older responses used integer-cent fields
 // such as `yes_bid`. Normalize both shapes so the trading bot always sees
 // integer cents.
 function priceInCents(legacyCents, dollarValue) {
-  const legacy = Number(legacyCents);
-  if (Number.isFinite(legacy)) return Math.round(legacy);
+  // Treat null/undefined/'' as "missing" — Number(null)===0 would wrongly
+  // prefer a fake 0¢ bid over a valid dollar-string quote.
+  if (legacyCents != null && legacyCents !== '') {
+    const legacy = Number(legacyCents);
+    if (Number.isFinite(legacy)) return Math.round(legacy);
+  }
   const dollars = Number.parseFloat(dollarValue);
   return Number.isFinite(dollars) ? Math.round(dollars * 100) : null;
 }
@@ -169,4 +175,4 @@ class KalshiClient {
   }
 }
 
-module.exports = { KalshiClient };
+module.exports = { KalshiClient, normalizeMarketPrices, priceInCents };
