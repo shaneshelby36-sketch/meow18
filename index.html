@@ -296,7 +296,7 @@
               <input id="bot-minentries" type="range" min="1" max="50" step="1" />
               <span class="slider-value" id="bot-minentries-value">—</span>
             </div>
-            <span class="field-hint">Never buy a side cheaper than this, even with high confidence. Blocks longshot tickets (e.g. 7¢ NO fades) that blow up dollar P&amp;L.</span>
+            <span class="field-hint">Never buy a side cheaper than this, even with high confidence. Blocks longshot tickets (e.g. 7¢ NO fades) that blow up dollar P&amp;L. Also won't open with under 5 minutes left in the window (avoids freeze-into-settle).</span>
           </label>
 
           <label>Stake per trade
@@ -312,7 +312,7 @@
               <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
               <span class="slider-value" id="bot-maxpos-value">—</span>
             </div>
-            <span class="field-hint">How many trades can be open at once. Default 2 so you can take another setup while one is still held.</span>
+            <span class="field-hint">How many trades can be open at once. Default 2 across different coins. Stuck/settling trades should close on their own window — raising this to “wait it out” just stacks more risk.</span>
           </label>
 
           <label>Starting Bankroll

@@ -78,6 +78,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'takeProfitCents',
   'nearCertainExitCents',
   'minEntryCents',
+  'minMinutesToOpen',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -274,6 +275,7 @@ class TradingBot {
       takeProfitCents: 15, // exit if held bid rises this many cents above entry (see final-5 override)
       nearCertainExitCents: 97, // if held bid reaches this, bank it — don't wait on settlement for the last few ¢
       minEntryCents: 25, // never buy a side cheaper than this — blocks longshot lottery tickets
+      minMinutesToOpen: 5, // don't open when fewer than this many minutes remain in the window
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -680,7 +682,7 @@ class TradingBot {
     }
 
     // Absolute last resort: scratch the trade rather than carrying it forever.
-    const sideBid = market && (trade.side === 'yes' ? market.yes_bid : market.no_bid);
+    const sideBid = this._heldSideBidCents(trade, market);
     const fallback = Number.isFinite(sideBid) ? sideBid : trade.entryPriceCents;
     await this._closePosition(trade, Number.isFinite(fallback) ? fallback : trade.entryPriceCents, 'settled_timeout');
   }
@@ -727,40 +729,65 @@ class TradingBot {
     return pastStored || pastMarket || this._isMarketSettledStatus(market) || tooOld;
   }
 
+  _heldSideBidCents(trade, market) {
+    if (!market) return null;
+    if (trade.side === 'yes') {
+      if (Number.isFinite(market.yes_bid)) return market.yes_bid;
+      // Infer YES bid from NO ask when Kalshi omits one side.
+      if (Number.isFinite(market.no_ask)) return Math.max(1, Math.min(99, 100 - market.no_ask));
+      return null;
+    }
+    if (Number.isFinite(market.no_bid)) return market.no_bid;
+    if (Number.isFinite(market.yes_ask)) return Math.max(1, Math.min(99, 100 - market.yes_ask));
+    return null;
+  }
+
+  async _getMarketBounded(ticker, timeoutMs = 4000) {
+    return Promise.race([
+      this.client.getMarket(ticker),
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`getMarket timeout after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  }
+
   async _manageOpenTrade(trade, predictions) {
     const now = Date.now();
     const storedClose = this._tradeCloseDeadline(trade);
-    const dueWithoutMarket =
-      (Number.isFinite(storedClose) && now >= storedClose) ||
-      (Number.isFinite(Number(trade.openedAt)) && now - Number(trade.openedAt) >= 16.5 * 60 * 1000);
+    const pastSavedClose = Number.isFinite(storedClose) && now >= storedClose;
+    const tooOld =
+      Number.isFinite(Number(trade.openedAt)) && now - Number(trade.openedAt) >= 16.5 * 60 * 1000;
+
+    // Once THIS trade's window is over, settle this cycle. Never sit through
+    // the next dashboard session waiting on a hung Kalshi fetch.
+    if (pastSavedClose || tooOld) {
+      let market = null;
+      try {
+        market = await this._getMarketBounded(trade.ticker, 3500);
+      } catch (err) {
+        console.warn(`[bot] market fetch for settle ${trade.ticker}: ${err.message}`);
+      }
+      await this._settleClosedWindow(trade, predictions, market);
+      return;
+    }
 
     let market = null;
     try {
-      market = await this.client.getMarket(trade.ticker);
+      market = await this._getMarketBounded(trade.ticker, 4000);
     } catch (err) {
-      if (dueWithoutMarket) {
-        console.warn(`[bot] market fetch failed after close for ${trade.ticker}; force-settling: ${err.message}`);
-        await this._settleClosedWindow(trade, predictions, null);
-        return;
-      }
       this.lastError = `Failed to fetch open position's market (${trade.ticker}): ${err.message}`;
       console.error('[bot]', this.lastError);
       return;
     }
 
-    if (!market) {
-      if (dueWithoutMarket) {
-        await this._settleClosedWindow(trade, predictions, null);
-      }
-      return;
-    }
+    if (!market) return;
 
     if (this._isTradePastDeadline(trade, market, now)) {
       await this._settleClosedWindow(trade, predictions, market);
       return;
     }
 
-    const heldSideBidCents = trade.side === 'yes' ? market.yes_bid : market.no_bid;
+    const heldSideBidCents = this._heldSideBidCents(trade, market);
     // For stop/TP timing use the earliest known close so we don't hold into the next session.
     const closeCandidates = [storedClose, this._marketCloseMs(market)].filter((t) => Number.isFinite(t) && t > 0);
     const closeTime = closeCandidates.length ? Math.min(...closeCandidates) : NaN;
@@ -945,6 +972,15 @@ class TradingBot {
     const closeAt = Number(closeTime);
     if (!Number.isFinite(closeAt) || closeAt <= Date.now() + 5000) {
       this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: market close time is missing or already ending.`;
+      return;
+    }
+    const minutesLeft = (closeAt - Date.now()) / 60000;
+    const minMinutesToOpen = Number.isFinite(Number(this.config.minMinutesToOpen))
+      ? Number(this.config.minMinutesToOpen)
+      : 5;
+    if (minMinutesToOpen > 0 && minutesLeft < minMinutesToOpen) {
+      this.lastDecision =
+        `Skipped ${symbol}: only ${minutesLeft.toFixed(1)} min left (min ${minMinutesToOpen} to open).`;
       return;
     }
     // Max positions is a concurrency cap across coins — stacking two opens
@@ -1141,6 +1177,14 @@ class TradingBot {
     }
 
     const minutesRemaining = Math.max(0.1, (closeTime - now) / 60000);
+    const minMinutesToOpen = Number.isFinite(Number(this.config.minMinutesToOpen))
+      ? Number(this.config.minMinutesToOpen)
+      : 5;
+    if (minMinutesToOpen > 0 && minutesRemaining < minMinutesToOpen) {
+      this.lastDecision =
+        `Waiting: ${symbol} window has only ${minutesRemaining.toFixed(1)} min left (need ≥ ${minMinutesToOpen} to open — avoids freeze-into-settle).`;
+      return null;
+    }
     const window = this._pickWindow(assetPrediction.windows, minutesRemaining);
     if (!window || window.confidence < this.config.minConfidence) {
       const confidence = window && Number.isFinite(window.confidence) ? window.confidence : 'unavailable';

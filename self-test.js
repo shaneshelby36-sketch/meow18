@@ -163,6 +163,7 @@ function makeBot(client, config = {}) {
     stopLossCents: config.stopLossCents ?? 10,
     takeProfitCents: config.takeProfitCents ?? 15,
     minEntryCents: config.minEntryCents ?? 25,
+    minMinutesToOpen: config.minMinutesToOpen ?? 5,
     stakeDollars: config.stakeDollars ?? 10,
     maxOpenPositions: config.maxOpenPositions ?? 1,
     skimMode: config.skimMode ?? 'off',
@@ -1095,6 +1096,40 @@ async function testBotTradingFlow() {
     const banned = await banBot._evaluateSymbolForEdge('ETH', fadePreds);
     checkEq(banned, null, 'min entry ban skips ~10¢ NO');
     check(/min entry|longshot/i.test(banBot.lastDecision || ''), 'decision mentions min entry');
+  }
+
+  // No new entries in the final 5 minutes of a window
+  {
+    const now = Date.now();
+    const lateBot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-LATE',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(now + 3 * 60 * 1000).toISOString(),
+        yes_bid: 40,
+        yes_ask: 42,
+        no_bid: 58,
+        no_ask: 60,
+      }),
+      {
+        symbol: 'ETH',
+        edgeThresholdPct: 1,
+        minConfidence: 50,
+        minEntryCents: 20,
+        minMinutesToOpen: 5,
+      }
+    );
+    const latePreds = {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: { w5: win(80, 80), w10: win(75, 75), w15: win(70, 70) },
+      },
+    };
+    const lateOpp = await lateBot._evaluateSymbolForEdge('ETH', latePreds);
+    checkEq(lateOpp, null, 'blocks open with only ~3 min left');
+    check(/min left|to open/i.test(lateBot.lastDecision || ''), 'decision mentions min time to open');
   }
 
   // Relative TP: flat at entry does not take profit; need entry+rise
