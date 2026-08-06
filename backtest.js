@@ -3,7 +3,7 @@
 const { correlation } = require('./indicators');
 const { gatherIndicators, buildWindowPrediction, WINDOWS } = require('./prediction');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
-const { stopRecoveryCentsRequired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
+const { stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
 
 const LOOKBACK_MIN = 210;
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
@@ -37,6 +37,9 @@ function normalizeSettings(raw = {}) {
     takeProfitCents: Number.isFinite(Number(raw.takeProfitCents)) ? Number(raw.takeProfitCents) : 15,
     minEntryCents: Number.isFinite(Number(raw.minEntryCents)) ? Number(raw.minEntryCents) : 40,
     stopRecoveryCents: Number.isFinite(Number(raw.stopRecoveryCents)) ? Number(raw.stopRecoveryCents) : 8,
+    stopRecoveryMaxMinutes: Number.isFinite(Number(raw.stopRecoveryMaxMinutes))
+      ? Number(raw.stopRecoveryMaxMinutes)
+      : 15,
     stakeDollars: Number.isFinite(Number(raw.stakeDollars)) ? Number(raw.stakeDollars) : 10,
     stakingStrategy: raw.stakingStrategy === 'halve-after-win' ? 'halve-after-win' : 'fixed',
     maxOpenPositions: Math.max(1, Math.round(Number(raw.maxOpenPositions) || 2)),
@@ -556,6 +559,9 @@ function backtestWithSettings(
         recoveryCents: stopRecoveryCentsRequired(settings),
         symbol: lastStopAny ? lastStopAny.symbol : c.symbol,
         forCandidateSymbol: c.symbol,
+        forCandidateSide: c.side,
+        maxAgeMs: stopRecoveryMaxAgeMs(settings),
+        now: minute,
       });
       if (!recoveryCheck.ok) {
         skipCounts.postStopRecovery += 1;

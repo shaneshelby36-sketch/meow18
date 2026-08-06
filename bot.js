@@ -80,6 +80,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'minEntryCents',
   'minMinutesToOpen',
   'stopRecoveryCents',
+  'stopRecoveryMaxMinutes',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -101,9 +102,21 @@ function stopRecoveryCentsRequired(config = {}) {
 }
 
 /**
- * After a stop-loss, block same-side OR opposite-side entry (on the stopped
- * coin or any other) until the *stopped coin's* bid has bounced and the
- * engine still favors that stopped side — prevents instant whipsaw flips.
+ * After a stop-loss, require the *stopped coin's* bid to bounce before new
+ * entries (any coin) — prevents instant cascade / loss strings while price
+ * is still running against the stopped side.
+ *
+ * Thesis favor (engine still likes the stopped side) only gates knife-catch
+ * re-entry on that same coin + same side. Peer coins (and opposite-side on
+ * the stopped coin) unlock once the bounce clears — otherwise a flipped
+ * thesis freezes *all* trading until the stopped coin re-favors a side the
+ * market already rejected. Peer cascade (`checkPostStopPeerCascade`) still
+ * blocks while a majority of peers are dumping.
+ *
+ * Optional `maxAgeMs` + `closedAt` (or `now` vs trade.closedAt): after that
+ * age the whole recovery gate clears so a never-bouncing bid cannot freeze
+ * the bot across many windows.
+ *
  * `lastClosedForSymbol` should be the stop-loss trade (usually the latest stop).
  */
 function checkPostStopRecovery({
@@ -114,6 +127,9 @@ function checkPostStopRecovery({
   recoveryCents,
   symbol = '',
   forCandidateSymbol = null,
+  forCandidateSide = null,
+  maxAgeMs = 0,
+  now = Date.now(),
 }) {
   if (!recoveryCents || recoveryCents <= 0) return { ok: true };
   const last = lastClosedForSymbol;
@@ -121,6 +137,18 @@ function checkPostStopRecovery({
   if (!last || last.exitReason !== 'stop_loss') {
     return { ok: true };
   }
+
+  const closedAt = Number(last.closedAt);
+  const ageCap = Number(maxAgeMs);
+  if (
+    Number.isFinite(ageCap) &&
+    ageCap > 0 &&
+    Number.isFinite(closedAt) &&
+    Number(now) - closedAt >= ageCap
+  ) {
+    return { ok: true };
+  }
+
   const stopSide = last.side;
   // `side` arg is the side we're quoting for recovery — should match stopSide.
   const checkSide = stopSide || side;
@@ -130,8 +158,9 @@ function checkPostStopRecovery({
   const needBid = Math.min(99, exit + recoveryCents);
   const price = Number(priceCents);
   const stoppedLabel = symbol || last.symbol || '';
-  const otherNote = forCandidateSymbol
-    ? ` before any new entry on ${forCandidateSymbol}`
+  const candidateSym = forCandidateSymbol || null;
+  const otherNote = candidateSym
+    ? ` before any new entry on ${candidateSym}`
     : ' before any new entry';
 
   if (!Number.isFinite(price) || price < needBid) {
@@ -143,7 +172,15 @@ function checkPostStopRecovery({
     };
   }
 
-  if (window) {
+  // Bounce cleared. Thesis favor only for same-coin same-side knife-catch —
+  // do not hold ETH/BTC/etc hostage waiting for SOL YES to become favored again.
+  const stoppedSym = String(stoppedLabel || last.symbol || '').toUpperCase();
+  const candSym = candidateSym != null ? String(candidateSym).toUpperCase() : stoppedSym;
+  const candSide = forCandidateSide != null ? forCandidateSide : checkSide;
+  const isSameCoinSameSide =
+    candSym === stoppedSym && String(candSide).toLowerCase() === String(checkSide).toLowerCase();
+
+  if (isSameCoinSameSide && window) {
     const up = Number(window.probabilityUp);
     const down = Number(window.probabilityDown);
     const favored =
@@ -155,15 +192,21 @@ function checkPostStopRecovery({
         ok: false,
         reason:
           `Waiting: ${stoppedLabel} bid recovered after stop, but engine no longer favors ` +
-          `${String(checkSide).toUpperCase()}` +
-          (forCandidateSymbol
-            ? ` — skipping ${forCandidateSymbol} until ${stoppedLabel} thesis recovers.`
-            : ' — skipping knife-catch.'),
+          `${String(checkSide).toUpperCase()} — skipping knife-catch on ${stoppedLabel}.`,
       };
     }
   }
 
   return { ok: true };
+}
+
+/** Minutes after a stop before recovery gating expires (0 = never by age). */
+function stopRecoveryMaxAgeMs(config = {}) {
+  const mins = Number(config.stopRecoveryMaxMinutes);
+  if (Number.isFinite(mins) && mins <= 0) return 0;
+  if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 60 * 1000);
+  // One Kalshi 15m window — bounce-or-expire, don't freeze across many cycles.
+  return 15 * 60 * 1000;
 }
 
 /**
@@ -489,9 +532,12 @@ class TradingBot {
       nearCertainExitCents: 97, // if held bid reaches this, bank it — don't wait on settlement for the last few ¢
       minEntryCents: 40, // never buy a side cheaper than this — blocks longshot lottery tickets
       minMinutesToOpen: 5, // don't open when fewer than this many minutes remain in the window
-      // After stop-loss: require this many ¢ of bid bounce before same-side re-entry (0 = off).
+      // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
       stopRecoveryCents: 8,
+      // Clear the whole post-stop recovery gate this many minutes after the stop
+      // (even if the bid never bounced). 0 = never expire by age. Default 15.
+      stopRecoveryMaxMinutes: 15,
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -534,6 +580,8 @@ class TradingBot {
     this.liveBalanceCents = null;
     this.livePortfolioValueCents = null;
     this.liveBalanceUpdatedAt = null;
+    // Serialize manage/settle so watchdog + cycle can't double-sell the same leg.
+    this._tradeLock = Promise.resolve();
     this._removeInvalidPaperTrades();
     this._seedTradeLogFromLedger();
     // Always flush the effective settings so a reboot reloads exactly what
@@ -831,95 +879,260 @@ class TradingBot {
     trade.reserveDrawnCents = flow.insuranceDrawnCents;
   }
 
-  async _closePosition(trade, exitPriceCents, reason) {
-    trade.status = 'closed';
-    trade.closedAt = Date.now();
-    trade.exitPriceCents = exitPriceCents;
-    trade.exitReason = reason;
-    const entryCost = trade.entryPriceCents * trade.contracts;
-    const exitProceeds = exitPriceCents * trade.contracts;
-    trade.pnlCents = exitProceeds - entryCost;
-
-    this._applyReserveFlow(trade);
-
-    this._recordCalibration(trade);
-
-    if (this.config.mode === 'live' && trade.liveOrderId) {
-      try {
-        await this.client.createOrder({
-          ticker: trade.ticker,
-          side: trade.side,
-          action: 'sell',
-          count: trade.contracts,
-          priceCents: exitPriceCents,
-        });
-      } catch (err) {
-        this.lastError = `Failed to place live exit order: ${err.message}`;
-        console.error('[bot]', this.lastError);
+  _withTradeLock(fn) {
+    const run = this._tradeLock.then(() => fn(), () => fn());
+    this._tradeLock = run.then(
+      () => undefined,
+      (err) => {
+        console.error('[bot] trade-lock task failed:', err && err.message ? err.message : err);
       }
+    );
+    return run;
+  }
+
+  _isLiveTrade(trade) {
+    return Boolean(trade && (trade.mode === 'live' || trade.liveOrderId));
+  }
+
+  _sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  _orderFillCount(order) {
+    if (!order || typeof order !== 'object') return 0;
+    const raw =
+      order.fill_count ??
+      order.fillCount ??
+      order.filled_count ??
+      order.filledCount ??
+      order.fill_count_fp ??
+      order.fillCountFp;
+    const n = Number.parseFloat(raw);
+    return Number.isFinite(n) ? Math.floor(n) : 0;
+  }
+
+  _orderAvgFillPriceCents(order, side) {
+    if (!order) return null;
+    // Prefer dollar cost fields when present.
+    const costDollars = Number.parseFloat(
+      order.taker_fill_cost_dollars ?? order.maker_fill_cost_dollars ?? NaN
+    );
+    const filled = this._orderFillCount(order);
+    if (Number.isFinite(costDollars) && filled > 0) {
+      return Math.max(1, Math.min(99, Math.round((costDollars * 100) / filled)));
     }
-    let decision = `Closed ${trade.symbol} ${String(trade.side).toUpperCase()} via ${reason} at ${exitPriceCents}¢ (P&L $${(trade.pnlCents / 100).toFixed(2)}).`;
-    if (trade.insuranceDrawnCents > 0) {
-      decision += ` Insurance absorbed $${(trade.insuranceDrawnCents / 100).toFixed(2)}.`;
+    const yes = Number(order.yes_price ?? order.yesPrice);
+    const no = Number(order.no_price ?? order.noPrice);
+    if (side === 'yes' && Number.isFinite(yes)) return Math.round(yes);
+    if (side === 'no' && Number.isFinite(no)) return Math.round(no);
+    return null;
+  }
+
+  /**
+   * Poll Kalshi until the order is filled enough, or give up and cancel.
+   * Returns { ok, filled, avgPriceCents, order }.
+   */
+  async _awaitOrderFill(orderId, { minFill = 1, attempts = 6, delayMs = 350 } = {}) {
+    let lastOrder = null;
+    for (let i = 0; i < attempts; i += 1) {
+      try {
+        const data = await this.client.getOrder(orderId);
+        lastOrder = data.order || data;
+        const status = String(lastOrder.status || '').toLowerCase();
+        const filled = this._orderFillCount(lastOrder);
+        if (
+          filled >= minFill ||
+          status === 'executed' ||
+          status === 'filled' ||
+          status === 'complete' ||
+          status === 'completed'
+        ) {
+          return {
+            ok: filled >= minFill || status === 'executed' || status === 'filled',
+            filled: Math.max(filled, status === 'executed' || status === 'filled' ? minFill : filled),
+            avgPriceCents: null,
+            order: lastOrder,
+          };
+        }
+        if (status === 'canceled' || status === 'cancelled') {
+          return { ok: false, filled, avgPriceCents: null, order: lastOrder };
+        }
+      } catch (err) {
+        console.warn(`[bot] getOrder ${orderId} poll failed:`, err.message);
+      }
+      await this._sleep(delayMs);
     }
-    if (trade.skimmedCents > 0) {
-      decision += ` Wallet +$${(trade.skimmedCents / 100).toFixed(2)}.`;
+    try {
+      await this.client.cancelOrder(orderId);
+    } catch (err) {
+      console.warn(`[bot] cancelOrder ${orderId} failed:`, err.message);
     }
-    if (trade.insuranceAddedCents > 0) {
-      decision += ` Insurance +$${(trade.insuranceAddedCents / 100).toFixed(2)}.`;
+    try {
+      const data = await this.client.getOrder(orderId);
+      lastOrder = data.order || data;
+    } catch {
+      // ignore
     }
-    if (trade.insuranceOverflowCents > 0) {
-      decision += ` Insurance full — $${(trade.insuranceOverflowCents / 100).toFixed(2)} → bankroll.`;
+    const filled = this._orderFillCount(lastOrder);
+    return { ok: filled >= minFill, filled, avgPriceCents: null, order: lastOrder };
+  }
+
+  /**
+   * Close a position in the ledger. For live early exits, places a sell and
+   * confirms fill BEFORE marking closed. Official Kalshi settlement (reason
+   * `settled`) never sends a sell — the exchange pays 0/100 itself.
+   * Returns true if the trade was closed, false if left open (e.g. sell failed).
+   */
+  async _closePosition(trade, exitPriceCents, reason, opts = {}) {
+    if (!trade || trade.status !== 'open') return false;
+    if (trade._closing) return false;
+    trade._closing = true;
+
+    let bookedExit = Number(exitPriceCents);
+    try {
+      const isLive = this._isLiveTrade(trade);
+      // Official Kalshi settlement pays 0/100 — never send a live sell at those prices.
+      const skipLiveSell = opts.skipLiveSell === true || reason === 'settled';
+
+      if (isLive && !skipLiveSell) {
+        const sellPrice = Math.round(Number(opts.liveSellPriceCents != null ? opts.liveSellPriceCents : bookedExit));
+        if (!Number.isFinite(sellPrice) || sellPrice < 1 || sellPrice > 99) {
+          this.lastError =
+            `Live exit blocked for ${trade.symbol}: refusing sell at ${sellPrice}¢ (must be 1–99). Position left open.`;
+          console.error('[bot]', this.lastError);
+          return false;
+        }
+        try {
+          const order = await this.client.createOrder({
+            ticker: trade.ticker,
+            side: trade.side,
+            action: 'sell',
+            count: trade.contracts,
+            priceCents: sellPrice,
+          });
+          const orderId = order && order.order && order.order.order_id;
+          if (!orderId) throw new Error('sell response missing order_id');
+          const fill = await this._awaitOrderFill(orderId, {
+            minFill: trade.contracts,
+            attempts: 6,
+            delayMs: 350,
+          });
+          if (!fill.ok || fill.filled < trade.contracts) {
+            throw new Error(
+              `sell not fully filled (got ${fill.filled || 0}/${trade.contracts}, status ${
+                fill.order && fill.order.status
+              })`
+            );
+          }
+          const avg = this._orderAvgFillPriceCents(fill.order, trade.side);
+          if (Number.isFinite(avg)) bookedExit = avg;
+          else bookedExit = sellPrice;
+          trade.liveExitOrderId = orderId;
+        } catch (err) {
+          this.lastError = `Failed live exit (${reason}) on ${trade.ticker}: ${err.message}. Position left OPEN.`;
+          console.error('[bot]', this.lastError);
+          return false;
+        }
+      }
+
+      trade.status = 'closed';
+      trade.closedAt = Date.now();
+      trade.exitPriceCents = bookedExit;
+      trade.exitReason = reason;
+      const entryCost = trade.entryPriceCents * trade.contracts;
+      const exitProceeds = bookedExit * trade.contracts;
+      trade.pnlCents = exitProceeds - entryCost;
+
+      this._applyReserveFlow(trade);
+      this._recordCalibration(trade);
+
+      let decision = `Closed ${trade.symbol} ${String(trade.side).toUpperCase()} via ${reason} at ${bookedExit}¢ (P&L $${(trade.pnlCents / 100).toFixed(2)}).`;
+      if (trade.insuranceDrawnCents > 0) {
+        decision += ` Insurance absorbed $${(trade.insuranceDrawnCents / 100).toFixed(2)}.`;
+      }
+      if (trade.skimmedCents > 0) {
+        decision += ` Wallet +$${(trade.skimmedCents / 100).toFixed(2)}.`;
+      }
+      if (trade.insuranceAddedCents > 0) {
+        decision += ` Insurance +$${(trade.insuranceAddedCents / 100).toFixed(2)}.`;
+      }
+      if (trade.insuranceOverflowCents > 0) {
+        decision += ` Insurance full — $${(trade.insuranceOverflowCents / 100).toFixed(2)} → bankroll.`;
+      }
+      if (trade.insuranceReleasedCents > 0) {
+        decision += ` Insurance released $${(trade.insuranceReleasedCents / 100).toFixed(2)} → bankroll.`;
+      }
+      this.lastDecision = decision;
+      this._logActivity(this.lastDecision, {
+        kind: 'close',
+        symbol: trade.symbol,
+        side: trade.side,
+        pnlCents: trade.pnlCents,
+        tradeId: trade.id,
+      });
+      upsertTradeLog({
+        id: trade.id,
+        mode: trade.mode,
+        symbol: trade.symbol,
+        ticker: trade.ticker,
+        side: trade.side,
+        contracts: trade.contracts,
+        stakeDollars: trade.stakeDollars,
+        entryPriceCents: trade.entryPriceCents,
+        exitPriceCents: trade.exitPriceCents,
+        floorStrike: trade.floorStrike,
+        openedAt: trade.openedAt,
+        closedAt: trade.closedAt,
+        windowCloseTime: trade.windowCloseTime,
+        engineProbability: trade.engineProbability,
+        engineConfidence: trade.engineConfidence,
+        status: 'closed',
+        exitReason: trade.exitReason,
+        pnlCents: trade.pnlCents,
+        skimmedCents: trade.skimmedCents || 0,
+        insuranceAddedCents: trade.insuranceAddedCents || 0,
+        insuranceDrawnCents: trade.insuranceDrawnCents || 0,
+        insuranceOverflowCents: trade.insuranceOverflowCents || 0,
+        insuranceReleasedCents: trade.insuranceReleasedCents || 0,
+      });
+      this._persist();
+      return true;
+    } finally {
+      if (trade.status === 'open') trade._closing = false;
+      else delete trade._closing;
     }
-    if (trade.insuranceReleasedCents > 0) {
-      decision += ` Insurance released $${(trade.insuranceReleasedCents / 100).toFixed(2)} → bankroll.`;
-    }
-    this.lastDecision = decision;
-    this._logActivity(this.lastDecision, {
-      kind: 'close',
-      symbol: trade.symbol,
-      side: trade.side,
-      pnlCents: trade.pnlCents,
-      tradeId: trade.id,
-    });
-    upsertTradeLog({
-      id: trade.id,
-      mode: trade.mode,
-      symbol: trade.symbol,
-      ticker: trade.ticker,
-      side: trade.side,
-      contracts: trade.contracts,
-      stakeDollars: trade.stakeDollars,
-      entryPriceCents: trade.entryPriceCents,
-      exitPriceCents: trade.exitPriceCents,
-      floorStrike: trade.floorStrike,
-      openedAt: trade.openedAt,
-      closedAt: trade.closedAt,
-      windowCloseTime: trade.windowCloseTime,
-      engineProbability: trade.engineProbability,
-      engineConfidence: trade.engineConfidence,
-      status: 'closed',
-      exitReason: trade.exitReason,
-      pnlCents: trade.pnlCents,
-      skimmedCents: trade.skimmedCents || 0,
-      insuranceAddedCents: trade.insuranceAddedCents || 0,
-      insuranceDrawnCents: trade.insuranceDrawnCents || 0,
-      insuranceOverflowCents: trade.insuranceOverflowCents || 0,
-      insuranceReleasedCents: trade.insuranceReleasedCents || 0,
-    });
-    this._persist();
   }
 
   /**
    * Resolve settlement payout for a trade that has reached its window end.
-   * Prefer Kalshi's official result; fall back to price-vs-strike for paper
-   * when result hasn't landed yet; never leave the trade open into the next session.
+   * Prefer Kalshi's official result (no live sell — exchange settles).
+   * Live without a result yet: sell at the bid if still tradable, else wait.
+   * Paper may use price-vs-strike when result hasn't landed.
    */
   async _settleClosedWindow(trade, predictions, market) {
     const result = market && market.result ? String(market.result).toLowerCase() : '';
     if (result === 'yes' || result === 'no') {
       const settleCents = result === trade.side ? 100 : 0;
-      await this._closePosition(trade, settleCents, 'settled');
+      // Official settlement — never place a 0¢/100¢ sell order.
+      await this._closePosition(trade, settleCents, 'settled', { skipLiveSell: true });
+      return;
+    }
+
+    const isLive = this._isLiveTrade(trade);
+    const marketDone = this._isMarketSettledStatus(market);
+    const sideBid = this._heldSideBidCents(trade, market);
+
+    // Live without an official result: sell at a real bid if still tradable, else wait.
+    // Never invent a 0/100 payout or scratch the ledger while inventory may still exist.
+    if (isLive) {
+      if (!marketDone && Number.isFinite(sideBid) && sideBid >= 1 && sideBid <= 99) {
+        await this._closePosition(trade, sideBid, 'settled_timeout', {
+          liveSellPriceCents: sideBid,
+        });
+        return;
+      }
+      this.lastDecision =
+        `Waiting: ${trade.symbol} past close but Kalshi result/quote not ready for a safe live exit.`;
       return;
     }
 
@@ -934,17 +1147,17 @@ class TradingBot {
     if (Number.isFinite(strike) && Number.isFinite(livePrice)) {
       const settledUp = livePrice >= strike;
       const won = trade.side === 'yes' ? settledUp : !settledUp;
-      await this._closePosition(trade, won ? 100 : 0, 'settled');
+      await this._closePosition(trade, won ? 100 : 0, 'settled', { skipLiveSell: true });
       this.lastDecision =
         `Settled ${trade.symbol} ${String(trade.side).toUpperCase()} via price-vs-strike ` +
         `(${livePrice} vs ${strike}) — Kalshi result not yet posted.`;
       return;
     }
 
-    // Absolute last resort: scratch the trade rather than carrying it forever.
-    const sideBid = this._heldSideBidCents(trade, market);
     const fallback = Number.isFinite(sideBid) ? sideBid : trade.entryPriceCents;
-    await this._closePosition(trade, Number.isFinite(fallback) ? fallback : trade.entryPriceCents, 'settled_timeout');
+    await this._closePosition(trade, Number.isFinite(fallback) ? fallback : trade.entryPriceCents, 'settled_timeout', {
+      skipLiveSell: true,
+    });
   }
 
   _tradeCloseDeadline(trade) {
@@ -1022,6 +1235,10 @@ class TradingBot {
    * open positions from "freezing" into the next 15m dashboard session.
    */
   async forceSettleOverdue(predictions) {
+    return this._withTradeLock(() => this._forceSettleOverdueUnlocked(predictions));
+  }
+
+  async _forceSettleOverdueUnlocked(predictions) {
     const now = Date.now();
     let settled = 0;
     for (const trade of [...this.openTrades]) {
@@ -1044,16 +1261,18 @@ class TradingBot {
         console.warn(`[bot] overdue settle fetch ${trade.ticker}: ${err.message}`);
       }
       try {
+        const before = trade.status;
         await this._settleClosedWindow(trade, predictions, market);
-        settled += 1;
+        if (before === 'open' && trade.status === 'closed') settled += 1;
       } catch (err) {
         console.error(`[bot] overdue settle failed ${trade.ticker}:`, err.message);
-        if (trade.status === 'open') {
+        if (trade.status === 'open' && !this._isLiveTrade(trade)) {
           try {
             await this._closePosition(
               trade,
               Number.isFinite(trade.entryPriceCents) ? trade.entryPriceCents : 50,
-              'settled_timeout'
+              'settled_timeout',
+              { skipLiveSell: true }
             );
             settled += 1;
           } catch (closeErr) {
@@ -1192,22 +1411,32 @@ class TradingBot {
 
     if (heldSideBidCents != null && stopLevel != null && heldSideBidCents <= stopLevel) {
       // Trigger on the live bid. Paper books the stop level (entry − drop).
-      // Live books the real bid — markets don't owe you the stop price.
+      // Live sells at the real bid — markets don't owe you the stop price.
       const stopFill = this.config.mode === 'paper' ? stopLevel : heldSideBidCents;
-      await this._closePosition(trade, stopFill, 'stop_loss');
+      await this._closePosition(trade, stopFill, 'stop_loss', {
+        liveSellPriceCents: heldSideBidCents,
+      });
     } else if (nearCertainHit) {
       const fill =
         this.config.mode === 'paper'
           ? Math.min(99, Math.max(nearCertainExitCents, heldSideBidCents))
           : heldSideBidCents;
-      await this._closePosition(trade, fill, 'near_certain');
+      await this._closePosition(trade, fill, 'near_certain', {
+        liveSellPriceCents: heldSideBidCents,
+      });
     } else if (strongReversalSignal && heldSideBidCents != null) {
-      await this._closePosition(trade, heldSideBidCents, 'reversal_signal');
+      await this._closePosition(trade, heldSideBidCents, 'reversal_signal', {
+        liveSellPriceCents: heldSideBidCents,
+      });
     } else if (signalFlipped && heldSideBidCents != null) {
-      await this._closePosition(trade, heldSideBidCents, 'signal_flip');
+      await this._closePosition(trade, heldSideBidCents, 'signal_flip', {
+        liveSellPriceCents: heldSideBidCents,
+      });
     } else if (takeProfitHit && !holdThroughForConfidence) {
       const tpFill = this.config.mode === 'paper' ? takeProfitLevel : heldSideBidCents;
-      await this._closePosition(trade, tpFill, 'take_profit');
+      await this._closePosition(trade, tpFill, 'take_profit', {
+        liveSellPriceCents: heldSideBidCents,
+      });
     } else if (
       inPreCloseTakeProfitWindow &&
       heldSideBidCents != null &&
@@ -1215,9 +1444,13 @@ class TradingBot {
       heldSideBidCents > trade.entryPriceCents
     ) {
       // ~30s–60s left and already green: bank it rather than await settle.
-      await this._closePosition(trade, heldSideBidCents, 'pre_close_bank');
+      await this._closePosition(trade, heldSideBidCents, 'pre_close_bank', {
+        liveSellPriceCents: heldSideBidCents,
+      });
     } else if (canExitEven) {
-      await this._closePosition(trade, heldSideBidCents, 'breakeven');
+      await this._closePosition(trade, heldSideBidCents, 'breakeven', {
+        liveSellPriceCents: heldSideBidCents,
+      });
     }
   }
 
@@ -1226,6 +1459,10 @@ class TradingBot {
    * compute failed — settlement must not depend on a healthy Coinbase cycle.
    */
   async manageOpenPositions(predictions) {
+    return this._withTradeLock(() => this._manageOpenPositionsUnlocked(predictions));
+  }
+
+  async _manageOpenPositionsUnlocked(predictions) {
     this._maybeRotateLedger(Date.now());
     for (const trade of [...this.openTrades]) {
       try {
@@ -1235,11 +1472,17 @@ class TradingBot {
         const now = Date.now();
         if (this._isTradePastDeadline(trade, null, now) && trade.status === 'open') {
           try {
-            await this._closePosition(
-              trade,
-              Number.isFinite(trade.entryPriceCents) ? trade.entryPriceCents : 50,
-              'settled_timeout'
-            );
+            // Paper can scratch; live inventory must not be ledger-closed without a fill/result.
+            if (this._isLiveTrade(trade)) {
+              console.warn(`[bot] live ${trade.ticker} past deadline but manage failed — leaving open`);
+            } else {
+              await this._closePosition(
+                trade,
+                Number.isFinite(trade.entryPriceCents) ? trade.entryPriceCents : 50,
+                'settled_timeout',
+                { skipLiveSell: true }
+              );
+            }
           } catch (closeErr) {
             console.error(`[bot] emergency close failed for ${trade.ticker}:`, closeErr.message);
           }
@@ -1350,7 +1593,33 @@ class TradingBot {
           count: trade.contracts,
           priceCents,
         });
-        trade.liveOrderId = order.order && order.order.order_id;
+        const orderId = order && order.order && order.order.order_id;
+        if (!orderId) {
+          this.lastError = `Live entry on ${symbol} returned no order_id — not recording trade.`;
+          console.error('[bot]', this.lastError);
+          return;
+        }
+        const fill = await this._awaitOrderFill(orderId, {
+          minFill: trade.contracts,
+          attempts: 6,
+          delayMs: 350,
+        });
+        if (!fill.ok || fill.filled < 1) {
+          this.lastError =
+            `Live entry on ${symbol} did not fill (filled ${fill.filled || 0}/${trade.contracts}) — not recording trade.`;
+          console.error('[bot]', this.lastError);
+          return;
+        }
+        if (fill.filled < trade.contracts) {
+          trade.contracts = fill.filled;
+          trade.stakeDollars = +((trade.contracts * priceCents) / 100).toFixed(2);
+        }
+        const avg = this._orderAvgFillPriceCents(fill.order, side);
+        if (Number.isFinite(avg)) {
+          trade.entryPriceCents = avg;
+          trade.stakeDollars = +((trade.contracts * avg) / 100).toFixed(2);
+        }
+        trade.liveOrderId = orderId;
       } catch (err) {
         this.lastError = `Failed to place live entry order: ${err.message}`;
         console.error('[bot]', this.lastError);
@@ -1472,8 +1741,9 @@ class TradingBot {
   }
 
   /**
-   * After a stop, require the stopped coin's bid bounce (+ engine favor) before
-   * ANY new entry — including opposite side on another crypto (blocks whipsaw flips).
+   * After a stop, require the stopped coin's bid bounce before new entries.
+   * Thesis favor only blocks same-coin same-side knife-catch; peers unlock
+   * after the bounce (peer-cascade gate still applies while dumps continue).
    */
   async _stoppedCoinRecoveryGate(candidateSymbol, candidateSide, candidatePriceCents, candidateWindow, predictions) {
     const lastStop = this._lastStopLossTrade();
@@ -1481,12 +1751,21 @@ class TradingBot {
     if (!lastStop || recoveryCents <= 0) {
       return { ok: true };
     }
-    void candidateSide;
+
+    const maxAgeMs = stopRecoveryMaxAgeMs(this.config);
+    const closedAt = Number(lastStop.closedAt);
+    if (
+      maxAgeMs > 0 &&
+      Number.isFinite(closedAt) &&
+      Date.now() - closedAt >= maxAgeMs
+    ) {
+      return { ok: true };
+    }
 
     let priceCents = candidatePriceCents;
     let window = candidateWindow;
 
-    // Always quote the *stopped* side on the *stopped* coin for the recovery check.
+    // Always quote the *stopped* side on the *stopped* coin for the bounce check.
     if (candidateSymbol !== lastStop.symbol || candidateSide !== lastStop.side) {
       const seriesTicker = SERIES_BY_SYMBOL[lastStop.symbol];
       const stoppedPred = predictions && predictions[lastStop.symbol];
@@ -1546,6 +1825,8 @@ class TradingBot {
       recoveryCents,
       symbol: lastStop.symbol,
       forCandidateSymbol: candidateSymbol,
+      forCandidateSide: candidateSide,
+      maxAgeMs,
     });
   }
 
@@ -1645,8 +1926,8 @@ class TradingBot {
       return null;
     }
 
-    // Same recovery gate for re-entering the stopped coin OR jumping to another
-    // coin on the same side — the *stopped* coin must bounce first.
+    // Stopped coin must bounce before any new entry; thesis favor only for
+    // same-coin same-side knife-catch (peers unlock after bounce).
     const recoveryCheck = await this._stoppedCoinRecoveryGate(
       symbol,
       side,
@@ -1850,6 +2131,7 @@ module.exports = {
   TradingBot,
   SERIES_BY_SYMBOL,
   stopRecoveryCentsRequired,
+  stopRecoveryMaxAgeMs,
   checkPostStopRecovery,
   checkPostStopPeerCascade,
   applyProfitBuckets,

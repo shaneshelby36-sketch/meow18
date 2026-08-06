@@ -150,6 +150,10 @@ class KalshiClient {
     return data.market_positions || [];
   }
 
+  async getOrder(orderId) {
+    return this._request('GET', `/portfolio/orders/${orderId}`);
+  }
+
   /**
    * side: 'yes' | 'no'
    * action: 'buy' | 'sell'
@@ -157,6 +161,10 @@ class KalshiClient {
    */
   async createOrder({ ticker, side, action, count, priceCents, clientOrderId }) {
     const priceField = side === 'yes' ? 'yes_price' : 'no_price';
+    const capped = Math.max(1, Math.min(99, Math.round(Number(priceCents))));
+    if (!Number.isFinite(capped) || capped < 1 || capped > 99) {
+      throw new Error(`Invalid Kalshi limit price: ${priceCents}`);
+    }
     return this._request('POST', '/portfolio/orders', {
       body: {
         ticker,
@@ -164,7 +172,7 @@ class KalshiClient {
         action,
         count,
         type: 'limit',
-        [priceField]: priceCents,
+        [priceField]: capped,
         client_order_id: clientOrderId || crypto.randomUUID(),
       },
     });

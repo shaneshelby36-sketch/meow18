@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
 const { KalshiClient, normalizeMarketPrices, priceInCents } = require('./kalshiClient');
 
 const ONLINE = process.env.ONLINE === '1' || process.env.ONLINE === 'true';
@@ -1273,8 +1273,93 @@ async function testBotTradingFlow() {
       window: { probabilityUp: 40, probabilityDown: 60 },
       recoveryCents: 8,
       symbol: 'ETH',
+      forCandidateSymbol: 'ETH',
+      forCandidateSide: 'yes',
     });
     check(!noFavor.ok, 'blocks when bid bounced but engine flipped against stopped side');
+    check(/knife-catch|no longer favors/i.test(noFavor.reason || ''), 'same-coin thesis block mentions knife-catch');
+
+    // Screenshot bug: SOL bounce cleared but thesis flipped — must NOT freeze ETH/peers.
+    const peerAfterBounce = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 40,
+        entryPriceCents: 55,
+        symbol: 'SOL',
+        closedAt: Date.now() - 5 * 60 * 1000,
+      },
+      side: 'yes',
+      priceCents: 55,
+      window: { probabilityUp: 35, probabilityDown: 65 },
+      recoveryCents: 8,
+      symbol: 'SOL',
+      forCandidateSymbol: 'ETH',
+      forCandidateSide: 'yes',
+    });
+    check(peerAfterBounce.ok, 'peer coin unlocks after stopped-coin bounce even if thesis flipped');
+
+    const oppositeSameCoin = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 40,
+        entryPriceCents: 55,
+        symbol: 'SOL',
+      },
+      side: 'yes',
+      priceCents: 55,
+      window: { probabilityUp: 35, probabilityDown: 65 },
+      recoveryCents: 8,
+      symbol: 'SOL',
+      forCandidateSymbol: 'SOL',
+      forCandidateSide: 'no',
+    });
+    check(oppositeSameCoin.ok, 'opposite side on stopped coin unlocks after bounce (no thesis hostage)');
+
+    checkEq(stopRecoveryMaxAgeMs({ stopRecoveryMaxMinutes: 0 }), 0, 'max age 0 disables expiry');
+    checkEq(stopRecoveryMaxAgeMs({ stopRecoveryMaxMinutes: 15 }), 15 * 60 * 1000, 'max age uses configured minutes');
+    checkEq(stopRecoveryMaxAgeMs({}), 15 * 60 * 1000, 'max age defaults to 15 minutes');
+
+    const agedOut = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 40,
+        entryPriceCents: 55,
+        symbol: 'SOL',
+        closedAt: Date.now() - 20 * 60 * 1000,
+      },
+      side: 'yes',
+      priceCents: 41,
+      window: { probabilityUp: 30, probabilityDown: 70 },
+      recoveryCents: 8,
+      symbol: 'SOL',
+      forCandidateSymbol: 'ETH',
+      forCandidateSide: 'yes',
+      maxAgeMs: 15 * 60 * 1000,
+    });
+    check(agedOut.ok, 'recovery gate expires after max age even without bounce');
+
+    const stillYoung = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 40,
+        entryPriceCents: 55,
+        symbol: 'SOL',
+        closedAt: Date.now() - 2 * 60 * 1000,
+      },
+      side: 'yes',
+      priceCents: 41,
+      window: { probabilityUp: 30, probabilityDown: 70 },
+      recoveryCents: 8,
+      symbol: 'SOL',
+      forCandidateSymbol: 'ETH',
+      forCandidateSide: 'yes',
+      maxAgeMs: 15 * 60 * 1000,
+    });
+    check(!stillYoung.ok, 'recovery gate still blocks peers before bounce within max age');
 
     const recBot = makeBot(
       mockClient({
@@ -1538,8 +1623,9 @@ async function testBotTradingFlow() {
   ];
   checkEq(stakeBot._computeNextStake(), 10, 'halve-after-win resets after loss');
 
-  // Live order attempt on close
+  // Live: official Kalshi result books 0/100 with NO sell order
   let liveOrders = 0;
+  let getOrderCalls = 0;
   const liveClient = {
     hasCredentials: true,
     async getMarket() {
@@ -1555,7 +1641,21 @@ async function testBotTradingFlow() {
     },
     async createOrder() {
       liveOrders += 1;
-      return { order: { order_id: 'oid' } };
+      return { order: { order_id: `oid-${liveOrders}` } };
+    },
+    async getOrder(orderId) {
+      getOrderCalls += 1;
+      return {
+        order: {
+          order_id: orderId,
+          status: 'executed',
+          fills_count: 1,
+          yes_price: 42,
+        },
+      };
+    },
+    async cancelOrder() {
+      return {};
     },
     async getBalance() {
       return { balance: 10000, portfolio_value: 10000 };
@@ -1571,8 +1671,78 @@ async function testBotTradingFlow() {
     windowCloseTime: Date.now() - 1000,
   });
   await liveBot._manageOpenTrade(liveTrade, predictions(3100));
-  checkEq(liveTrade.status, 'closed', 'live trade settles');
-  checkEq(liveOrders, 1, 'live exit order attempted');
+  checkEq(liveTrade.status, 'closed', 'live trade settles on official result');
+  checkEq(liveTrade.exitReason, 'settled', 'live official settle reason');
+  checkEq(liveOrders, 0, 'official settle places no live sell');
+
+  // Live stop: sell + fill confirm before ledger close
+  liveOrders = 0;
+  getOrderCalls = 0;
+  const stopBot = makeBot(liveClient, {
+    mode: 'live',
+    liveAuthorized: true,
+    stopLossCents: 10,
+    takeProfitCents: 50,
+  });
+  stopBot.config.mode = 'live';
+  stopBot.config.liveAuthorized = true;
+  const stopTrade = openTrade(stopBot, {
+    mode: 'live',
+    liveOrderId: 'entry-stop',
+    side: 'yes',
+    entryPriceCents: 60,
+    windowCloseTime: Date.now() + 10 * 60 * 1000,
+  });
+  liveClient.getMarket = async () => ({
+    status: 'active',
+    yes_bid: 45,
+    yes_ask: 47,
+    no_bid: 53,
+    no_ask: 55,
+    close_time: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    floor_strike: 3000,
+  });
+  await stopBot._manageOpenTrade(stopTrade, predictions(3100));
+  checkEq(stopTrade.status, 'closed', 'live stop closes after fill');
+  checkEq(stopTrade.exitReason, 'stop_loss', 'live stop reason');
+  check(liveOrders >= 1, 'live stop places sell order');
+  check(getOrderCalls >= 1, 'live stop polls fill');
+
+  // Failed live sell leaves position open
+  liveOrders = 0;
+  const failClient = {
+    ...liveClient,
+    async createOrder() {
+      liveOrders += 1;
+      throw new Error('simulated sell failure');
+    },
+    async getMarket() {
+      return {
+        status: 'active',
+        yes_bid: 45,
+        yes_ask: 47,
+        close_time: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        floor_strike: 3000,
+      };
+    },
+  };
+  const failBot = makeBot(failClient, {
+    mode: 'live',
+    liveAuthorized: true,
+    stopLossCents: 10,
+  });
+  failBot.config.mode = 'live';
+  failBot.config.liveAuthorized = true;
+  const failTrade = openTrade(failBot, {
+    mode: 'live',
+    liveOrderId: 'entry-fail',
+    side: 'yes',
+    entryPriceCents: 60,
+    windowCloseTime: Date.now() + 10 * 60 * 1000,
+  });
+  await failBot._manageOpenTrade(failTrade, predictions(3100));
+  checkEq(failTrade.status, 'open', 'failed live sell leaves position open');
+  check(liveOrders >= 1, 'failed live sell still attempted order');
 
   // Status payload shape
   const status = bot.status();
