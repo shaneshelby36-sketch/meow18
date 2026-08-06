@@ -1077,7 +1077,7 @@ function buildCapitalLedgerHtml(capital) {
       <div class="capital-divider"></div>
       <div class="capital-row capital-total"><span>Total Equity</span><span>${formatMoneyCents(totalEquity)}</span></div>
       <div class="capital-row capital-pnl"><span>Net P&amp;L</span><span class="${pnlClass}">${formatMoneyCents(netPnl, { signed: true })}</span></div>
-      <p class="capital-formula">Insurance: every win is 10% Insurance / 40% Wallet / 50% Available from the start. Soft $10 target marks ready — fund can keep growing past it. Losses draw Insurance first. Wallet stays locked.</p>
+      <p class="capital-formula">Insurance: every win is 10% Insurance / 40% Wallet / 50% Available from the start. Soft $10 target = armed — fund keeps growing past it, and only then absorbs losses. Until armed, losses hit Available; Wallet stays locked.</p>
     </div>`;
 }
 
@@ -1119,7 +1119,7 @@ function updateSkimSliderDisplay() {
     display.textContent = `$${Math.round(input.value)} target`;
     if (hint) {
       hint.textContent =
-        'Each win: 10% → Insurance, 40% → Wallet, 50% → Available. Soft target marks ready in the UI; the fund keeps growing past it. Losses draw Insurance first.';
+        'Each win: 10% → Insurance, 40% → Wallet, 50% → Available. Soft target arms the fund (keeps growing past it). Losses only draw Insurance once armed; until then Available takes the hit.';
     }
     if (label) label.querySelector('span.field-hint') || hint;
   } else if (mode === 'percent') {

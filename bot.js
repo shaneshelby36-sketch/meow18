@@ -101,10 +101,9 @@ function stopRecoveryCentsRequired(config = {}) {
 }
 
 /**
- * After a stop-loss, block same-side entry (on the stopped coin OR any other)
- * until the *stopped coin's* bid has bounced and the engine still favors that
- * side — cryptos often follow each other, so jumping to another coin without
- * that recovery is the same knife-catch. Opposite side is allowed.
+ * After a stop-loss, block same-side OR opposite-side entry (on the stopped
+ * coin or any other) until the *stopped coin's* bid has bounced and the
+ * engine still favors that stopped side — prevents instant whipsaw flips.
  * `lastClosedForSymbol` should be the stop-loss trade (usually the latest stop).
  */
 function checkPostStopRecovery({
@@ -118,26 +117,29 @@ function checkPostStopRecovery({
 }) {
   if (!recoveryCents || recoveryCents <= 0) return { ok: true };
   const last = lastClosedForSymbol;
-  if (!last || last.exitReason !== 'stop_loss' || last.side !== side) {
+  // Gate uses the stopped trade's side (not necessarily the candidate side).
+  if (!last || last.exitReason !== 'stop_loss') {
     return { ok: true };
   }
+  const stopSide = last.side;
+  // `side` arg is the side we're quoting for recovery — should match stopSide.
+  const checkSide = stopSide || side;
   const exit = Number(last.exitPriceCents);
   if (!Number.isFinite(exit)) return { ok: true };
 
   const needBid = Math.min(99, exit + recoveryCents);
   const price = Number(priceCents);
   const stoppedLabel = symbol || last.symbol || '';
-  const otherNote =
-    forCandidateSymbol && forCandidateSymbol !== last.symbol
-      ? ` before same-side entry on ${forCandidateSymbol} too`
-      : ' before same-side re-entry';
+  const otherNote = forCandidateSymbol
+    ? ` before any new entry on ${forCandidateSymbol}`
+    : ' before any new entry';
 
   if (!Number.isFinite(price) || price < needBid) {
     return {
       ok: false,
       reason:
-        `Waiting: ${stoppedLabel} ${String(side).toUpperCase()} stopped @ ${exit}¢ — need ${stoppedLabel} bid ≥ ${needBid}¢ ` +
-        `(+${recoveryCents}¢ bounce)${otherNote} (recovery check, not a timer).`,
+        `Waiting: ${stoppedLabel} ${String(checkSide).toUpperCase()} stopped @ ${exit}¢ — need ${stoppedLabel} bid ≥ ${needBid}¢ ` +
+        `(+${recoveryCents}¢ bounce)${otherNote} (blocks loss strings / side-flips).`,
     };
   }
 
@@ -145,17 +147,17 @@ function checkPostStopRecovery({
     const up = Number(window.probabilityUp);
     const down = Number(window.probabilityDown);
     const favored =
-      side === 'yes'
+      checkSide === 'yes'
         ? Number.isFinite(up) && Number.isFinite(down) && up >= down
         : Number.isFinite(up) && Number.isFinite(down) && down >= up;
     if (!favored) {
       return {
         ok: false,
         reason:
-          `Waiting: ${stoppedLabel} ${String(side).toUpperCase()} bid recovered after stop, ` +
-          `but engine no longer favors ${String(side).toUpperCase()}` +
-          (forCandidateSymbol && forCandidateSymbol !== last.symbol
-            ? ` — skipping ${forCandidateSymbol} same-side until ${stoppedLabel} thesis recovers.`
+          `Waiting: ${stoppedLabel} bid recovered after stop, but engine no longer favors ` +
+          `${String(checkSide).toUpperCase()}` +
+          (forCandidateSymbol
+            ? ` — skipping ${forCandidateSymbol} until ${stoppedLabel} thesis recovers.`
             : ' — skipping knife-catch.'),
       };
     }
@@ -165,20 +167,20 @@ function checkPostStopRecovery({
 }
 
 /**
- * After a stop-loss, cryptos often cascade together. Before opening the same
- * side again on ANY coin, check peer short windows — if a majority are still
- * moving against that side, wait (not a timer). Opposite-side fades are allowed.
+ * After a stop-loss, cryptos often cascade / whipsaw. Block ALL new entries
+ * (any side, any coin) while a majority of peer short windows are still
+ * moving against the side that just stopped — not a timer.
  */
 function checkPostStopPeerCascade({
   lastStopTrade,
-  candidateSide,
+  candidateSide, // kept for API compat; gates apply regardless of side
   predictions,
   seriesBySymbol,
   minConfidence = 50,
 }) {
   if (!lastStopTrade || lastStopTrade.exitReason !== 'stop_loss') return { ok: true };
-  if (!candidateSide || candidateSide !== lastStopTrade.side) return { ok: true };
   if (!predictions || !seriesBySymbol) return { ok: true };
+  void candidateSide;
 
   const stoppedSym = lastStopTrade.symbol;
   const peers = Object.keys(seriesBySymbol).filter(
@@ -204,8 +206,8 @@ function checkPostStopPeerCascade({
     return {
       ok: false,
       reason:
-        `Waiting: after ${stoppedSym} stop, peers still cascading against ${String(lastStopTrade.side).toUpperCase()} ` +
-        `(${adverse.slice(0, 4).join(', ')}${adverse.length > 4 ? '…' : ''}) — cryptos often follow each other.`,
+        `Waiting: after ${stoppedSym} ${String(lastStopTrade.side).toUpperCase()} stop, peers still cascading ` +
+        `(${adverse.slice(0, 4).join(', ')}${adverse.length > 4 ? '…' : ''}) — no new entries until calm (blocks loss strings / side-flips).`,
     };
   }
   return { ok: true };
@@ -217,7 +219,8 @@ function checkPostStopPeerCascade({
  *   10% → Insurance Fund (builds from the start; soft $10 target is not a
  *          hard stop — it may keep growing "just in case")
  *   50% → Active Bankroll (Available Cash)
- * Losses: Insurance absorbs up to its balance (wallet untouched).
+ * Losses: Insurance only absorbs once it has reached the soft target;
+ *         until then the fund just keeps building (wallet untouched either way).
  */
 function applyProfitBuckets({
   pnlCents,
@@ -239,6 +242,13 @@ function applyProfitBuckets({
     insuranceReleasedCents: 0,
   };
 
+  const targetCents = Math.max(
+    0,
+    Math.round((Number.isFinite(Number(settings.insuranceCapDollars))
+      ? Number(settings.insuranceCapDollars)
+      : 10) * 100)
+  );
+
   if (settings.skimMode !== 'insurance') {
     if (pnl <= 0) return out;
     if (settings.skimMode === 'off') return out;
@@ -254,6 +264,10 @@ function applyProfitBuckets({
   }
 
   if (pnl < 0) {
+    // Hold until the soft target is funded — don't nibble the buffer early.
+    if (nextInsurance < targetCents) {
+      return out;
+    }
     const loss = -pnl;
     const drawn = Math.min(nextInsurance, loss);
     out.insuranceDrawnCents = drawn;
@@ -787,8 +801,8 @@ class TradingBot {
 
   /**
    * Wins (insurance mode): 40% Wallet + 10% Insurance + 50% bankroll on every
-   * win from the start. Soft $10 target marks "ready" in the UI but does not
-   * stop further insurance contributions. Losses draw Insurance first.
+   * win from the start. Soft $10 target arms absorb (fund may keep growing).
+   * Until armed, losses hit Available; once armed, Insurance absorbs first.
    */
   _applyReserveFlow(trade) {
     const pnlCents = Number(trade.pnlCents) || 0;
@@ -1404,9 +1418,17 @@ class TradingBot {
     if (this.openTrades.length >= this.config.maxOpenPositions) return;
     if (!predictions) return;
 
+    // After a stop, don't stack a second leg while the wound is still fresh —
+    // the loss-string pattern was stop → instantly fill both slots again.
+    const preferOtherThan = this._lastStopLossSymbol();
+    if (preferOtherThan && this.openTrades.length >= 1) {
+      this.lastDecision =
+        `Waiting: after ${preferOtherThan} stop — max 1 open until post-stop calm (avoids loss strings).`;
+      return;
+    }
+
     // After a stop-loss, scan other coins first instead of immediately
     // rebuying the same one that just stopped (even if it still ranks highest).
-    const preferOtherThan = this._lastStopLossSymbol();
     const scanAllAfterStop =
       preferOtherThan != null &&
       (this.config.symbol === 'AUTO' || preferOtherThan === this.config.symbol);
@@ -1451,19 +1473,21 @@ class TradingBot {
 
   /**
    * After a stop, require the stopped coin's bid bounce (+ engine favor) before
-   * any same-side entry — including on a different crypto.
+   * ANY new entry — including opposite side on another crypto (blocks whipsaw flips).
    */
   async _stoppedCoinRecoveryGate(candidateSymbol, candidateSide, candidatePriceCents, candidateWindow, predictions) {
     const lastStop = this._lastStopLossTrade();
     const recoveryCents = stopRecoveryCentsRequired(this.config);
-    if (!lastStop || lastStop.side !== candidateSide || recoveryCents <= 0) {
+    if (!lastStop || recoveryCents <= 0) {
       return { ok: true };
     }
+    void candidateSide;
 
     let priceCents = candidatePriceCents;
     let window = candidateWindow;
 
-    if (candidateSymbol !== lastStop.symbol) {
+    // Always quote the *stopped* side on the *stopped* coin for the recovery check.
+    if (candidateSymbol !== lastStop.symbol || candidateSide !== lastStop.side) {
       const seriesTicker = SERIES_BY_SYMBOL[lastStop.symbol];
       const stoppedPred = predictions && predictions[lastStop.symbol];
       if (!seriesTicker) return { ok: true };
@@ -1472,7 +1496,7 @@ class TradingBot {
           ok: false,
           reason:
             `Waiting: after ${lastStop.symbol} stop — need ${lastStop.symbol} prediction ready ` +
-            `before same-side entry on ${candidateSymbol}.`,
+            `before any new entry on ${candidateSymbol}.`,
         };
       }
       try {

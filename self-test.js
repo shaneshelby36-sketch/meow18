@@ -1048,15 +1048,24 @@ async function testBotTradingFlow() {
     checkEq(keepGoing.insuranceAddedCents, 100, 'keeps taking 10% past soft target');
     checkEq(keepGoing.insuranceCents, 1100, 'fund can grow above $10');
 
-    const absorb = applyProfitBuckets({
+    const absorbEarly = applyProfitBuckets({
       pnlCents: -800,
       reserveCents: 400,
       insuranceCents: 500,
       settings: { skimMode: 'insurance', insuranceCapDollars: 10 },
     });
-    checkEq(absorb.insuranceDrawnCents, 500, 'insurance absorbs what it has');
-    checkEq(absorb.insuranceCents, 0, 'insurance emptied by loss');
-    checkEq(absorb.reserveCents, 400, 'wallet untouched by loss');
+    checkEq(absorbEarly.insuranceDrawnCents, 0, 'under target: hold fund, do not absorb yet');
+    checkEq(absorbEarly.insuranceCents, 500, 'under target: insurance unchanged on loss');
+
+    const absorbReady = applyProfitBuckets({
+      pnlCents: -800,
+      reserveCents: 400,
+      insuranceCents: 1000,
+      settings: { skimMode: 'insurance', insuranceCapDollars: 10 },
+    });
+    checkEq(absorbReady.insuranceDrawnCents, 800, 'at/above target: insurance absorbs loss');
+    checkEq(absorbReady.insuranceCents, 200, 'at/above target: insurance reduced');
+    checkEq(absorbReady.reserveCents, 400, 'wallet untouched by loss');
 
     const insBot = makeBot(mockClient(market), {
       skimMode: 'insurance',
@@ -1206,14 +1215,16 @@ async function testBotTradingFlow() {
         side: 'yes',
         exitPriceCents: 40,
         entryPriceCents: 55,
+        symbol: 'ETH',
       },
-      side: 'no',
+      side: 'yes',
       priceCents: 42,
       window: { probabilityUp: 40, probabilityDown: 60 },
       recoveryCents: 8,
       symbol: 'ETH',
+      forCandidateSymbol: 'BTC',
     });
-    check(flipped.ok, 'allows opposite side immediately after stop');
+    check(!flipped.ok, 'blocks opposite-coin entry until stopped coin recovers (no instant side-flip)');
 
     const recovered = checkPostStopRecovery({
       lastClosedForSymbol: {
@@ -1229,7 +1240,7 @@ async function testBotTradingFlow() {
       recoveryCents: 8,
       symbol: 'ETH',
     });
-    check(recovered.ok, 'allows same-side after bounce + engine favor');
+    check(recovered.ok, 'allows entry after bounce + engine favor');
 
     const crossBlocked = checkPostStopRecovery({
       lastClosedForSymbol: {
@@ -1246,7 +1257,7 @@ async function testBotTradingFlow() {
       symbol: 'ETH',
       forCandidateSymbol: 'BTC',
     });
-    check(!crossBlocked.ok, 'same recovery blocks other-coin same-side until stopped coin bounces');
+    check(!crossBlocked.ok, 'same recovery blocks other-coin entry until stopped coin bounces');
     check(/BTC/i.test(crossBlocked.reason || ''), 'cross-coin block mentions the candidate');
 
     const noFavor = checkPostStopRecovery({
@@ -1255,6 +1266,7 @@ async function testBotTradingFlow() {
         side: 'yes',
         exitPriceCents: 40,
         entryPriceCents: 55,
+        symbol: 'ETH',
       },
       side: 'yes',
       priceCents: 55,
@@ -1262,7 +1274,7 @@ async function testBotTradingFlow() {
       recoveryCents: 8,
       symbol: 'ETH',
     });
-    check(!noFavor.ok, 'blocks when bid bounced but engine flipped against side');
+    check(!noFavor.ok, 'blocks when bid bounced but engine flipped against stopped side');
 
     const recBot = makeBot(
       mockClient({
@@ -1500,7 +1512,7 @@ async function testBotTradingFlow() {
       seriesBySymbol: { BTC: 1, ETH: 1 },
       minConfidence: 50,
     });
-    check(fade.ok, 'peer cascade allows opposite-side fade during dump');
+    check(!fade.ok, 'peer cascade blocks opposite-side flip while peers still dump');
 
     const calm = checkPostStopPeerCascade({
       lastStopTrade: { exitReason: 'stop_loss', symbol: 'BTC', side: 'yes' },
