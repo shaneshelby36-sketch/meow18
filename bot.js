@@ -213,12 +213,10 @@ function checkPostStopPeerCascade({
 
 /**
  * Profit split for skimMode === 'insurance':
- *   40% → Personal Wallet (always on wins)
- *   10% → Insurance while rebuilding after a loss until the soft target
- *          (default $10) is reached — contributions may overshoot past the
- *          target "just in case" (no hard clip).
- *   Rest → Active Bankroll
- * Once at/above the target and no recent loss, skip the 10% but keep the fund.
+ *   40% → Personal Wallet (locked paycheck)
+ *   10% → Insurance Fund (builds from the start; soft $10 target is not a
+ *          hard stop — it may keep growing "just in case")
+ *   50% → Active Bankroll (Available Cash)
  * Losses: Insurance absorbs up to its balance (wallet untouched).
  */
 function applyProfitBuckets({
@@ -264,20 +262,10 @@ function applyProfitBuckets({
   }
   if (pnl === 0) return out;
 
-  const walletPct = 40;
-  const insurancePct = 10;
-  const wallet = Math.round(pnl * (walletPct / 100));
-
-  // Calm: at/above soft target (or never rebuilding) — skip 10%, keep buffer.
-  if (!rebuildInsurance) {
-    out.skimmedCents = wallet;
-    out.reserveCents = nextReserve + wallet;
-    out.insuranceCents = nextInsurance;
-    return out;
-  }
-
-  // Rebuild: take the full 10% with no hard clip (may push past the $10 target).
-  const insuranceAdd = Math.round(pnl * (insurancePct / 100));
+  const wallet = Math.round(pnl * 0.4);
+  // Always take 10% into insurance when rebuilding (default: every win).
+  // Soft $10 target does not clip or stop contributions.
+  const insuranceAdd = rebuildInsurance ? Math.round(pnl * 0.1) : 0;
   nextInsurance += insuranceAdd;
 
   out.skimmedCents = wallet;
@@ -375,6 +363,7 @@ function loadLedger() {
       const data = JSON.parse(fs.readFileSync(LEDGER_PATH, 'utf8'));
       if (data.reserveCents == null) data.reserveCents = 0;
       if (data.insuranceCents == null) data.insuranceCents = 0;
+      if (data.insuranceReady == null) data.insuranceReady = false;
       if (data.periodStartTime == null) data.periodStartTime = Date.now();
       if (!Array.isArray(data.activityLog)) data.activityLog = [];
       return data;
@@ -382,7 +371,14 @@ function loadLedger() {
   } catch (err) {
     console.error('[bot] failed to load ledger, starting fresh:', err.message);
   }
-  return { trades: [], reserveCents: 0, insuranceCents: 0, periodStartTime: Date.now(), activityLog: [] };
+  return {
+    trades: [],
+    reserveCents: 0,
+    insuranceCents: 0,
+    insuranceReady: false,
+    periodStartTime: Date.now(),
+    activityLog: [],
+  };
 }
 
 function saveLedger(ledger) {
@@ -609,7 +605,14 @@ class TradingBot {
     if (this.config.mode !== 'paper') {
       return { ok: false, message: 'Paper history can only be reset while the bot is in paper mode.' };
     }
-    this.ledger = { trades: [], reserveCents: 0, insuranceCents: 0, periodStartTime: Date.now(), activityLog: [] };
+    this.ledger = {
+      trades: [],
+      reserveCents: 0,
+      insuranceCents: 0,
+      insuranceReady: false,
+      periodStartTime: Date.now(),
+      activityLog: [],
+    };
     this.calibration = { buckets: {} };
     this.lastError = null;
     this.lastDecision = 'Paper trading history and statistics were reset.';
@@ -783,34 +786,29 @@ class TradingBot {
   }
 
   /**
-   * Wins (insurance mode): 40% Wallet always. 10% Insurance after a loss until
-   * the soft $10 target is filled (may overshoot). Then skip the 10% but keep
-   * the buffer. Losses: Insurance absorbs first; Wallet stays locked.
+   * Wins (insurance mode): 40% Wallet + 10% Insurance + 50% bankroll on every
+   * win from the start. Soft $10 target marks "ready" in the UI but does not
+   * stop further insurance contributions. Losses draw Insurance first.
    */
   _applyReserveFlow(trade) {
     const pnlCents = Number(trade.pnlCents) || 0;
-    const priorClosed = this.ledger.trades.find(
-      (t) => t.status === 'closed' && t.id !== trade.id
-    );
-    const insuranceBal = this.ledger.insuranceCents || 0;
     const targetCents = Math.max(
       0,
       Math.round((Number(this.config.insuranceCapDollars) || 10) * 100)
     );
-    // Rebuild after a loss, or keep filling until the soft target is reached.
-    const lastWasLoss = priorClosed != null && Number(priorClosed.pnlCents) <= 0;
-    const underTarget = insuranceBal > 0 && insuranceBal < targetCents;
-    const rebuildInsurance = lastWasLoss || underTarget;
 
     const flow = applyProfitBuckets({
       pnlCents,
       reserveCents: this.ledger.reserveCents || 0,
-      insuranceCents: insuranceBal,
+      insuranceCents: this.ledger.insuranceCents || 0,
       settings: this.config,
-      rebuildInsurance,
+      rebuildInsurance: true, // always keep building — soft target is not a stop
     });
     this.ledger.reserveCents = flow.reserveCents;
     this.ledger.insuranceCents = flow.insuranceCents;
+    if ((this.ledger.insuranceCents || 0) >= targetCents) {
+      this.ledger.insuranceReady = true;
+    }
     trade.skimmedCents = flow.skimmedCents;
     trade.insuranceAddedCents = flow.insuranceAddedCents;
     trade.insuranceOverflowCents = flow.insuranceOverflowCents;

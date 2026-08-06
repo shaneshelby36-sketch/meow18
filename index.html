@@ -335,7 +335,7 @@
 
           <label>Profit skim mode
             <select id="bot-skim-mode">
-              <option value="insurance">Insurance fund (10% rebuild / 40% wallet / soft $10)</option>
+              <option value="insurance">Insurance fund (10% / 40% wallet / 50% bankroll)</option>
               <option value="percent">Percent of profit → Reserved only</option>
               <option value="fixed">Fixed amount per win → Reserved</option>
               <option value="off">Off</option>
@@ -347,7 +347,7 @@
               <input id="bot-skim-amount" type="range" min="0" max="100" step="1" />
               <span class="slider-value" id="bot-skim-amount-value">—</span>
             </div>
-            <span class="field-hint" id="bot-skim-hint">Insurance: after a loss, 10% fills toward this soft target (may go a bit over). Then skip the 10% but keep the buffer. No recent loss + empty → 40% wallet / 60% bankroll. Losses draw Insurance first.</span>
+            <span class="field-hint" id="bot-skim-hint">Insurance: from the start, each win is 10% Insurance / 40% Wallet / 50% Available. Soft $10 target marks “ready” but the fund keeps building past it. Losses draw Insurance first.</span>
           </label>
         </div>
         <div class="settings-actions">

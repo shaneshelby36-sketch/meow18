@@ -1077,7 +1077,7 @@ function buildCapitalLedgerHtml(capital) {
       <div class="capital-divider"></div>
       <div class="capital-row capital-total"><span>Total Equity</span><span>${formatMoneyCents(totalEquity)}</span></div>
       <div class="capital-row capital-pnl"><span>Net P&amp;L</span><span class="${pnlClass}">${formatMoneyCents(netPnl, { signed: true })}</span></div>
-      <p class="capital-formula">Insurance: after a loss, 10% fills a soft $10 target (may run higher). Then skip the 10% but keep the buffer. Calm wins with empty fund → 40% Wallet / 60% Available. Losses draw Insurance first.</p>
+      <p class="capital-formula">Insurance: every win is 10% Insurance / 40% Wallet / 50% Available from the start. Soft $10 target marks ready — fund can keep growing past it. Losses draw Insurance first. Wallet stays locked.</p>
     </div>`;
 }
 
@@ -1119,7 +1119,7 @@ function updateSkimSliderDisplay() {
     display.textContent = `$${Math.round(input.value)} target`;
     if (hint) {
       hint.textContent =
-        'After a loss, 10% fills toward this soft target (can overshoot). Once at/above target, skip the 10% but keep the fund. Calm + empty → 40% wallet / 60% bankroll. Losses draw Insurance first.';
+        'Each win: 10% → Insurance, 40% → Wallet, 50% → Available. Soft target marks ready in the UI; the fund keeps growing past it. Losses draw Insurance first.';
     }
     if (label) label.querySelector('span.field-hint') || hint;
   } else if (mode === 'percent') {
@@ -1142,7 +1142,7 @@ function formatSkimLabel(config) {
   if (!config || config.skimMode === 'off') return 'skim off';
   if (config.skimMode === 'insurance') {
     const cap = config.insuranceCapDollars != null ? config.insuranceCapDollars : 10;
-    return `insurance 10/40 · $${cap} soft target`;
+    return `insurance 10/40/50 · $${cap} soft target`;
   }
   if (config.skimMode === 'percent') return `skim ${config.skimPercent}% of each win → Wallet`;
   return `skim $${Number(config.skimFixedDollars || 0).toFixed(0)} per win → Wallet`;
@@ -1379,7 +1379,7 @@ function renderBacktestResults(data, dayLabel) {
     s.skimMode === 'off'
       ? 'off'
       : s.skimMode === 'insurance'
-        ? `insurance 10/40 · $${s.insuranceCapDollars != null ? s.insuranceCapDollars : 10} soft target`
+        ? `insurance 10/40/50 · $${s.insuranceCapDollars != null ? s.insuranceCapDollars : 10} soft target`
         : s.skimMode === 'percent'
         ? `${s.skimPercent}% of profit`
         : `$${Number(s.skimFixedDollars || 0).toFixed(0)} per win`;

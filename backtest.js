@@ -260,6 +260,7 @@ function backtestWithSettings(
 
   let reserveCents = 0;
   let insuranceCents = 0;
+  let insuranceReady = false;
   let closedPnlCents = 0;
   const openTrades = [];
   const closedTrades = [];
@@ -343,16 +344,13 @@ function backtestWithSettings(
       if (exitPrice == null) continue;
 
       const pnlCents = exitPrice * trade.contracts - trade.entryPriceCents * trade.contracts;
-      const lastClosed = closedTrades.length ? closedTrades[closedTrades.length - 1] : null;
       const targetCents = Math.max(0, Math.round((Number(settings.insuranceCapDollars) || 10) * 100));
-      const lastWasLoss = lastClosed != null && Number(lastClosed.pnlCents) <= 0;
-      const underTarget = insuranceCents > 0 && insuranceCents < targetCents;
-      const rebuildInsurance = lastWasLoss || underTarget;
       const flow = applyReserveFlow(pnlCents, reserveCents, insuranceCents, settings, {
-        rebuildInsurance,
+        rebuildInsurance: true,
       });
       reserveCents = flow.reserveCents;
       insuranceCents = flow.insuranceCents;
+      if (insuranceCents >= targetCents) insuranceReady = true;
       closedPnlCents += pnlCents;
       closedTrades.push({
         ...trade,
@@ -639,16 +637,13 @@ function backtestWithSettings(
     const won = trade.side === 'yes' ? settledUp : !settledUp;
     const exitPrice = won ? 100 : 0;
     const pnlCents = exitPrice * trade.contracts - trade.entryPriceCents * trade.contracts;
-    const lastClosed = closedTrades.length ? closedTrades[closedTrades.length - 1] : null;
     const targetCents = Math.max(0, Math.round((Number(settings.insuranceCapDollars) || 10) * 100));
-    const lastWasLoss = lastClosed != null && Number(lastClosed.pnlCents) <= 0;
-    const underTarget = insuranceCents > 0 && insuranceCents < targetCents;
-    const rebuildInsurance = lastWasLoss || underTarget;
     const flow = applyReserveFlow(pnlCents, reserveCents, insuranceCents, settings, {
-      rebuildInsurance,
+      rebuildInsurance: true,
     });
     reserveCents = flow.reserveCents;
     insuranceCents = flow.insuranceCents;
+    if (insuranceCents >= targetCents) insuranceReady = true;
     closedPnlCents += pnlCents;
     closedTrades.push({
       ...trade,
