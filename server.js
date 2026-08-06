@@ -92,9 +92,10 @@ const bot = KALSHI_ENABLED
         stopRecoveryCents: parseInt(process.env.KALSHI_STOP_RECOVERY_CENTS || '8', 10),
         stakeDollars: parseFloat(process.env.KALSHI_STAKE_DOLLARS || '10'),
         maxOpenPositions: parseInt(process.env.KALSHI_MAX_OPEN_POSITIONS || '2', 10),
-        skimMode: process.env.KALSHI_SKIM_MODE || 'percent',
+        skimMode: process.env.KALSHI_SKIM_MODE || 'insurance',
         skimFixedDollars: parseFloat(process.env.KALSHI_SKIM_FIXED_DOLLARS || '5'),
         skimPercent: parseFloat(process.env.KALSHI_SKIM_PERCENT || '50'),
+        insuranceCapDollars: parseFloat(process.env.KALSHI_INSURANCE_CAP_DOLLARS || '10'),
         paperStartingBalanceDollars: parseFloat(process.env.KALSHI_PAPER_STARTING_BALANCE || '100'),
         mode: wantsLive ? 'live' : 'paper',
         // Fixed ceiling for this process's lifetime, set only from the
@@ -519,6 +520,7 @@ app.get("/", (req, res) => {
       skimMode: source.skimMode ?? live.skimMode,
       skimPercent: source.skimPercent ?? live.skimPercent,
       skimFixedDollars: source.skimFixedDollars ?? live.skimFixedDollars,
+      insuranceCapDollars: source.insuranceCapDollars ?? live.insuranceCapDollars,
       paperStartingBalanceDollars: source.paperStartingBalanceDollars ?? live.paperStartingBalanceDollars,
       assumedEntryCents: source.assumedEntryCents ?? 50,
     };

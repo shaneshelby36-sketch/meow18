@@ -330,23 +330,24 @@
               <input id="bot-paper-balance" type="range" min="10" max="10000" step="10" />
               <span class="slider-value" id="bot-paper-balance-value">—</span>
             </div>
-            <span class="field-hint">Your trading bankroll. Available Cash = bankroll + closed P&amp;L − Reserved − Open Positions. New trades can only use Available Cash.</span>
+            <span class="field-hint">Your trading bankroll. Available Cash = bankroll + closed P&amp;L − Wallet − Insurance − Open Positions. New trades can only use Available Cash.</span>
           </label>
 
           <label>Profit skim mode
             <select id="bot-skim-mode">
-              <option value="percent">Percent of profit per win (default 50/50)</option>
-              <option value="fixed">Fixed amount per win</option>
+              <option value="insurance">Insurance fund (10% rebuild / 40% wallet / soft $10)</option>
+              <option value="percent">Percent of profit → Reserved only</option>
+              <option value="fixed">Fixed amount per win → Reserved</option>
               <option value="off">Off</option>
             </select>
           </label>
 
-          <label>Skim amount
+          <label id="bot-skim-amount-label">Skim amount
             <div class="slider-row">
               <input id="bot-skim-amount" type="range" min="0" max="100" step="1" />
               <span class="slider-value" id="bot-skim-amount-value">—</span>
             </div>
-            <span class="field-hint">Default 50%: half of each win → Reserved (locked), half stays in Available Cash. Losses do not draw from Reserved.</span>
+            <span class="field-hint" id="bot-skim-hint">Insurance: after a loss, 10% fills toward this soft target (may go a bit over). Then skip the 10% but keep the buffer. No recent loss + empty → 40% wallet / 60% bankroll. Losses draw Insurance first.</span>
           </label>
         </div>
         <div class="settings-actions">

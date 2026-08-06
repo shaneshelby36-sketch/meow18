@@ -3,7 +3,7 @@
 const { correlation } = require('./indicators');
 const { gatherIndicators, buildWindowPrediction, WINDOWS } = require('./prediction');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
-const { stopRecoveryCentsRequired, checkPostStopRecovery, checkPostStopPeerCascade } = require('./bot');
+const { stopRecoveryCentsRequired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
 
 const LOOKBACK_MIN = 210;
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
@@ -29,7 +29,7 @@ function makeSeries(historySlice) {
 }
 
 function normalizeSettings(raw = {}) {
-  const skimMode = ['percent', 'fixed', 'off'].includes(raw.skimMode) ? raw.skimMode : 'percent';
+  const skimMode = ['insurance', 'percent', 'fixed', 'off'].includes(raw.skimMode) ? raw.skimMode : 'insurance';
   return {
     edgeThresholdPct: Number.isFinite(Number(raw.edgeThresholdPct)) ? Number(raw.edgeThresholdPct) : 1,
     minConfidence: Number.isFinite(Number(raw.minConfidence)) ? Number(raw.minConfidence) : 55,
@@ -43,6 +43,7 @@ function normalizeSettings(raw = {}) {
     skimMode,
     skimPercent: Number.isFinite(Number(raw.skimPercent)) ? Number(raw.skimPercent) : 50,
     skimFixedDollars: Number.isFinite(Number(raw.skimFixedDollars)) ? Number(raw.skimFixedDollars) : 5,
+    insuranceCapDollars: Number.isFinite(Number(raw.insuranceCapDollars)) ? Number(raw.insuranceCapDollars) : 10,
     paperStartingBalanceDollars: Number.isFinite(Number(raw.paperStartingBalanceDollars))
       ? Number(raw.paperStartingBalanceDollars)
       : 100,
@@ -59,27 +60,22 @@ function pickWindowKey(minutesRemaining) {
 
 function computeSkim(pnlCents, settings) {
   if (pnlCents <= 0 || settings.skimMode === 'off') return 0;
+  if (settings.skimMode === 'insurance') return Math.round(pnlCents * 0.4);
   if (settings.skimMode === 'fixed') {
     return Math.min(Math.round(settings.skimFixedDollars * 100), pnlCents);
   }
   return Math.round(pnlCents * (settings.skimPercent / 100));
 }
 
-/** Wins skim into reserve; losses do not touch reserve (it stays locked). */
-function applyReserveFlow(pnlCents, reserveCents, settings) {
-  if (pnlCents <= 0) {
-    return {
-      reserveCents,
-      skimmedCents: 0,
-      reserveDrawnCents: 0,
-    };
-  }
-  const skimmedCents = computeSkim(pnlCents, settings);
-  return {
-    reserveCents: reserveCents + skimmedCents,
-    skimmedCents,
-    reserveDrawnCents: 0,
-  };
+/** Wins → wallet/insurance per settings; losses draw insurance when in insurance mode. */
+function applyReserveFlow(pnlCents, reserveCents, insuranceCents, settings, { rebuildInsurance = true } = {}) {
+  return applyProfitBuckets({
+    pnlCents,
+    reserveCents,
+    insuranceCents: insuranceCents || 0,
+    settings,
+    rebuildInsurance,
+  });
 }
 
 function computeNextStake(settings, lastClosed) {
@@ -263,6 +259,7 @@ function backtestWithSettings(
   const minTradeCostCents = Math.max(entryCents, Math.floor((settings.stakeDollars * 100) / entryCents) * entryCents);
 
   let reserveCents = 0;
+  let insuranceCents = 0;
   let closedPnlCents = 0;
   const openTrades = [];
   const closedTrades = [];
@@ -285,9 +282,9 @@ function backtestWithSettings(
     openTrades.reduce((sum, t) => sum + t.entryPriceCents * t.contracts, 0);
 
   const availableCash = () =>
-    Math.max(0, startingCents + closedPnlCents - reserveCents - openExposure());
+    Math.max(0, startingCents + closedPnlCents - reserveCents - insuranceCents - openExposure());
 
-  const totalEquityNow = () => availableCash() + openExposure() + reserveCents;
+  const totalEquityNow = () => availableCash() + openExposure() + reserveCents + insuranceCents;
 
   const simStartMs = timeline.length ? timeline[0] : null;
   const simEndMs = timeline.length ? timeline[timeline.length - 1] : null;
@@ -346,8 +343,16 @@ function backtestWithSettings(
       if (exitPrice == null) continue;
 
       const pnlCents = exitPrice * trade.contracts - trade.entryPriceCents * trade.contracts;
-      const flow = applyReserveFlow(pnlCents, reserveCents, settings);
+      const lastClosed = closedTrades.length ? closedTrades[closedTrades.length - 1] : null;
+      const targetCents = Math.max(0, Math.round((Number(settings.insuranceCapDollars) || 10) * 100));
+      const lastWasLoss = lastClosed != null && Number(lastClosed.pnlCents) <= 0;
+      const underTarget = insuranceCents > 0 && insuranceCents < targetCents;
+      const rebuildInsurance = lastWasLoss || underTarget;
+      const flow = applyReserveFlow(pnlCents, reserveCents, insuranceCents, settings, {
+        rebuildInsurance,
+      });
       reserveCents = flow.reserveCents;
+      insuranceCents = flow.insuranceCents;
       closedPnlCents += pnlCents;
       closedTrades.push({
         ...trade,
@@ -355,7 +360,11 @@ function backtestWithSettings(
         exitReason: reason,
         pnlCents,
         skimmedCents: flow.skimmedCents,
-        reserveDrawnCents: flow.reserveDrawnCents,
+        insuranceAddedCents: flow.insuranceAddedCents,
+        insuranceDrawnCents: flow.insuranceDrawnCents,
+        insuranceOverflowCents: flow.insuranceOverflowCents,
+        insuranceReleasedCents: flow.insuranceReleasedCents,
+        reserveDrawnCents: flow.insuranceDrawnCents,
         closedAt: minute,
       });
       openTrades.splice(t, 1);
@@ -380,6 +389,7 @@ function backtestWithSettings(
           at: minute,
           availableCashCents: availableCash(),
           reservedProfitCents: reserveCents,
+          insuranceCents,
           openPositionsValueCents: openExposure(),
           totalEquityCents: totalEquityNow(),
           tradesSoFar: closedTrades.length,
@@ -629,8 +639,16 @@ function backtestWithSettings(
     const won = trade.side === 'yes' ? settledUp : !settledUp;
     const exitPrice = won ? 100 : 0;
     const pnlCents = exitPrice * trade.contracts - trade.entryPriceCents * trade.contracts;
-    const flow = applyReserveFlow(pnlCents, reserveCents, settings);
+    const lastClosed = closedTrades.length ? closedTrades[closedTrades.length - 1] : null;
+    const targetCents = Math.max(0, Math.round((Number(settings.insuranceCapDollars) || 10) * 100));
+    const lastWasLoss = lastClosed != null && Number(lastClosed.pnlCents) <= 0;
+    const underTarget = insuranceCents > 0 && insuranceCents < targetCents;
+    const rebuildInsurance = lastWasLoss || underTarget;
+    const flow = applyReserveFlow(pnlCents, reserveCents, insuranceCents, settings, {
+      rebuildInsurance,
+    });
     reserveCents = flow.reserveCents;
+    insuranceCents = flow.insuranceCents;
     closedPnlCents += pnlCents;
     closedTrades.push({
       ...trade,
@@ -638,7 +656,11 @@ function backtestWithSettings(
       exitReason: 'end_of_data',
       pnlCents,
       skimmedCents: flow.skimmedCents,
-      reserveDrawnCents: flow.reserveDrawnCents,
+      insuranceAddedCents: flow.insuranceAddedCents,
+      insuranceDrawnCents: flow.insuranceDrawnCents,
+      insuranceOverflowCents: flow.insuranceOverflowCents,
+      insuranceReleasedCents: flow.insuranceReleasedCents,
+      reserveDrawnCents: flow.insuranceDrawnCents,
       closedAt: endMinute,
     });
   }
@@ -647,7 +669,7 @@ function backtestWithSettings(
   const losses = closedTrades.filter((t) => t.pnlCents <= 0).length;
   const available = availableCash();
   const openPos = openExposure();
-  const totalEquity = available + openPos + reserveCents;
+  const totalEquity = available + openPos + reserveCents + insuranceCents;
   const netPnl = totalEquity - startingCents;
   const stopLossExits = closedTrades.filter((t) => t.exitReason === 'stop_loss').length;
   const takeProfitExits = closedTrades.filter((t) => t.exitReason === 'take_profit').length;
@@ -666,6 +688,7 @@ function backtestWithSettings(
       at: simEndMs,
       availableCashCents: available,
       reservedProfitCents: reserveCents,
+      insuranceCents,
       openPositionsValueCents: openPos,
       totalEquityCents: totalEquity,
       tradesSoFar: closedTrades.length,
@@ -707,6 +730,7 @@ function backtestWithSettings(
     availableCashCents: available,
     openPositionsValueCents: openPos,
     reservedProfitCents: reserveCents,
+    insuranceCents,
     totalEquityCents: totalEquity,
     netPnlCents: netPnl,
     grossClosedPnlCents: closedPnlCents,
@@ -797,6 +821,7 @@ function huntBestSettings(candlesBySymbol, baseSettings = {}, runOptions = {}) {
             skimMode: base.skimMode,
             skimPercent: base.skimPercent,
             skimFixedDollars: base.skimFixedDollars,
+            insuranceCapDollars: base.insuranceCapDollars,
           },
           trades: trading.trades,
           wins: trading.wins,

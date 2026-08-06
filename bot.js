@@ -19,7 +19,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 5;
+const SETTINGS_DEFAULTS_VERSION = 6;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -84,6 +84,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'maxOpenPositions',
   'skimPercent',
   'skimFixedDollars',
+  'insuranceCapDollars',
   'paperStartingBalanceDollars',
 ];
 
@@ -210,9 +211,85 @@ function checkPostStopPeerCascade({
   return { ok: true };
 }
 
+/**
+ * Profit split for skimMode === 'insurance':
+ *   40% → Personal Wallet (always on wins)
+ *   10% → Insurance while rebuilding after a loss until the soft target
+ *          (default $10) is reached — contributions may overshoot past the
+ *          target "just in case" (no hard clip).
+ *   Rest → Active Bankroll
+ * Once at/above the target and no recent loss, skip the 10% but keep the fund.
+ * Losses: Insurance absorbs up to its balance (wallet untouched).
+ */
+function applyProfitBuckets({
+  pnlCents,
+  reserveCents = 0,
+  insuranceCents = 0,
+  settings = {},
+  rebuildInsurance = true,
+}) {
+  const pnl = Number(pnlCents) || 0;
+  let nextReserve = Number(reserveCents) || 0;
+  let nextInsurance = Number(insuranceCents) || 0;
+  const out = {
+    reserveCents: nextReserve,
+    insuranceCents: nextInsurance,
+    skimmedCents: 0,
+    insuranceAddedCents: 0,
+    insuranceOverflowCents: 0,
+    insuranceDrawnCents: 0,
+    insuranceReleasedCents: 0,
+  };
+
+  if (settings.skimMode !== 'insurance') {
+    if (pnl <= 0) return out;
+    if (settings.skimMode === 'off') return out;
+    let skimmed = 0;
+    if (settings.skimMode === 'fixed') {
+      skimmed = Math.min(Math.round(Number(settings.skimFixedDollars || 0) * 100), pnl);
+    } else {
+      skimmed = Math.round(pnl * (Number(settings.skimPercent) || 0) / 100);
+    }
+    out.skimmedCents = skimmed;
+    out.reserveCents = nextReserve + skimmed;
+    return out;
+  }
+
+  if (pnl < 0) {
+    const loss = -pnl;
+    const drawn = Math.min(nextInsurance, loss);
+    out.insuranceDrawnCents = drawn;
+    out.insuranceCents = nextInsurance - drawn;
+    return out;
+  }
+  if (pnl === 0) return out;
+
+  const walletPct = 40;
+  const insurancePct = 10;
+  const wallet = Math.round(pnl * (walletPct / 100));
+
+  // Calm: at/above soft target (or never rebuilding) — skip 10%, keep buffer.
+  if (!rebuildInsurance) {
+    out.skimmedCents = wallet;
+    out.reserveCents = nextReserve + wallet;
+    out.insuranceCents = nextInsurance;
+    return out;
+  }
+
+  // Rebuild: take the full 10% with no hard clip (may push past the $10 target).
+  const insuranceAdd = Math.round(pnl * (insurancePct / 100));
+  nextInsurance += insuranceAdd;
+
+  out.skimmedCents = wallet;
+  out.insuranceAddedCents = insuranceAdd;
+  out.reserveCents = nextReserve + wallet;
+  out.insuranceCents = nextInsurance;
+  return out;
+}
+
 const EDITABLE_STRING_FIELDS = {
   symbol: (v) => (v === 'AUTO' || SERIES_BY_SYMBOL[v] ? v : null),
-  skimMode: (v) => (['percent', 'fixed', 'off'].includes(v) ? v : null),
+  skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
 };
 
@@ -297,6 +374,7 @@ function loadLedger() {
     if (fs.existsSync(LEDGER_PATH)) {
       const data = JSON.parse(fs.readFileSync(LEDGER_PATH, 'utf8'));
       if (data.reserveCents == null) data.reserveCents = 0;
+      if (data.insuranceCents == null) data.insuranceCents = 0;
       if (data.periodStartTime == null) data.periodStartTime = Date.now();
       if (!Array.isArray(data.activityLog)) data.activityLog = [];
       return data;
@@ -304,7 +382,7 @@ function loadLedger() {
   } catch (err) {
     console.error('[bot] failed to load ledger, starting fresh:', err.message);
   }
-  return { trades: [], reserveCents: 0, periodStartTime: Date.now(), activityLog: [] };
+  return { trades: [], reserveCents: 0, insuranceCents: 0, periodStartTime: Date.now(), activityLog: [] };
 }
 
 function saveLedger(ledger) {
@@ -407,9 +485,11 @@ class TradingBot {
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
-      skimMode: 'percent', // 'percent' | 'fixed' | 'off' — how much profit gets set aside per win
-      skimPercent: 50, // used when skimMode === 'percent' — default 50% reserved / 50% stays available
-      skimFixedDollars: 5, // used when skimMode === 'fixed' ($5.00 per win), capped at that trade's own profit
+      skimMode: 'insurance', // 'insurance' | 'percent' | 'fixed' | 'off'
+      skimPercent: 50, // used when skimMode === 'percent'
+      skimFixedDollars: 5, // used when skimMode === 'fixed'
+      // Insurance fund (skimMode === 'insurance'): 10% fund / 40% wallet / 50% bankroll
+      insuranceCapDollars: 10, // fund builds to this, then 10% overflows into Active Bankroll
       paperStartingBalanceDollars: 100, // trading bankroll (also the capital backing paper trades)
       mode: 'paper', // 'paper' | 'live'
       liveAuthorized: false,
@@ -529,7 +609,7 @@ class TradingBot {
     if (this.config.mode !== 'paper') {
       return { ok: false, message: 'Paper history can only be reset while the bot is in paper mode.' };
     }
-    this.ledger = { trades: [], reserveCents: 0, periodStartTime: Date.now(), activityLog: [] };
+    this.ledger = { trades: [], reserveCents: 0, insuranceCents: 0, periodStartTime: Date.now(), activityLog: [] };
     this.calibration = { buckets: {} };
     this.lastError = null;
     this.lastDecision = 'Paper trading history and statistics were reset.';
@@ -569,13 +649,16 @@ class TradingBot {
     const openExposureCents = this._openExposureCents();
     const startingCents = Math.round(this.config.paperStartingBalanceDollars * 100);
     const reserveCents = this.ledger.reserveCents || 0;
+    const insuranceCents = this.ledger.insuranceCents || 0;
     const paperTotalCents = startingCents + closedPnlCents;
     return {
       startingCents,
       paperTotalCents,
       reserveCents,
+      insuranceCents,
+      insuranceCapCents: Math.max(0, Math.round((Number(this.config.insuranceCapDollars) || 10) * 100)),
       openExposureCents,
-      paperAvailableCents: Math.max(0, paperTotalCents - reserveCents - openExposureCents),
+      paperAvailableCents: Math.max(0, paperTotalCents - reserveCents - insuranceCents - openExposureCents),
     };
   }
 
@@ -689,6 +772,9 @@ class TradingBot {
 
   _computeSkim(pnlCents) {
     if (pnlCents <= 0 || this.config.skimMode === 'off') return 0;
+    if (this.config.skimMode === 'insurance') {
+      return Math.round(pnlCents * 0.4); // wallet share only (display helper)
+    }
     if (this.config.skimMode === 'fixed') {
       return Math.min(Math.round(this.config.skimFixedDollars * 100), pnlCents);
     }
@@ -697,22 +783,40 @@ class TradingBot {
   }
 
   /**
-   * Wins: skim a slice of profit into Reserved (stays locked — not spent on
-   * new trades and not drawn down by losses). The unskimmed share of the win
-   * remains in the spendable pool / Available Cash.
+   * Wins (insurance mode): 40% Wallet always. 10% Insurance after a loss until
+   * the soft $10 target is filled (may overshoot). Then skip the 10% but keep
+   * the buffer. Losses: Insurance absorbs first; Wallet stays locked.
    */
   _applyReserveFlow(trade) {
     const pnlCents = Number(trade.pnlCents) || 0;
-    trade.reserveDrawnCents = 0;
-    if (pnlCents <= 0) {
-      trade.skimmedCents = 0;
-      return;
-    }
-    const skimmedCents = this._computeSkim(pnlCents);
-    trade.skimmedCents = skimmedCents;
-    if (skimmedCents > 0) {
-      this.ledger.reserveCents = (this.ledger.reserveCents || 0) + skimmedCents;
-    }
+    const priorClosed = this.ledger.trades.find(
+      (t) => t.status === 'closed' && t.id !== trade.id
+    );
+    const insuranceBal = this.ledger.insuranceCents || 0;
+    const targetCents = Math.max(
+      0,
+      Math.round((Number(this.config.insuranceCapDollars) || 10) * 100)
+    );
+    // Rebuild after a loss, or keep filling until the soft target is reached.
+    const lastWasLoss = priorClosed != null && Number(priorClosed.pnlCents) <= 0;
+    const underTarget = insuranceBal > 0 && insuranceBal < targetCents;
+    const rebuildInsurance = lastWasLoss || underTarget;
+
+    const flow = applyProfitBuckets({
+      pnlCents,
+      reserveCents: this.ledger.reserveCents || 0,
+      insuranceCents: insuranceBal,
+      settings: this.config,
+      rebuildInsurance,
+    });
+    this.ledger.reserveCents = flow.reserveCents;
+    this.ledger.insuranceCents = flow.insuranceCents;
+    trade.skimmedCents = flow.skimmedCents;
+    trade.insuranceAddedCents = flow.insuranceAddedCents;
+    trade.insuranceOverflowCents = flow.insuranceOverflowCents;
+    trade.insuranceDrawnCents = flow.insuranceDrawnCents;
+    trade.insuranceReleasedCents = flow.insuranceReleasedCents;
+    trade.reserveDrawnCents = flow.insuranceDrawnCents;
   }
 
   async _closePosition(trade, exitPriceCents, reason) {
@@ -743,8 +847,20 @@ class TradingBot {
       }
     }
     let decision = `Closed ${trade.symbol} ${String(trade.side).toUpperCase()} via ${reason} at ${exitPriceCents}¢ (P&L $${(trade.pnlCents / 100).toFixed(2)}).`;
+    if (trade.insuranceDrawnCents > 0) {
+      decision += ` Insurance absorbed $${(trade.insuranceDrawnCents / 100).toFixed(2)}.`;
+    }
     if (trade.skimmedCents > 0) {
-      decision += ` Skimmed $${(trade.skimmedCents / 100).toFixed(2)} to Reserved.`;
+      decision += ` Wallet +$${(trade.skimmedCents / 100).toFixed(2)}.`;
+    }
+    if (trade.insuranceAddedCents > 0) {
+      decision += ` Insurance +$${(trade.insuranceAddedCents / 100).toFixed(2)}.`;
+    }
+    if (trade.insuranceOverflowCents > 0) {
+      decision += ` Insurance full — $${(trade.insuranceOverflowCents / 100).toFixed(2)} → bankroll.`;
+    }
+    if (trade.insuranceReleasedCents > 0) {
+      decision += ` Insurance released $${(trade.insuranceReleasedCents / 100).toFixed(2)} → bankroll.`;
     }
     this.lastDecision = decision;
     this._logActivity(this.lastDecision, {
@@ -774,6 +890,10 @@ class TradingBot {
       exitReason: trade.exitReason,
       pnlCents: trade.pnlCents,
       skimmedCents: trade.skimmedCents || 0,
+      insuranceAddedCents: trade.insuranceAddedCents || 0,
+      insuranceDrawnCents: trade.insuranceDrawnCents || 0,
+      insuranceOverflowCents: trade.insuranceOverflowCents || 0,
+      insuranceReleasedCents: trade.insuranceReleasedCents || 0,
     });
     this._persist();
   }
@@ -1691,6 +1811,7 @@ class TradingBot {
         longestWinStreak,
         netPnlCents: closed.reduce((sum, t) => sum + (t.pnlCents || 0), 0),
         reserveCents: this.ledger.reserveCents || 0,
+        insuranceCents: this.ledger.insuranceCents || 0,
         lifetimeTrades: permanentLog.length,
       },
       capital: {
@@ -1709,4 +1830,5 @@ module.exports = {
   stopRecoveryCentsRequired,
   checkPostStopRecovery,
   checkPostStopPeerCascade,
+  applyProfitBuckets,
 };

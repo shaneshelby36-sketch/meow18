@@ -1051,17 +1051,24 @@ function buildCapitalLedgerHtml(capital) {
   const available = Number(capital.paperAvailableCents) || 0;
   const openPositions = Number(capital.openExposureCents) || 0;
   const reserved = Number(capital.reserveCents) || 0;
-  const totalEquity = available + openPositions + reserved;
+  const insurance = Number(capital.insuranceCents) || 0;
+  const insuranceCap = Number(capital.insuranceCapCents) || 1000;
+  const totalEquity = available + openPositions + reserved + insurance;
   const netPnl = totalEquity - starting;
   const pnlClass = netPnl > 0 ? 'chip-positive' : netPnl < 0 ? 'chip-negative' : '';
   const reservedClass = reserved > 0 ? 'chip-positive' : '';
+  const insuranceClass = insurance > 0 ? 'chip-positive' : '';
 
   return `
     <div class="capital-ledger">
       <div class="capital-ledger-title">Capital</div>
       <div class="capital-row capital-reserved">
-        <span>Reserved Profit <em>(locked skim)</em></span>
+        <span>Personal Wallet <em>(locked)</em></span>
         <span class="${reservedClass}">${formatMoneyCents(reserved)}</span>
+      </div>
+      <div class="capital-row capital-reserved">
+        <span>Insurance Fund <em>(soft target ${formatMoneyCents(insuranceCap)})</em></span>
+        <span class="${insuranceClass}">${formatMoneyCents(insurance)}</span>
       </div>
       <div class="capital-divider"></div>
       <div class="capital-row"><span>Starting Bankroll</span><span>${formatMoneyCents(starting)}</span></div>
@@ -1070,7 +1077,7 @@ function buildCapitalLedgerHtml(capital) {
       <div class="capital-divider"></div>
       <div class="capital-row capital-total"><span>Total Equity</span><span>${formatMoneyCents(totalEquity)}</span></div>
       <div class="capital-row capital-pnl"><span>Net P&amp;L</span><span class="${pnlClass}">${formatMoneyCents(netPnl, { signed: true })}</span></div>
-      <p class="capital-formula">Default skim: 50% of each win → Reserved (stays locked), 50% stays in Available. Losses hit Available only — Reserved is not drawn down. Total Equity = Available Cash + Open Positions + Reserved Profit</p>
+      <p class="capital-formula">Insurance: after a loss, 10% fills a soft $10 target (may run higher). Then skip the 10% but keep the buffer. Calm wins with empty fund → 40% Wallet / 60% Available. Losses draw Insurance first.</p>
     </div>`;
 }
 
@@ -1103,14 +1110,42 @@ function updateSkimSliderDisplay() {
   const mode = document.getElementById('bot-skim-mode').value;
   const input = document.getElementById('bot-skim-amount');
   const display = document.getElementById('bot-skim-amount-value');
+  const label = document.getElementById('bot-skim-amount-label');
+  const hint = document.getElementById('bot-skim-hint');
   if (!input || !display) return;
-  display.textContent = mode === 'percent' ? `${Math.round(input.value)}%` : mode === 'off' ? 'off' : `$${Math.round(input.value)}`;
+  if (mode === 'insurance') {
+    input.min = '1';
+    input.max = '50';
+    display.textContent = `$${Math.round(input.value)} target`;
+    if (hint) {
+      hint.textContent =
+        'After a loss, 10% fills toward this soft target (can overshoot). Once at/above target, skip the 10% but keep the fund. Calm + empty → 40% wallet / 60% bankroll. Losses draw Insurance first.';
+    }
+    if (label) label.querySelector('span.field-hint') || hint;
+  } else if (mode === 'percent') {
+    input.min = '0';
+    input.max = '100';
+    display.textContent = `${Math.round(input.value)}%`;
+    if (hint) hint.textContent = 'Percent of each win → Reserved (locked). Rest stays in Available. Losses do not draw Reserved.';
+  } else if (mode === 'off') {
+    display.textContent = 'off';
+    if (hint) hint.textContent = 'No skim — full win/loss hits Available Cash.';
+  } else {
+    input.min = '0';
+    input.max = '100';
+    display.textContent = `$${Math.round(input.value)}`;
+    if (hint) hint.textContent = 'Fixed dollar skim per win → Reserved (locked), capped at that trade’s profit.';
+  }
 }
 
 function formatSkimLabel(config) {
   if (!config || config.skimMode === 'off') return 'skim off';
-  if (config.skimMode === 'percent') return `skim ${config.skimPercent}% of each win → Reserved`;
-  return `skim $${Number(config.skimFixedDollars || 0).toFixed(0)} per win → Reserved`;
+  if (config.skimMode === 'insurance') {
+    const cap = config.insuranceCapDollars != null ? config.insuranceCapDollars : 10;
+    return `insurance 10/40 · $${cap} soft target`;
+  }
+  if (config.skimMode === 'percent') return `skim ${config.skimPercent}% of each win → Wallet`;
+  return `skim $${Number(config.skimFixedDollars || 0).toFixed(0)} per win → Wallet`;
 }
 
 function wireSliderDisplays() {
@@ -1124,9 +1159,13 @@ function wireSliderDisplays() {
   if (skimMode) {
     skimMode.addEventListener('change', () => {
       const input = document.getElementById('bot-skim-amount');
-      // Avoid the common footgun: slider at "50" while still on Fixed = $50/win, not 50%.
+      if (input && skimMode.value === 'insurance' && (Number(input.value) < 1 || Number(input.value) > 50)) {
+        input.value = 10;
+      }
       if (input && skimMode.value === 'percent' && Number(input.value) === 5) input.value = 50;
+      if (input && skimMode.value === 'percent' && Number(input.value) === 10 && input.max === '50') input.value = 50;
       if (input && skimMode.value === 'fixed' && Number(input.value) === 50) input.value = 5;
+      if (input && skimMode.value === 'fixed' && Number(input.value) === 10) input.value = 5;
       updateSkimSliderDisplay();
     });
   }
@@ -1189,8 +1228,15 @@ async function loadBotConfigIntoForm() {
     document.getElementById('bot-stake').value = c.stakeDollars;
     document.getElementById('bot-maxpos').value = c.maxOpenPositions;
     document.getElementById('bot-paper-balance').value = c.paperStartingBalanceDollars;
-    document.getElementById('bot-skim-mode').value = c.skimMode;
-    document.getElementById('bot-skim-amount').value = c.skimMode === 'percent' ? c.skimPercent : c.skimFixedDollars;
+    document.getElementById('bot-skim-mode').value = c.skimMode || 'insurance';
+    const skimAmt = document.getElementById('bot-skim-amount');
+    if (c.skimMode === 'insurance') {
+      skimAmt.value = c.insuranceCapDollars != null ? c.insuranceCapDollars : 10;
+    } else if (c.skimMode === 'percent') {
+      skimAmt.value = c.skimPercent;
+    } else {
+      skimAmt.value = c.skimFixedDollars;
+    }
     ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-stoprecovery', 'bot-takeprofit', 'bot-minentries', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach(updateSliderDisplay);
     updateSkimSliderDisplay();
   } catch {
@@ -1217,7 +1263,13 @@ async function saveBotConfig(opts = {}) {
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),
     skimMode,
-    ...(skimMode === 'percent' ? { skimPercent: skimAmount } : { skimFixedDollars: skimAmount }),
+    ...(skimMode === 'insurance'
+      ? { insuranceCapDollars: skimAmount }
+      : skimMode === 'percent'
+        ? { skimPercent: skimAmount }
+        : skimMode === 'fixed'
+          ? { skimFixedDollars: skimAmount }
+          : {}),
   };
   try {
     const res = await fetch(`${engineUrl}/api/bot/config`, {
@@ -1292,7 +1344,13 @@ function readBacktestSettingsFromForm() {
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),
     skimMode,
-    ...(skimMode === 'percent' ? { skimPercent: skimAmount } : { skimFixedDollars: skimAmount }),
+    ...(skimMode === 'insurance'
+      ? { insuranceCapDollars: skimAmount }
+      : skimMode === 'percent'
+        ? { skimPercent: skimAmount }
+        : skimMode === 'fixed'
+          ? { skimFixedDollars: skimAmount }
+          : {}),
   };
 }
 
@@ -1320,7 +1378,9 @@ function renderBacktestResults(data, dayLabel) {
   const skimLabel =
     s.skimMode === 'off'
       ? 'off'
-      : s.skimMode === 'percent'
+      : s.skimMode === 'insurance'
+        ? `insurance 10/40 · $${s.insuranceCapDollars != null ? s.insuranceCapDollars : 10} soft target`
+        : s.skimMode === 'percent'
         ? `${s.skimPercent}% of profit`
         : `$${Number(s.skimFixedDollars || 0).toFixed(0)} per win`;
   const pnlClass = (t.netPnlCents || 0) > 0 ? 'chip-positive' : (t.netPnlCents || 0) < 0 ? 'chip-negative' : '';
@@ -1390,7 +1450,8 @@ function renderBacktestResults(data, dayLabel) {
       <div class="capital-row"><span>Take-profit exits</span><span>${t.takeProfitExits ?? 0}</span></div>
       <div class="capital-row"><span>Breakeven exits</span><span>${t.breakevenExits ?? 0}</span></div>
       <div class="capital-divider"></div>
-      <div class="capital-row capital-reserved"><span>Reserved Profit <em>(locked skim)</em></span><span class="${(t.reservedProfitCents || 0) > 0 ? 'chip-positive' : ''}">${formatMoneyFromCents(t.reservedProfitCents)}</span></div>
+      <div class="capital-row capital-reserved"><span>Personal Wallet <em>(locked)</em></span><span class="${(t.reservedProfitCents || 0) > 0 ? 'chip-positive' : ''}">${formatMoneyFromCents(t.reservedProfitCents)}</span></div>
+      <div class="capital-row capital-reserved"><span>Insurance Fund</span><span class="${(t.insuranceCents || 0) > 0 ? 'chip-positive' : ''}">${formatMoneyFromCents(t.insuranceCents || 0)}</span></div>
       <div class="capital-divider"></div>
       <div class="capital-row"><span>Starting Bankroll</span><span>${formatMoneyFromCents(t.startingBankrollCents)}</span></div>
       <div class="capital-row"><span>Available Cash</span><span>${formatMoneyFromCents(t.availableCashCents)}</span></div>

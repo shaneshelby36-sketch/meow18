@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, checkPostStopRecovery, checkPostStopPeerCascade } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
 const { KalshiClient, normalizeMarketPrices, priceInCents } = require('./kalshiClient');
 
 const ONLINE = process.env.ONLINE === '1' || process.env.ONLINE === 'true';
@@ -174,7 +174,7 @@ function makeBot(client, config = {}) {
     stakingStrategy: config.stakingStrategy ?? 'fixed',
     symbol: config.symbol ?? 'ETH',
   });
-  bot.ledger = { trades: [], reserveCents: 0, periodStartTime: Date.now() };
+  bot.ledger = { trades: [], reserveCents: 0, insuranceCents: 0, periodStartTime: Date.now() };
   bot.calibration = { buckets: {} };
   bot.isRunning = true;
   bot.lastError = null;
@@ -1024,6 +1024,76 @@ async function testBotTradingFlow() {
   check(closed && closed.status === 'closed', 'original trade marked closed');
   check(closed && closed.pnlCents > 0, 'winning settle has positive PnL');
   check(closed.skimmedCents === 200 || bot.ledger.reserveCents >= 200, 'fixed skim applied');
+
+  // Insurance: soft $10 target, may overshoot; skip 10% once filled + calm
+  {
+    const winCalm = applyProfitBuckets({
+      pnlCents: 1000,
+      reserveCents: 0,
+      insuranceCents: 0,
+      settings: { skimMode: 'insurance', insuranceCapDollars: 10 },
+      rebuildInsurance: false,
+    });
+    checkEq(winCalm.skimmedCents, 400, 'calm win: 40% wallet');
+    checkEq(winCalm.insuranceAddedCents, 0, 'calm win: skip 10% insurance');
+    checkEq(winCalm.insuranceCents, 0, 'calm win: fund unchanged');
+
+    const winRebuild = applyProfitBuckets({
+      pnlCents: 1000,
+      reserveCents: 0,
+      insuranceCents: 0,
+      settings: { skimMode: 'insurance', insuranceCapDollars: 10 },
+      rebuildInsurance: true,
+    });
+    checkEq(winRebuild.insuranceAddedCents, 100, 'rebuild win: 10% to fund');
+    checkEq(winRebuild.insuranceCents, 100, 'rebuild win: fund balance');
+
+    const overshoot = applyProfitBuckets({
+      pnlCents: 1000,
+      reserveCents: 400,
+      insuranceCents: 950,
+      settings: { skimMode: 'insurance', insuranceCapDollars: 10 },
+      rebuildInsurance: true,
+    });
+    checkEq(overshoot.insuranceAddedCents, 100, 'full 10% even near target');
+    checkEq(overshoot.insuranceCents, 1050, 'may overshoot soft $10 target');
+    checkEq(overshoot.insuranceReleasedCents, 0, 'does not dump at target');
+
+    const keepBuffer = applyProfitBuckets({
+      pnlCents: 1000,
+      reserveCents: 400,
+      insuranceCents: 1050,
+      settings: { skimMode: 'insurance', insuranceCapDollars: 10 },
+      rebuildInsurance: false,
+    });
+    checkEq(keepBuffer.insuranceAddedCents, 0, 'above target + calm: skip 10%');
+    checkEq(keepBuffer.insuranceCents, 1050, 'keeps buffer above $10');
+
+    const absorb = applyProfitBuckets({
+      pnlCents: -800,
+      reserveCents: 400,
+      insuranceCents: 500,
+      settings: { skimMode: 'insurance', insuranceCapDollars: 10 },
+    });
+    checkEq(absorb.insuranceDrawnCents, 500, 'insurance absorbs what it has');
+    checkEq(absorb.insuranceCents, 0, 'insurance emptied by loss');
+    checkEq(absorb.reserveCents, 400, 'wallet untouched by loss');
+
+    const insBot = makeBot(mockClient(market), {
+      skimMode: 'insurance',
+      insuranceCapDollars: 10,
+      stakeDollars: 10,
+    });
+    const tCalm = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
+    await insBot._closePosition(tCalm, 60, 'take_profit');
+    checkEq(insBot.ledger.insuranceCents, 0, 'first win skips insurance');
+    checkEq(insBot.ledger.reserveCents, 400, 'first win still wallets 40%');
+    const tLoss = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
+    await insBot._closePosition(tLoss, 40, 'stop_loss');
+    const tRebuild = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
+    await insBot._closePosition(tRebuild, 60, 'take_profit');
+    checkEq(insBot.ledger.insuranceCents, 100, 'rebuild after loss takes 10%');
+  }
 
   // Reject bad entry prices
   const badBot = makeBot(client);
