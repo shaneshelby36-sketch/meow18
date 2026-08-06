@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
 const { KalshiClient, normalizeMarketPrices, priceInCents } = require('./kalshiClient');
 
 const ONLINE = process.env.ONLINE === '1' || process.env.ONLINE === 'true';
@@ -1360,6 +1360,55 @@ async function testBotTradingFlow() {
       maxAgeMs: 15 * 60 * 1000,
     });
     check(!stillYoung.ok, 'recovery gate still blocks peers before bounce within max age');
+
+    // Prior session stop must not block next window (even before max-age expires).
+    const priorWindowEnd = Date.now() - 2 * 60 * 1000;
+    const priorSessionStop = {
+      exitReason: 'stop_loss',
+      side: 'no',
+      exitPriceCents: 50,
+      entryPriceCents: 65,
+      symbol: 'BTC',
+      closedAt: Date.now() - 5 * 60 * 1000,
+      windowCloseTime: priorWindowEnd,
+    };
+    check(isPostStopRecoverySessionExpired(priorSessionStop), 'session expired once stop window closed');
+    const nextSessionAllowed = checkPostStopRecovery({
+      lastClosedForSymbol: priorSessionStop,
+      side: 'no',
+      priceCents: 42,
+      window: { probabilityUp: 40, probabilityDown: 60 },
+      recoveryCents: 8,
+      symbol: 'BTC',
+      forCandidateSymbol: 'XRP',
+      forCandidateSide: 'yes',
+      maxAgeMs: 15 * 60 * 1000,
+    });
+    check(nextSessionAllowed.ok, 'next-session candidate allowed without bounce after stop window closed');
+
+    const sameSessionStillBlocks = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'no',
+        exitPriceCents: 50,
+        entryPriceCents: 65,
+        symbol: 'BTC',
+        closedAt: Date.now() - 2 * 60 * 1000,
+        windowCloseTime: Date.now() + 8 * 60 * 1000,
+      },
+      side: 'no',
+      priceCents: 52,
+      window: { probabilityUp: 40, probabilityDown: 60 },
+      recoveryCents: 8,
+      symbol: 'BTC',
+      forCandidateSymbol: 'XRP',
+      forCandidateSide: 'yes',
+      maxAgeMs: 15 * 60 * 1000,
+    });
+    check(!sameSessionStillBlocks.ok, 'same-session stop still blocks peers until bounce');
+    check(/same-window cascade/i.test(sameSessionStillBlocks.reason || ''), 'block reason says same-window not forever');
+
+    checkEq(tradeWindowCloseMs({ closeTime: 12345 }), 12345, 'tradeWindowCloseMs reads backtest closeTime');
 
     const recBot = makeBot(
       mockClient({

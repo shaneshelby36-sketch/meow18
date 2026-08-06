@@ -101,10 +101,31 @@ function stopRecoveryCentsRequired(config = {}) {
   return Math.max(5, Math.round((Number(config.stopLossCents) || 10) * 0.4));
 }
 
+/** Market session end for a trade (live ledger or backtest). */
+function tradeWindowCloseMs(trade) {
+  if (!trade) return NaN;
+  const raw = trade.windowCloseTime ?? trade.closeTime;
+  let stored = Number(raw);
+  if ((!Number.isFinite(stored) || stored <= 0) && raw != null && raw !== '') {
+    const parsed = Date.parse(String(raw));
+    if (Number.isFinite(parsed) && parsed > 0) stored = parsed;
+  }
+  if (Number.isFinite(stored) && stored > 0) return stored;
+  const opened = Number(trade.openedAt);
+  if (Number.isFinite(opened) && opened > 0) return opened + 15 * 60 * 1000;
+  return NaN;
+}
+
+/** True once the stopped trade's 15m window has ended — recovery gate clears. */
+function isPostStopRecoverySessionExpired(lastStopTrade, now = Date.now()) {
+  const windowEnd = tradeWindowCloseMs(lastStopTrade);
+  return Number.isFinite(windowEnd) && Number(now) >= windowEnd;
+}
+
 /**
  * After a stop-loss, require the *stopped coin's* bid to bounce before new
  * entries (any coin) — prevents instant cascade / loss strings while price
- * is still running against the stopped side.
+ * is still running against the stopped side **within the same window**.
  *
  * Thesis favor (engine still likes the stopped side) only gates knife-catch
  * re-entry on that same coin + same side. Peer coins (and opposite-side on
@@ -113,9 +134,9 @@ function stopRecoveryCentsRequired(config = {}) {
  * market already rejected. Peer cascade (`checkPostStopPeerCascade`) still
  * blocks while a majority of peers are dumping.
  *
- * Optional `maxAgeMs` + `closedAt` (or `now` vs trade.closedAt): after that
- * age the whole recovery gate clears so a never-bouncing bid cannot freeze
- * the bot across many windows.
+ * Primary expiry: once the stopped trade's window closes (`windowCloseTime`),
+ * recovery no longer blocks any new entries (next window / other coins).
+ * Optional `maxAgeMs` + `closedAt` remains as a backup cap within long windows.
  *
  * `lastClosedForSymbol` should be the stop-loss trade (usually the latest stop).
  */
@@ -135,6 +156,10 @@ function checkPostStopRecovery({
   const last = lastClosedForSymbol;
   // Gate uses the stopped trade's side (not necessarily the candidate side).
   if (!last || last.exitReason !== 'stop_loss') {
+    return { ok: true };
+  }
+
+  if (isPostStopRecoverySessionExpired(last, now)) {
     return { ok: true };
   }
 
@@ -168,7 +193,7 @@ function checkPostStopRecovery({
       ok: false,
       reason:
         `Waiting: ${stoppedLabel} ${String(checkSide).toUpperCase()} stopped @ ${exit}¢ — need ${stoppedLabel} bid ≥ ${needBid}¢ ` +
-        `(+${recoveryCents}¢ bounce)${otherNote} (blocks loss strings / side-flips).`,
+        `(+${recoveryCents}¢ bounce)${otherNote} (same-window cascade protection).`,
     };
   }
 
@@ -1161,18 +1186,7 @@ class TradingBot {
   }
 
   _tradeCloseDeadline(trade) {
-    const raw = trade.windowCloseTime;
-    let stored = Number(raw);
-    // Ledger reloads / hand-edits sometimes store an ISO string; Number("2026-…") is NaN.
-    if ((!Number.isFinite(stored) || stored <= 0) && raw != null && raw !== '') {
-      const parsed = Date.parse(String(raw));
-      if (Number.isFinite(parsed) && parsed > 0) stored = parsed;
-    }
-    if (Number.isFinite(stored) && stored > 0) return stored;
-    const opened = Number(trade.openedAt);
-    // Legacy trades without windowCloseTime: assume a standard 15m window.
-    if (Number.isFinite(opened) && opened > 0) return opened + 15 * 60 * 1000;
-    return NaN;
+    return tradeWindowCloseMs(trade);
   }
 
   _marketCloseMs(market) {
@@ -1762,6 +1776,10 @@ class TradingBot {
       return { ok: true };
     }
 
+    if (isPostStopRecoverySessionExpired(lastStop)) {
+      return { ok: true };
+    }
+
     let priceCents = candidatePriceCents;
     let window = candidateWindow;
 
@@ -2132,6 +2150,8 @@ module.exports = {
   SERIES_BY_SYMBOL,
   stopRecoveryCentsRequired,
   stopRecoveryMaxAgeMs,
+  tradeWindowCloseMs,
+  isPostStopRecoverySessionExpired,
   checkPostStopRecovery,
   checkPostStopPeerCascade,
   applyProfitBuckets,
