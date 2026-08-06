@@ -81,6 +81,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'minMinutesToOpen',
   'stopRecoveryCents',
   'stopRecoveryMaxMinutes',
+  'peerCascadeMaxMinutes',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -131,8 +132,8 @@ function isPostStopRecoverySessionExpired(lastStopTrade, now = Date.now()) {
  * re-entry on that same coin + same side. Peer coins (and opposite-side on
  * the stopped coin) unlock once the bounce clears — otherwise a flipped
  * thesis freezes *all* trading until the stopped coin re-favors a side the
- * market already rejected. Peer cascade (`checkPostStopPeerCascade`) still
- * blocks while a majority of peers are dumping.
+ * market already rejected. Call `checkPostStopPeerCascade` *before* this
+ * bounce check so cascading peers block everyone first.
  *
  * Primary expiry: once the stopped trade's window closes (`windowCloseTime`),
  * recovery no longer blocks any new entries (next window / other coins).
@@ -234,10 +235,52 @@ function stopRecoveryMaxAgeMs(config = {}) {
   return 15 * 60 * 1000;
 }
 
+/** Default / hard-max minutes for the peer-cascade calm gate (not full session). */
+const PEER_CASCADE_DEFAULT_MINUTES = 3;
+const PEER_CASCADE_HARD_MAX_MINUTES = 5;
+
+/**
+ * Peer-cascade calm gate must always age out quickly (shorter than bounce recovery).
+ * Optional `peerCascadeMaxMinutes`; else min(stopRecoveryMaxMinutes, 3), default 3.
+ * Always clamped to a hard max of 5 minutes — never a sticky full-window freeze.
+ * Unlike bounce recovery, 0 / unset recovery max does NOT disable this cap.
+ */
+function peerCascadeMaxAgeMs(config = {}) {
+  const dedicated = Number(config.peerCascadeMaxMinutes);
+  let mins;
+  if (Number.isFinite(dedicated) && dedicated > 0) {
+    mins = dedicated;
+  } else {
+    const recoveryMins = Number(config.stopRecoveryMaxMinutes);
+    if (Number.isFinite(recoveryMins) && recoveryMins > 0) {
+      mins = Math.min(recoveryMins, PEER_CASCADE_DEFAULT_MINUTES);
+    } else {
+      mins = PEER_CASCADE_DEFAULT_MINUTES;
+    }
+  }
+  mins = Math.min(Math.max(mins, 0.1), PEER_CASCADE_HARD_MAX_MINUTES);
+  return Math.round(mins * 60 * 1000);
+}
+
+/** Stop timestamp for age gates — prefer closedAt, fall back to openedAt. */
+function stopTradeReferenceMs(trade) {
+  if (!trade) return NaN;
+  const closed = Number(trade.closedAt);
+  if (Number.isFinite(closed) && closed > 0) return closed;
+  const opened = Number(trade.openedAt);
+  if (Number.isFinite(opened) && opened > 0) return opened;
+  return NaN;
+}
+
 /**
  * After a stop-loss, cryptos often cascade / whipsaw. Block ALL new entries
- * (any side, any coin) while a majority of peer short windows are still
- * moving against the side that just stopped — not a timer.
+ * (any side, any coin) briefly while a majority of peer short windows are
+ * still moving against the side that just stopped — same-window protection.
+ *
+ * Clears when: peers calm, stopped trade's session ends, or max age elapses
+ * (default 3m, hard max 5m). Missing timestamps fail open so this cannot
+ * freeze forever. Call before bounce recovery so cascading peers block
+ * everyone even when the stopped coin has not bounced yet.
  */
 function checkPostStopPeerCascade({
   lastStopTrade,
@@ -245,12 +288,38 @@ function checkPostStopPeerCascade({
   predictions,
   seriesBySymbol,
   minConfidence = 50,
+  maxAgeMs = peerCascadeMaxAgeMs(),
+  now = Date.now(),
 }) {
   if (!lastStopTrade || lastStopTrade.exitReason !== 'stop_loss') return { ok: true };
-  if (!predictions || !seriesBySymbol) return { ok: true };
   void candidateSide;
 
+  if (isPostStopRecoverySessionExpired(lastStopTrade, now)) {
+    return { ok: true };
+  }
+
+  const ageCap = Number(maxAgeMs);
+  const requestedAgeCap =
+    Number.isFinite(ageCap) && ageCap > 0 ? ageCap : peerCascadeMaxAgeMs();
+  // Never let callers stretch cascade beyond the hard max (sticky freezes).
+  const effectiveAgeCap = Math.min(
+    requestedAgeCap,
+    PEER_CASCADE_HARD_MAX_MINUTES * 60 * 1000
+  );
+  const stoppedAt = stopTradeReferenceMs(lastStopTrade);
+  if (!Number.isFinite(stoppedAt)) {
+    // No closedAt/openedAt — cannot bound the wait; fail open.
+    return { ok: true };
+  }
+  const ageMs = Number(now) - stoppedAt;
+  if (ageMs >= effectiveAgeCap) {
+    return { ok: true };
+  }
+
+  if (!predictions || !seriesBySymbol) return { ok: true };
+
   const stoppedSym = lastStopTrade.symbol;
+  const stopSide = String(lastStopTrade.side || '').toUpperCase();
   const peers = Object.keys(seriesBySymbol).filter(
     (sym) => sym !== stoppedSym && predictions[sym] && predictions[sym].ready
   );
@@ -271,11 +340,12 @@ function checkPostStopPeerCascade({
 
   const need = Math.ceil(peered.length / 2);
   if (adverse.length >= need) {
+    const remainMin = Math.max(1, Math.ceil((effectiveAgeCap - ageMs) / 60000));
     return {
       ok: false,
       reason:
-        `Waiting: after ${stoppedSym} ${String(lastStopTrade.side).toUpperCase()} stop, peers still cascading ` +
-        `(${adverse.slice(0, 4).join(', ')}${adverse.length > 4 ? '…' : ''}) — no new entries until calm (blocks loss strings / side-flips).`,
+        `Waiting: after ${stoppedSym} ${stopSide} stop — peers still cascading (same window); ` +
+        `no new entries until calm, session end, or ~${remainMin}m max.`,
     };
   }
   return { ok: true };
@@ -563,6 +633,9 @@ class TradingBot {
       // Clear the whole post-stop recovery gate this many minutes after the stop
       // (even if the bid never bounced). 0 = never expire by age. Default 15.
       stopRecoveryMaxMinutes: 15,
+      // Peer-cascade calm gate max wait (minutes). Short post-stop protection;
+      // default 3, hard-clamped to 5 — never a sticky full-session freeze.
+      peerCascadeMaxMinutes: 3,
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -605,6 +678,8 @@ class TradingBot {
     this.liveBalanceCents = null;
     this.livePortfolioValueCents = null;
     this.liveBalanceUpdatedAt = null;
+    // Last post-stop protection gate logged to activity (dedupe poll spam).
+    this._lastProtectionGateKey = null;
     // Serialize manage/settle so watchdog + cycle can't double-sell the same leg.
     this._tradeLock = Promise.resolve();
     this._removeInvalidPaperTrades();
@@ -722,6 +797,67 @@ class TradingBot {
       tradeId: meta.tradeId || null,
     });
     if (this.ledger.activityLog.length > 100) this.ledger.activityLog.length = 100;
+  }
+
+  /** True when lastDecision is a post-stop protection wait (cascade / bounce / etc.). */
+  _isProtectionGateReason(message) {
+    const s = String(message || '');
+    if (!/^Waiting:/i.test(s)) return false;
+    return /peers still cascading|bounce|knife-catch|max 1 open until post-stop|same-window cascade protection|after \S+ .+ stop/i.test(
+      s
+    );
+  }
+
+  _protectionGateKey(message) {
+    const s = String(message || '');
+    if (/peers still cascading/i.test(s)) return 'peer-cascade';
+    if (/knife-catch/i.test(s)) return 'knife-catch';
+    if (/max 1 open until post-stop/i.test(s)) return 'post-stop-max1';
+    if (/bounce|need .+ bid\s*≥|need .+ bid >=/i.test(s)) return 'stop-recovery';
+    if (/after \S+ .+ stop/i.test(s)) return 'post-stop-gate';
+    return 'post-stop-gate';
+  }
+
+  _protectionGateLabel(key) {
+    switch (key) {
+      case 'peer-cascade':
+        return 'peer-cascade';
+      case 'stop-recovery':
+        return 'stop-recovery';
+      case 'knife-catch':
+        return 'knife-catch';
+      case 'post-stop-max1':
+        return 'post-stop max-1';
+      default:
+        return 'post-stop protection';
+    }
+  }
+
+  /**
+   * Log protection gate use/clear once per transition (not every cycle).
+   * Pass the Waiting reason when blocked; null to clear+announce; false to clear silently.
+   */
+  _noteProtectionGate(reasonOrNull) {
+    if (reasonOrNull === false) {
+      this._lastProtectionGateKey = null;
+      return;
+    }
+    const reason = reasonOrNull == null ? '' : String(reasonOrNull);
+    if (this._isProtectionGateReason(reason)) {
+      const key = this._protectionGateKey(reason);
+      if (key === this._lastProtectionGateKey) return;
+      this._lastProtectionGateKey = key;
+      const label = this._protectionGateLabel(key);
+      this._logActivity(`Protection used (${label}): ${reason}`, { kind: 'gate' });
+      this._persist();
+      return;
+    }
+    if (this._lastProtectionGateKey) {
+      const label = this._protectionGateLabel(this._lastProtectionGateKey);
+      this._lastProtectionGateKey = null;
+      this._logActivity(`Protection cleared (${label}) — entries allowed again.`, { kind: 'gate' });
+      this._persist();
+    }
   }
 
   get openTrades() {
@@ -1643,6 +1779,7 @@ class TradingBot {
 
     this.ledger.trades.unshift(trade);
     if (this.ledger.trades.length > 200) this.ledger.trades.length = 200;
+    this._noteProtectionGate(false); // open implies gate no longer blocking
     this.lastDecision = `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${priceCents}¢ (confidence ${engineConfidence}%).`;
     this._logActivity(this.lastDecision, {
       kind: 'open',
@@ -1707,6 +1844,7 @@ class TradingBot {
     if (preferOtherThan && this.openTrades.length >= 1) {
       this.lastDecision =
         `Waiting: after ${preferOtherThan} stop — max 1 open until post-stop calm (avoids loss strings).`;
+      this._noteProtectionGate(this.lastDecision);
       return;
     }
 
@@ -1755,30 +1893,47 @@ class TradingBot {
   }
 
   /**
-   * After a stop, require the stopped coin's bid bounce before new entries.
-   * Thesis favor only blocks same-coin same-side knife-catch; peers unlock
-   * after the bounce (peer-cascade gate still applies while dumps continue).
+   * After a stop (while it remains the latest closed trade), gate new entries:
+   * session/max-age expiry → allow; peers cascading → block all; stopped-coin
+   * bounce not met → block all; same-coin same-side thesis → knife-catch only.
+   * Peer unlock after bounce stays available once peers are calm.
    */
   async _stoppedCoinRecoveryGate(candidateSymbol, candidateSide, candidatePriceCents, candidateWindow, predictions) {
     const lastStop = this._lastStopLossTrade();
-    const recoveryCents = stopRecoveryCentsRequired(this.config);
-    if (!lastStop || recoveryCents <= 0) {
+    if (!lastStop) return { ok: true };
+
+    const now = Date.now();
+    const maxAgeMs = stopRecoveryMaxAgeMs(this.config);
+
+    // 1) Session window ended → allow (never freeze into the next 15m).
+    if (isPostStopRecoverySessionExpired(lastStop, now)) {
       return { ok: true };
     }
 
-    const maxAgeMs = stopRecoveryMaxAgeMs(this.config);
+    // 2) Max-age backup within a long window → allow.
     const closedAt = Number(lastStop.closedAt);
     if (
       maxAgeMs > 0 &&
       Number.isFinite(closedAt) &&
-      Date.now() - closedAt >= maxAgeMs
+      now - closedAt >= maxAgeMs
     ) {
       return { ok: true };
     }
 
-    if (isPostStopRecoverySessionExpired(lastStop)) {
-      return { ok: true };
-    }
+    // 3) Peers still cascading → block EVERY candidate until calm / session / short max age.
+    const peerCheck = checkPostStopPeerCascade({
+      lastStopTrade: lastStop,
+      candidateSide,
+      predictions,
+      seriesBySymbol: SERIES_BY_SYMBOL,
+      minConfidence: this.config.minConfidence,
+      maxAgeMs: peerCascadeMaxAgeMs(this.config),
+      now,
+    });
+    if (!peerCheck.ok) return peerCheck;
+
+    const recoveryCents = stopRecoveryCentsRequired(this.config);
+    if (recoveryCents <= 0) return { ok: true };
 
     let priceCents = candidatePriceCents;
     let window = candidateWindow;
@@ -1835,6 +1990,7 @@ class TradingBot {
       }
     }
 
+    // 4–5) Bounce required for everyone; knife-catch only same-coin same-side.
     return checkPostStopRecovery({
       lastClosedForSymbol: lastStop,
       side: lastStop.side,
@@ -1845,6 +2001,7 @@ class TradingBot {
       forCandidateSymbol: candidateSymbol,
       forCandidateSide: candidateSide,
       maxAgeMs,
+      now,
     });
   }
 
@@ -1944,8 +2101,7 @@ class TradingBot {
       return null;
     }
 
-    // Stopped coin must bounce before any new entry; thesis favor only for
-    // same-coin same-side knife-catch (peers unlock after bounce).
+    // Post-stop: peers calm + stopped-coin bounce (knife-catch only same-coin).
     const recoveryCheck = await this._stoppedCoinRecoveryGate(
       symbol,
       side,
@@ -1955,20 +2111,10 @@ class TradingBot {
     );
     if (!recoveryCheck.ok) {
       this.lastDecision = recoveryCheck.reason;
+      this._noteProtectionGate(recoveryCheck.reason);
       return null;
     }
-
-    const peerCheck = checkPostStopPeerCascade({
-      lastStopTrade: this._lastStopLossTrade(),
-      candidateSide: side,
-      predictions,
-      seriesBySymbol: SERIES_BY_SYMBOL,
-      minConfidence: this.config.minConfidence,
-    });
-    if (!peerCheck.ok) {
-      this.lastDecision = peerCheck.reason;
-      return null;
-    }
+    this._noteProtectionGate(null);
 
     return {
       symbol,
@@ -2150,6 +2296,8 @@ module.exports = {
   SERIES_BY_SYMBOL,
   stopRecoveryCentsRequired,
   stopRecoveryMaxAgeMs,
+  peerCascadeMaxAgeMs,
+  stopTradeReferenceMs,
   tradeWindowCloseMs,
   isPostStopRecoverySessionExpired,
   checkPostStopRecovery,

@@ -768,6 +768,7 @@ body[data-view-mode="bot"] .asset-picker {
   color: var(--text-dim);
   margin-bottom: 8px;
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
@@ -827,6 +828,38 @@ body[data-view-mode="bot"] .asset-picker {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+.bot-activity-log,
+.bot-activity-log .bot-log-row,
+.bot-activity-log .bot-log-msg,
+.bot-activity-log .bot-log-time,
+.bot-activity-log .bot-log-pnl,
+.bot-activity-log .bot-empty-line {
+  -webkit-user-select: text;
+  user-select: text;
+}
+.bot-log-copy {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.bot-log-copy:hover {
+  color: var(--text);
+  border-color: var(--accent);
 }
 .bot-log-row {
   display: grid;
@@ -870,6 +903,7 @@ body[data-view-mode="bot"] .asset-picker {
 .bot-log-row.kind-open .bot-log-msg { color: var(--wait); }
 .bot-log-row.kind-close .bot-log-msg { color: var(--text); }
 .bot-log-row.kind-error .bot-log-msg { color: var(--down); }
+.bot-log-row.kind-gate .bot-log-msg { color: var(--wait); }
 
 @media (max-width: 720px) {
   .bot-log-row {

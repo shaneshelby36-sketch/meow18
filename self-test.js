@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
 const { KalshiClient, normalizeMarketPrices, priceInCents } = require('./kalshiClient');
 
 const ONLINE = process.env.ONLINE === '1' || process.env.ONLINE === 'true';
@@ -1620,24 +1620,50 @@ async function testBotTradingFlow() {
     check(/ETH|bounce|recovery|stopped/i.test(crossBot.lastDecision || ''), 'decision cites stopped-coin recovery');
   }
 
-  // Peer cascade: after YES stop, block same-side on other coins while peers still dump
+  // Peer cascade: after ANY stop, block all new entries while peers dump;
+  // session expiry + short max age clear (do not freeze into the next window).
   {
+    const now = Date.now();
+    const xrpStop = {
+      exitReason: 'stop_loss',
+      symbol: 'XRP',
+      side: 'yes',
+      exitPriceCents: 42,
+      entryPriceCents: 55,
+      closedAt: now - 2 * 60 * 1000,
+      windowCloseTime: now + 10 * 60 * 1000,
+    };
+    const dumpingPeers = {
+      XRP: { ready: true, windows: { w5: { probabilityUp: 40, probabilityDown: 60, confidence: 70 } } },
+      ETH: { ready: true, windows: { w5: { probabilityUp: 35, probabilityDown: 65, confidence: 70 } } },
+      SOL: { ready: true, windows: { w5: { probabilityUp: 38, probabilityDown: 62, confidence: 70 } } },
+      BTC: { ready: true, windows: { w5: { probabilityUp: 36, probabilityDown: 64, confidence: 70 } } },
+    };
+    const seriesAll = { XRP: 1, ETH: 1, SOL: 1, BTC: 1 };
+
+    checkEq(peerCascadeMaxAgeMs({ peerCascadeMaxMinutes: 5 }), 5 * 60 * 1000, 'peer cascade uses dedicated minutes');
+    checkEq(peerCascadeMaxAgeMs({ peerCascadeMaxMinutes: 8 }), 5 * 60 * 1000, 'peer cascade hard-caps dedicated at 5m');
+    checkEq(peerCascadeMaxAgeMs({ stopRecoveryMaxMinutes: 15 }), 3 * 60 * 1000, 'peer cascade defaults to 3m vs recovery 15');
+    checkEq(peerCascadeMaxAgeMs({ stopRecoveryMaxMinutes: 0 }), 3 * 60 * 1000, 'peer cascade still ages when recovery max disabled');
+    checkEq(peerCascadeMaxAgeMs({}), 3 * 60 * 1000, 'peer cascade defaults to 3 minutes');
+
     const cascade = checkPostStopPeerCascade({
-      lastStopTrade: { exitReason: 'stop_loss', symbol: 'BTC', side: 'yes' },
+      lastStopTrade: xrpStop,
       candidateSide: 'yes',
-      predictions: {
-        BTC: { ready: true, windows: { w5: { probabilityUp: 40, probabilityDown: 60, confidence: 70 } } },
-        ETH: { ready: true, windows: { w5: { probabilityUp: 35, probabilityDown: 65, confidence: 70 } } },
-        SOL: { ready: true, windows: { w5: { probabilityUp: 38, probabilityDown: 62, confidence: 70 } } },
-      },
-      seriesBySymbol: { BTC: 1, ETH: 1, SOL: 1 },
+      predictions: dumpingPeers,
+      seriesBySymbol: seriesAll,
       minConfidence: 50,
+      maxAgeMs: peerCascadeMaxAgeMs({}),
+      now,
     });
-    check(!cascade.ok, 'peer cascade blocks same-side while peers dump');
-    check(/cascad|follow/i.test(cascade.reason || ''), 'cascade reason mentions peers');
+    check(!cascade.ok, 'after stop, peers cascading blocks ETH/etc');
+    check(
+      /after XRP YES stop.*peers still cascading.*same window.*until calm/i.test(cascade.reason || ''),
+      'cascade Waiting message cites same-window calm / max'
+    );
 
     const fade = checkPostStopPeerCascade({
-      lastStopTrade: { exitReason: 'stop_loss', symbol: 'BTC', side: 'yes' },
+      lastStopTrade: { exitReason: 'stop_loss', symbol: 'BTC', side: 'yes', closedAt: now - 60_000, windowCloseTime: now + 8 * 60_000 },
       candidateSide: 'no',
       predictions: {
         BTC: { ready: true, windows: { w5: { probabilityUp: 40, probabilityDown: 60, confidence: 70 } } },
@@ -1645,20 +1671,227 @@ async function testBotTradingFlow() {
       },
       seriesBySymbol: { BTC: 1, ETH: 1 },
       minConfidence: 50,
+      maxAgeMs: peerCascadeMaxAgeMs({}),
+      now,
     });
     check(!fade.ok, 'peer cascade blocks opposite-side flip while peers still dump');
 
     const calm = checkPostStopPeerCascade({
-      lastStopTrade: { exitReason: 'stop_loss', symbol: 'BTC', side: 'yes' },
+      lastStopTrade: xrpStop,
       candidateSide: 'yes',
       predictions: {
-        BTC: { ready: true, windows: { w5: { probabilityUp: 55, probabilityDown: 45, confidence: 70 } } },
+        XRP: { ready: true, windows: { w5: { probabilityUp: 55, probabilityDown: 45, confidence: 70 } } },
         ETH: { ready: true, windows: { w5: { probabilityUp: 58, probabilityDown: 42, confidence: 70 } } },
+        SOL: { ready: true, windows: { w5: { probabilityUp: 56, probabilityDown: 44, confidence: 70 } } },
       },
-      seriesBySymbol: { BTC: 1, ETH: 1 },
+      seriesBySymbol: { XRP: 1, ETH: 1, SOL: 1 },
       minConfidence: 50,
+      maxAgeMs: peerCascadeMaxAgeMs({}),
+      now,
     });
     check(calm.ok, 'peer cascade clears when peers are no longer dumping');
+
+    // Peers calm + bounce met → peer entry allowed (recovery unit + cascade unit).
+    const bounceOk = checkPostStopRecovery({
+      lastClosedForSymbol: xrpStop,
+      side: 'yes',
+      priceCents: 55,
+      window: { probabilityUp: 40, probabilityDown: 60 },
+      recoveryCents: 8,
+      symbol: 'XRP',
+      forCandidateSymbol: 'ETH',
+      forCandidateSide: 'yes',
+      maxAgeMs: 15 * 60 * 1000,
+      now,
+    });
+    check(bounceOk.ok && calm.ok, 'peers calm + bounce met → allow peer entry');
+
+    const sessionExpiredStop = {
+      ...xrpStop,
+      windowCloseTime: now - 60_000,
+      closedAt: now - 5 * 60_000,
+    };
+    const afterSession = checkPostStopPeerCascade({
+      lastStopTrade: sessionExpiredStop,
+      candidateSide: 'yes',
+      predictions: dumpingPeers,
+      seriesBySymbol: seriesAll,
+      minConfidence: 50,
+      maxAgeMs: peerCascadeMaxAgeMs({}),
+      now,
+    });
+    check(afterSession.ok, 'session expired → allow even if peers still look cascading');
+
+    const agedOutCascade = checkPostStopPeerCascade({
+      lastStopTrade: {
+        ...xrpStop,
+        closedAt: now - (3 * 60 * 1000 + 1000),
+        windowCloseTime: now + 6 * 60 * 1000,
+      },
+      candidateSide: 'yes',
+      predictions: dumpingPeers,
+      seriesBySymbol: seriesAll,
+      minConfidence: 50,
+      maxAgeMs: peerCascadeMaxAgeMs({}),
+      now,
+    });
+    check(agedOutCascade.ok, 'peer cascade clears after short max age even if peers still dump');
+
+    const afterHardClamp = checkPostStopPeerCascade({
+      lastStopTrade: {
+        ...xrpStop,
+        closedAt: now - (5 * 60 * 1000 + 1000),
+        windowCloseTime: now + 6 * 60 * 1000,
+      },
+      candidateSide: 'yes',
+      predictions: dumpingPeers,
+      seriesBySymbol: seriesAll,
+      minConfidence: 50,
+      maxAgeMs: 15 * 60 * 1000,
+      now,
+    });
+    check(afterHardClamp.ok, 'hard max 5m clears even if caller passed 15m maxAgeMs');
+
+    const stillYoungCascade = checkPostStopPeerCascade({
+      lastStopTrade: xrpStop,
+      candidateSide: 'yes',
+      predictions: dumpingPeers,
+      seriesBySymbol: seriesAll,
+      minConfidence: 50,
+      maxAgeMs: peerCascadeMaxAgeMs({}),
+      now,
+    });
+    check(!stillYoungCascade.ok, 'peer cascade still blocks shortly after stop while peers dump');
+
+    const noTimestamps = checkPostStopPeerCascade({
+      lastStopTrade: { exitReason: 'stop_loss', symbol: 'XRP', side: 'yes' },
+      candidateSide: 'yes',
+      predictions: dumpingPeers,
+      seriesBySymbol: seriesAll,
+      minConfidence: 50,
+      maxAgeMs: peerCascadeMaxAgeMs({}),
+      now,
+    });
+    check(noTimestamps.ok, 'peer cascade fails open when stop has no closedAt/openedAt');
+
+    const openedOnlyAged = checkPostStopPeerCascade({
+      lastStopTrade: {
+        exitReason: 'stop_loss',
+        symbol: 'XRP',
+        side: 'yes',
+        openedAt: now - (3 * 60 * 1000 + 1000),
+        windowCloseTime: now + 5 * 60 * 1000,
+      },
+      candidateSide: 'yes',
+      predictions: dumpingPeers,
+      seriesBySymbol: seriesAll,
+      minConfidence: 50,
+      maxAgeMs: peerCascadeMaxAgeMs({}),
+      now,
+    });
+    check(openedOnlyAged.ok, 'peer cascade ages out using openedAt when closedAt missing');
+
+    // Live evaluate path: XRP stop + dumping peers → ETH blocked with cascade message
+    // (before bounce messaging — peers gate runs first).
+    const cascadeBot = makeBot(
+      {
+        hasCredentials: false,
+        async getOpenMarkets(series) {
+          const close = new Date(Date.now() + 12 * 60 * 1000).toISOString();
+          if (String(series).includes('ETH')) {
+            return [{
+              ticker: 'KXETH15M-CASC',
+              status: 'open',
+              floor_strike: 3000,
+              close_time: close,
+              yes_bid: 48,
+              yes_ask: 50,
+              no_bid: 50,
+              no_ask: 52,
+            }];
+          }
+          // XRP quote would be used for bounce — but peer cascade should block first.
+          return [{
+            ticker: 'KXXRP15M-CASC',
+            status: 'open',
+            floor_strike: 0.5,
+            close_time: close,
+            yes_bid: 30,
+            yes_ask: 32,
+            no_bid: 68,
+            no_ask: 70,
+          }];
+        },
+        async getMarket() { return null; },
+        async createOrder() { throw new Error('no orders in test'); },
+        async getOrder() { return null; },
+      },
+      {
+        symbol: 'ETH',
+        edgeThresholdPct: 1,
+        minConfidence: 50,
+        minEntryCents: 20,
+        stopRecoveryCents: 8,
+        stopLossCents: 15,
+        peerCascadeMaxMinutes: 3,
+      }
+    );
+    cascadeBot.ledger.trades = [
+      {
+        id: 'xrp-stop',
+        status: 'closed',
+        symbol: 'XRP',
+        side: 'yes',
+        exitReason: 'stop_loss',
+        exitPriceCents: 42,
+        entryPriceCents: 55,
+        pnlCents: -130,
+        closedAt: now - 2 * 60 * 1000,
+        windowCloseTime: now + 10 * 60 * 1000,
+      },
+    ];
+    const cascadePreds = {
+      XRP: { ready: true, price: 0.5, windows: { w5: win(40, 70), w10: win(42, 68), w15: win(45, 65) } },
+      ETH: { ready: true, price: 3000, windows: { w5: win(35, 70), w10: win(38, 68), w15: win(40, 65) } },
+      SOL: { ready: true, price: 140, windows: { w5: win(36, 70), w10: win(38, 68), w15: win(40, 65) } },
+      BTC: { ready: true, price: 60000, windows: { w5: win(34, 70), w10: win(36, 68), w15: win(38, 65) } },
+    };
+    const ethBlocked = await cascadeBot._evaluateSymbolForEdge('ETH', cascadePreds);
+    checkEq(ethBlocked, null, 'evaluate blocks ETH while peers cascade after XRP stop');
+    check(
+      /after XRP YES stop.*peers still cascading.*until calm/i.test(cascadeBot.lastDecision || ''),
+      'evaluate decision uses post-stop peer-cascade Waiting text'
+    );
+    check(
+      (cascadeBot.ledger.activityLog || []).some((e) =>
+        /Protection used \(peer-cascade\)/i.test(e.message || '')
+      ),
+      'activity log records peer-cascade protection used'
+    );
+    const beforeRepeat = (cascadeBot.ledger.activityLog || []).filter((e) =>
+      /Protection used \(peer-cascade\)/i.test(e.message || '')
+    ).length;
+    await cascadeBot._evaluateSymbolForEdge('ETH', cascadePreds);
+    const afterRepeat = (cascadeBot.ledger.activityLog || []).filter((e) =>
+      /Protection used \(peer-cascade\)/i.test(e.message || '')
+    ).length;
+    checkEq(afterRepeat, beforeRepeat, 'peer-cascade activity log does not spam every poll');
+
+    // After max age, evaluate must not stay stuck on cascade (bounce may still apply).
+    cascadeBot.ledger.trades[0].closedAt = now - 4 * 60 * 1000;
+    cascadeBot.config.peerCascadeMaxMinutes = 3;
+    const ethAfterAge = await cascadeBot._evaluateSymbolForEdge('ETH', {
+      ...cascadePreds,
+      // XRP bounced enough that recovery gate can clear for peer entry.
+      XRP: { ready: true, price: 0.5, windows: { w5: win(60, 70), w10: win(58, 68), w15: win(55, 65) } },
+    });
+    // Peer cascade aged out; ETH may still be blocked by XRP bounce if quote is low —
+    // ensure decision is NOT the sticky cascade message.
+    check(
+      !/peers still cascading/i.test(cascadeBot.lastDecision || ''),
+      'after peer-cascade max age, decision is not sticky cascade wait'
+    );
+    void ethAfterAge;
   }
 
   // Staking halve-after-win

@@ -768,6 +768,8 @@ async function refreshBotStatus() {
     }
     if (data.lastDecision) chips.push(chip('Decision', data.lastDecision));
     if (data.lastError) chips.push(chip('Last error', data.lastError));
+    const activityScroll = captureLogScroll('bot-activity-log-list', 'bottom');
+    const tradeScroll = captureLogScroll('bot-trade-log-list', 'top');
     body.innerHTML = [
       buildCapitalLedgerHtml(capital),
       buildOpenPositionsHtml(data.openTrades),
@@ -775,6 +777,14 @@ async function refreshBotStatus() {
       buildTradeLogHtml(data.tradeLog, data.tradeLogTotal),
       buildActivityLogHtml(data.activityLog, data.recentTrades),
     ].join('');
+    restoreLogScroll('bot-activity-log-list', activityScroll, 'bottom');
+    restoreLogScroll('bot-trade-log-list', tradeScroll, 'top');
+    // Re-apply after layout so sticky-bottom lands on the latest line.
+    requestAnimationFrame(() => {
+      restoreLogScroll('bot-activity-log-list', activityScroll, 'bottom');
+      restoreLogScroll('bot-trade-log-list', tradeScroll, 'top');
+    });
+    bindActivityLogUi();
     renderBotDashboard(data);
   } catch (err) {
     modeLine.textContent = 'Could not reach the engine to check bot status.';
@@ -982,8 +992,84 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
     <div class="bot-log bot-trade-log">
       <div class="bot-panel-title">Trade log <span>${total}</span></div>
       <p class="bot-empty-line">Saved on disk (survives reboot + 12h rotation). Showing latest ${trades.length}${total > trades.length ? ` of ${total}` : ''}.</p>
-      <div class="bot-log-list">${rows}</div>
+      <div class="bot-log-list" id="bot-trade-log-list">${rows}</div>
     </div>`;
+}
+
+const LOG_STICKY_PX = 48;
+
+function captureLogScroll(id, mode = 'bottom') {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const nearLatest =
+    mode === 'bottom'
+      ? el.scrollHeight - el.scrollTop - el.clientHeight <= LOG_STICKY_PX
+      : el.scrollTop <= LOG_STICKY_PX;
+  return { scrollTop: el.scrollTop, stickToLatest: nearLatest, mode };
+}
+
+function restoreLogScroll(id, state, defaultMode = 'bottom') {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const mode = (state && state.mode) || defaultMode;
+  if (!state || state.stickToLatest) {
+    el.scrollTop = mode === 'bottom' ? el.scrollHeight : 0;
+  } else {
+    el.scrollTop = state.scrollTop;
+  }
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function bindActivityLogUi() {
+  const list = document.getElementById('bot-activity-log-list');
+  const copyBtn = document.getElementById('bot-activity-copy');
+  if (!copyBtn || !list) return;
+  copyBtn.onclick = () => {
+    const text = Array.from(list.querySelectorAll('.bot-log-row'))
+      .map((row) => row.innerText.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .join('\n');
+    if (!text) return;
+    const done = () => {
+      copyBtn.textContent = 'Copied';
+      setTimeout(() => {
+        copyBtn.textContent = 'Copy';
+      }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => {
+        // Fallback below
+        fallbackCopyText(text);
+        done();
+      });
+    } else {
+      fallbackCopyText(text);
+      done();
+    }
+  };
+}
+
+function fallbackCopyText(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  } catch (_) {
+    /* ignore */
+  }
 }
 
 function buildActivityLogHtml(activityLog, recentTrades) {
@@ -1003,31 +1089,34 @@ function buildActivityLogHtml(activityLog, recentTrades) {
 
   if (!rows.length) {
     return `
-      <div class="bot-log">
+      <div class="bot-log bot-activity-log">
         <div class="bot-panel-title">Activity log</div>
         <p class="bot-empty-line">No activity yet — opens, closes, and mode changes show up here.</p>
       </div>`;
   }
 
-  const html = rows
+  // Chronological (oldest → newest) so sticky-bottom follows the latest line.
+  const displayRows = rows.slice().reverse();
+
+  const html = displayRows
     .map((e) => {
       const pnl = e.pnlCents;
       const pnlClass =
         Number.isFinite(pnl) && pnl > 0 ? 'chip-positive' : Number.isFinite(pnl) && pnl < 0 ? 'chip-negative' : '';
       const kind = e.kind || 'info';
       return `
-        <div class="bot-log-row kind-${kind}">
-          <span class="bot-log-time">${formatTradeTime(e.at)}</span>
-          <span class="bot-log-msg">${e.message || ''}</span>
-          ${Number.isFinite(pnl) ? `<span class="bot-log-pnl ${pnlClass}">${formatMoneyCents(pnl, { signed: true })}</span>` : '<span class="bot-log-pnl"></span>'}
+        <div class="bot-log-row kind-${escapeHtml(kind)}">
+          <span class="bot-log-time">${escapeHtml(formatTradeTime(e.at))}</span>
+          <span class="bot-log-msg">${escapeHtml(e.message || '')}</span>
+          ${Number.isFinite(pnl) ? `<span class="bot-log-pnl ${pnlClass}">${escapeHtml(formatMoneyCents(pnl, { signed: true }))}</span>` : '<span class="bot-log-pnl"></span>'}
         </div>`;
     })
     .join('');
 
   return `
-    <div class="bot-log">
-      <div class="bot-panel-title">Activity log</div>
-      <div class="bot-log-list">${html}</div>
+    <div class="bot-log bot-activity-log">
+      <div class="bot-panel-title">Activity log <button type="button" class="bot-log-copy" id="bot-activity-copy" title="Copy log text">Copy</button></div>
+      <div class="bot-log-list" id="bot-activity-log-list">${html}</div>
     </div>`;
 }
 

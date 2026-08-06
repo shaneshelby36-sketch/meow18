@@ -3,7 +3,7 @@
 const { correlation } = require('./indicators');
 const { gatherIndicators, buildWindowPrediction, WINDOWS } = require('./prediction');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
-const { stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
+const { stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
 
 const LOOKBACK_MIN = 210;
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
@@ -40,6 +40,9 @@ function normalizeSettings(raw = {}) {
     stopRecoveryMaxMinutes: Number.isFinite(Number(raw.stopRecoveryMaxMinutes))
       ? Number(raw.stopRecoveryMaxMinutes)
       : 15,
+    peerCascadeMaxMinutes: Number.isFinite(Number(raw.peerCascadeMaxMinutes))
+      ? Number(raw.peerCascadeMaxMinutes)
+      : 3,
     stakeDollars: Number.isFinite(Number(raw.stakeDollars)) ? Number(raw.stakeDollars) : 10,
     stakingStrategy: raw.stakingStrategy === 'halve-after-win' ? 'halve-after-win' : 'fixed',
     maxOpenPositions: Math.max(1, Math.round(Number(raw.maxOpenPositions) || 2)),
@@ -530,17 +533,32 @@ function backtestWithSettings(
 
     if (candidates.length === 0) continue;
 
-    // Post-stop: stopped coin must recover before same-side entry on any coin;
-    // also block while peers are still cascading.
-    const lastStopAny = [...closedTrades].reverse().find((t) => t.exitReason === 'stop_loss') || null;
+    // Post-stop (same window): peers calm → bounce → knife-catch; session/age clears.
+    const lastClosedAnyGate = closedTrades.length ? closedTrades[closedTrades.length - 1] : null;
+    const lastStopAny =
+      lastClosedAnyGate && lastClosedAnyGate.exitReason === 'stop_loss' ? lastClosedAnyGate : null;
     const seriesMap = Object.fromEntries(symbols.map((s) => [s, true]));
     const afterGates = [];
     for (const c of candidates) {
+      const peerCheck = checkPostStopPeerCascade({
+        lastStopTrade: lastStopAny,
+        candidateSide: c.side,
+        predictions: predictionBySymbol,
+        seriesBySymbol: seriesMap,
+        minConfidence: settings.minConfidence,
+        maxAgeMs: peerCascadeMaxAgeMs(settings),
+        now: minute,
+      });
+      if (!peerCheck.ok) {
+        skipCounts.postStopPeerCascade += 1;
+        continue;
+      }
+
       let recoveryPrice = entryCents;
       let recoveryWindow = predictionBySymbol[c.symbol]
         ? predictionBySymbol[c.symbol].windows.w5
         : null;
-      if (lastStopAny && lastStopAny.side === c.side) {
+      if (lastStopAny) {
         const stopIndex = indexes[lastStopAny.symbol];
         const stopCandle = stopIndex ? spotAt(stopIndex, minute) : null;
         if (stopCandle && Number.isFinite(lastStopAny.entrySpot)) {
@@ -553,7 +571,7 @@ function backtestWithSettings(
       }
       const recoveryCheck = checkPostStopRecovery({
         lastClosedForSymbol: lastStopAny,
-        side: c.side,
+        side: lastStopAny ? lastStopAny.side : c.side,
         priceCents: recoveryPrice,
         window: recoveryWindow,
         recoveryCents: stopRecoveryCentsRequired(settings),
@@ -565,18 +583,6 @@ function backtestWithSettings(
       });
       if (!recoveryCheck.ok) {
         skipCounts.postStopRecovery += 1;
-        continue;
-      }
-
-      const peerCheck = checkPostStopPeerCascade({
-        lastStopTrade: lastStopAny,
-        candidateSide: c.side,
-        predictions: predictionBySymbol,
-        seriesBySymbol: seriesMap,
-        minConfidence: settings.minConfidence,
-      });
-      if (!peerCheck.ok) {
-        skipCounts.postStopPeerCascade += 1;
         continue;
       }
       afterGates.push(c);
