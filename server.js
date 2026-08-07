@@ -93,6 +93,9 @@ const bot = KALSHI_ENABLED
         stopRecoveryMaxMinutes: parseFloat(process.env.KALSHI_STOP_RECOVERY_MAX_MINUTES || '15'),
         peerCascadeMaxMinutes: parseFloat(process.env.KALSHI_PEER_CASCADE_MAX_MINUTES || '3'),
         postStopMaxOneMinutes: parseFloat(process.env.KALSHI_POST_STOP_MAX_ONE_MINUTES || '1.5'),
+        postStopSameSideCooldownMinutes: parseFloat(
+          process.env.KALSHI_POST_STOP_SAME_SIDE_COOLDOWN_MINUTES || '2'
+        ),
         stakeDollars: parseFloat(process.env.KALSHI_STAKE_DOLLARS || '10'),
         maxOpenPositions: parseInt(process.env.KALSHI_MAX_OPEN_POSITIONS || '2', 10),
         skimMode: process.env.KALSHI_SKIM_MODE || 'insurance',
@@ -534,6 +537,8 @@ app.get("/", (req, res) => {
       stopRecoveryMaxMinutes: source.stopRecoveryMaxMinutes ?? live.stopRecoveryMaxMinutes,
       peerCascadeMaxMinutes: source.peerCascadeMaxMinutes ?? live.peerCascadeMaxMinutes,
       postStopMaxOneMinutes: source.postStopMaxOneMinutes ?? live.postStopMaxOneMinutes,
+      postStopSameSideCooldownMinutes:
+        source.postStopSameSideCooldownMinutes ?? live.postStopSameSideCooldownMinutes,
       stakeDollars: source.stakeDollars ?? live.stakeDollars,
       stakingStrategy: source.stakingStrategy ?? live.stakingStrategy,
       maxOpenPositions: source.maxOpenPositions ?? live.maxOpenPositions,

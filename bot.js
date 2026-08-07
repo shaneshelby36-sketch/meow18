@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 11;
+const SETTINGS_DEFAULTS_VERSION = 12;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -84,6 +84,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'stopRecoveryMaxMinutes',
   'peerCascadeMaxMinutes',
   'postStopMaxOneMinutes',
+  'postStopSameSideCooldownMinutes',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -198,6 +199,11 @@ function isPostStopRecoverySessionExpired(lastStopTrade, now = Date.now()) {
  * market already rejected. Call `checkPostStopPeerCascade` *before* this
  * bounce check so cascading peers block everyone first.
  *
+ * Same-coin same-side also gets a short sit-out after stop (`sameSideCooldownMs`,
+ * default 2m from `closedAt`) even when bounce + thesis would allow — stops the
+ * stop→instant re-entry→stop loop. Cooldown is from closedAt only (not cleared
+ * by session/max-age); peers / opposite side are unaffected.
+ *
  * Primary expiry: once the stopped trade's window closes (`windowCloseTime`),
  * recovery no longer blocks any new entries (next window / other coins).
  * Optional `maxAgeMs` + `closedAt` remains as a backup cap within long windows.
@@ -214,14 +220,30 @@ function checkPostStopRecovery({
   forCandidateSymbol = null,
   forCandidateSide = null,
   maxAgeMs = 0,
+  sameSideCooldownMs,
   now = Date.now(),
 }) {
-  if (!recoveryCents || recoveryCents <= 0) return { ok: true };
   const last = lastClosedForSymbol;
   // Gate uses the stopped trade's side (not necessarily the candidate side).
   if (!last || last.exitReason !== 'stop_loss') {
     return { ok: true };
   }
+
+  // Same-side sit-out from closedAt — before session/max-age clear bounce gating.
+  const cooldownMs =
+    sameSideCooldownMs === undefined
+      ? Math.round(POST_STOP_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES * 60 * 1000)
+      : Number(sameSideCooldownMs);
+  const sameSideCooldown = checkPostStopSameSideCooldown({
+    lastStopTrade: last,
+    forCandidateSymbol: forCandidateSymbol != null ? forCandidateSymbol : symbol || last.symbol,
+    forCandidateSide: forCandidateSide != null ? forCandidateSide : side || last.side,
+    cooldownMs,
+    now,
+  });
+  if (!sameSideCooldown.ok) return sameSideCooldown;
+
+  if (!recoveryCents || recoveryCents <= 0) return { ok: true };
 
   if (isPostStopRecoverySessionExpired(last, now)) {
     return { ok: true };
@@ -305,6 +327,9 @@ const PEER_CASCADE_HARD_MAX_MINUTES = 5;
 /** Default minutes for post-stop max-1 concurrent open cap (then maxOpenPositions). */
 const POST_STOP_MAX_ONE_DEFAULT_MINUTES = 1.5;
 
+/** Default minutes for same-coin same-side sit-out after a stop (knife-catch delay). */
+const POST_STOP_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES = 2;
+
 /**
  * How long after a stop the bot caps concurrent opens at 1 (even if
  * maxOpenPositions is higher). `postStopMaxOneMinutes: 0` disables the cap.
@@ -315,6 +340,56 @@ function postStopMaxOneAgeMs(config = {}) {
   if (Number.isFinite(mins) && mins <= 0) return 0;
   if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 60 * 1000);
   return Math.round(POST_STOP_MAX_ONE_DEFAULT_MINUTES * 60 * 1000);
+}
+
+/**
+ * Same-coin same-side sit-out after stop_loss (from closedAt). Blocks knife-catch
+ * re-entry even when bounce + thesis would allow. `0` disables; unset → 2 minutes.
+ */
+function postStopSameSideCooldownMs(config = {}) {
+  const mins = Number(config.postStopSameSideCooldownMinutes);
+  if (Number.isFinite(mins) && mins <= 0) return 0;
+  if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 60 * 1000);
+  return Math.round(POST_STOP_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES * 60 * 1000);
+}
+
+/**
+ * Block same-symbol + same-side re-entry for `cooldownMs` after stop closedAt.
+ * Peers and opposite side are unaffected. Missing closedAt fails open.
+ */
+function checkPostStopSameSideCooldown({
+  lastStopTrade,
+  forCandidateSymbol = null,
+  forCandidateSide = null,
+  cooldownMs = 0,
+  now = Date.now(),
+}) {
+  const maxMs = Number(cooldownMs);
+  if (!Number.isFinite(maxMs) || maxMs <= 0) return { ok: true };
+  if (!lastStopTrade || lastStopTrade.exitReason !== 'stop_loss') return { ok: true };
+
+  const closedAt = Number(lastStopTrade.closedAt);
+  if (!Number.isFinite(closedAt)) return { ok: true };
+
+  const stoppedSym = String(lastStopTrade.symbol || '').toUpperCase();
+  const candSym = String(forCandidateSymbol || '').toUpperCase();
+  const stopSide = String(lastStopTrade.side || '').toLowerCase();
+  const candSide = String(forCandidateSide || '').toLowerCase();
+  if (!stoppedSym || !candSym || candSym !== stoppedSym || candSide !== stopSide) {
+    return { ok: true };
+  }
+
+  if (Number(now) - closedAt >= maxMs) return { ok: true };
+
+  const mins = maxMs / 60000;
+  const minsLabel = Number.isInteger(mins) ? String(mins) : String(Math.round(mins * 10) / 10);
+  const sideLabel = String(lastStopTrade.side || '').toUpperCase();
+  return {
+    ok: false,
+    reason:
+      `Waiting: ${lastStopTrade.symbol} ${sideLabel} stopped — same-side sit-out ~${minsLabel}m ` +
+      `before knife-catch re-entry.`,
+  };
 }
 
 /**
@@ -745,6 +820,9 @@ class TradingBot {
       // After a stop, cap concurrent opens at 1 for this many minutes (from
       // closedAt), then normal maxOpenPositions applies. 0 = disable max-1.
       postStopMaxOneMinutes: 1.5,
+      // Same-coin same-side sit-out after stop_loss (from closedAt), even when
+      // bounce + thesis would allow knife-catch. 0 = off. Default 2 minutes.
+      postStopSameSideCooldownMinutes: 2,
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -968,7 +1046,7 @@ class TradingBot {
   _isProtectionGateReason(message) {
     const s = String(message || '');
     if (!/^Waiting:/i.test(s)) return false;
-    return /peers still cascading|bounce|knife-catch|max 1 open until post-stop|same-window cascade protection|after \S+ .+ stop/i.test(
+    return /peers still cascading|bounce|knife-catch|same-side sit-out|max 1 open until post-stop|same-window cascade protection|after \S+ .+ stop/i.test(
       s
     );
   }
@@ -976,6 +1054,7 @@ class TradingBot {
   _protectionGateKey(message) {
     const s = String(message || '');
     if (/peers still cascading/i.test(s)) return 'peer-cascade';
+    if (/same-side sit-out/i.test(s)) return 'same-side-cooldown';
     if (/knife-catch/i.test(s)) return 'knife-catch';
     if (/max 1 open until post-stop/i.test(s)) return 'post-stop-max1';
     if (/bounce|need .+ bid\s*≥|need .+ bid >=/i.test(s)) return 'stop-recovery';
@@ -991,6 +1070,8 @@ class TradingBot {
         return 'stop-recovery';
       case 'knife-catch':
         return 'knife-catch';
+      case 'same-side-cooldown':
+        return 'same-side-cooldown';
       case 'post-stop-max1':
         return 'post-stop max-1';
       default:
@@ -2687,6 +2768,17 @@ class TradingBot {
 
     const now = Date.now();
     const maxAgeMs = stopRecoveryMaxAgeMs(this.config);
+    const sameSideCooldownMs = postStopSameSideCooldownMs(this.config);
+
+    // Same-side sit-out from closedAt — independent of bounce / session / max-age.
+    const sameSideCheck = checkPostStopSameSideCooldown({
+      lastStopTrade: lastStop,
+      forCandidateSymbol: candidateSymbol,
+      forCandidateSide: candidateSide,
+      cooldownMs: sameSideCooldownMs,
+      now,
+    });
+    if (!sameSideCheck.ok) return sameSideCheck;
 
     // 1) Session window ended → allow (never freeze into the next 15m).
     if (isPostStopRecoverySessionExpired(lastStop, now)) {
@@ -2774,6 +2866,8 @@ class TradingBot {
     }
 
     // 5–6) Bounce required for everyone; knife-catch only same-coin same-side.
+    // sameSideCooldownMs passed so checkPostStopRecovery stays consistent (already
+    // enforced above; remaining bounce/thesis gates still apply).
     return checkPostStopRecovery({
       lastClosedForSymbol: lastStop,
       side: lastStop.side,
@@ -2784,6 +2878,7 @@ class TradingBot {
       forCandidateSymbol: candidateSymbol,
       forCandidateSide: candidateSide,
       maxAgeMs,
+      sameSideCooldownMs,
       now,
     });
   }
@@ -3083,6 +3178,8 @@ module.exports = {
   peerCascadeMaxAgeMs,
   postStopMaxOneAgeMs,
   isPostStopMaxOneActive,
+  postStopSameSideCooldownMs,
+  checkPostStopSameSideCooldown,
   stopTradeReferenceMs,
   tradeWindowCloseMs,
   isPostStopRecoverySessionExpired,

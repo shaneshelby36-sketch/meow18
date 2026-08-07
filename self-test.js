@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -1983,6 +1983,113 @@ async function testBotTradingFlow() {
     });
     check(oppositeSameCoin.ok, 'opposite side on stopped coin unlocks after bounce (no thesis hostage)');
 
+    checkEq(postStopSameSideCooldownMs({}), 2 * 60 * 1000, 'same-side cooldown defaults to 2m');
+    checkEq(postStopSameSideCooldownMs({ postStopSameSideCooldownMinutes: 0 }), 0, 'same-side cooldown 0 disables');
+    checkEq(
+      postStopSameSideCooldownMs({ postStopSameSideCooldownMinutes: 3 }),
+      3 * 60 * 1000,
+      'same-side cooldown uses configured minutes'
+    );
+
+    const knifeCatchSitOut = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 30,
+        entryPriceCents: 55,
+        symbol: 'DOGE',
+        closedAt: Date.now() - 30 * 1000,
+        windowCloseTime: Date.now() + 10 * 60 * 1000,
+      },
+      side: 'yes',
+      priceCents: 69,
+      window: { probabilityUp: 62, probabilityDown: 38 },
+      recoveryCents: 6,
+      symbol: 'DOGE',
+      forCandidateSymbol: 'DOGE',
+      forCandidateSide: 'yes',
+      sameSideCooldownMs: 2 * 60 * 1000,
+    });
+    check(!knifeCatchSitOut.ok, 'DOGE YES blocked for 2m sit-out even if bounce+thesis ok');
+    check(/same-side sit-out/i.test(knifeCatchSitOut.reason || ''), 'sit-out reason mentions same-side');
+
+    const ethAfterDogeStop = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 30,
+        entryPriceCents: 55,
+        symbol: 'DOGE',
+        closedAt: Date.now() - 30 * 1000,
+        windowCloseTime: Date.now() + 10 * 60 * 1000,
+      },
+      side: 'yes',
+      priceCents: 69,
+      window: { probabilityUp: 62, probabilityDown: 38 },
+      recoveryCents: 6,
+      symbol: 'DOGE',
+      forCandidateSymbol: 'ETH',
+      forCandidateSide: 'yes',
+      sameSideCooldownMs: 2 * 60 * 1000,
+    });
+    check(ethAfterDogeStop.ok, 'ETH allowed during DOGE same-side sit-out (bounce met)');
+
+    const dogeNoDuringSitOut = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 30,
+        entryPriceCents: 55,
+        symbol: 'DOGE',
+        closedAt: Date.now() - 30 * 1000,
+        windowCloseTime: Date.now() + 10 * 60 * 1000,
+      },
+      side: 'yes',
+      priceCents: 69,
+      window: { probabilityUp: 40, probabilityDown: 60 },
+      recoveryCents: 6,
+      symbol: 'DOGE',
+      forCandidateSymbol: 'DOGE',
+      forCandidateSide: 'no',
+      sameSideCooldownMs: 2 * 60 * 1000,
+    });
+    check(dogeNoDuringSitOut.ok, 'DOGE NO allowed during YES same-side sit-out');
+
+    const dogeYesAfterSitOut = checkPostStopRecovery({
+      lastClosedForSymbol: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 30,
+        entryPriceCents: 55,
+        symbol: 'DOGE',
+        closedAt: Date.now() - 3 * 60 * 1000,
+        windowCloseTime: Date.now() + 10 * 60 * 1000,
+      },
+      side: 'yes',
+      priceCents: 69,
+      window: { probabilityUp: 62, probabilityDown: 38 },
+      recoveryCents: 6,
+      symbol: 'DOGE',
+      forCandidateSymbol: 'DOGE',
+      forCandidateSide: 'yes',
+      sameSideCooldownMs: 2 * 60 * 1000,
+    });
+    check(dogeYesAfterSitOut.ok, 'DOGE YES allowed after 2m sit-out when bounce+thesis ok');
+
+    const sitOutSurvivesSessionEnd = checkPostStopSameSideCooldown({
+      lastStopTrade: {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        symbol: 'DOGE',
+        closedAt: Date.now() - 30 * 1000,
+        windowCloseTime: Date.now() - 5 * 1000,
+      },
+      forCandidateSymbol: 'DOGE',
+      forCandidateSide: 'yes',
+      cooldownMs: 2 * 60 * 1000,
+    });
+    check(!sitOutSurvivesSessionEnd.ok, 'same-side sit-out still applies after window end until 2m');
+
     checkEq(stopRecoveryMaxAgeMs({ stopRecoveryMaxMinutes: 0 }), 0, 'max age 0 disables expiry');
     checkEq(stopRecoveryMaxAgeMs({ stopRecoveryMaxMinutes: 15 }), 15 * 60 * 1000, 'max age uses configured minutes');
     checkEq(stopRecoveryMaxAgeMs({}), 15 * 60 * 1000, 'max age defaults to 15 minutes');
@@ -2073,6 +2180,111 @@ async function testBotTradingFlow() {
     });
     check(!sameSessionStillBlocks.ok, 'same-session stop still blocks peers until bounce');
     check(/same-window cascade/i.test(sameSessionStillBlocks.reason || ''), 'block reason says same-window not forever');
+
+    // Same-coin same-side sit-out after stop (knife-catch cooldown), even when bounce+thesis ok
+    {
+      checkEq(
+        postStopSameSideCooldownMs({}),
+        2 * 60 * 1000,
+        'same-side cooldown defaults to 2 minutes'
+      );
+      checkEq(
+        postStopSameSideCooldownMs({ postStopSameSideCooldownMinutes: 0 }),
+        0,
+        'same-side cooldown 0 disables'
+      );
+      checkEq(
+        postStopSameSideCooldownMs({ postStopSameSideCooldownMinutes: 3 }),
+        3 * 60 * 1000,
+        'same-side cooldown uses configured minutes'
+      );
+
+      const dogeStopAt = Date.now() - 30_000;
+      const dogeStop = {
+        exitReason: 'stop_loss',
+        side: 'yes',
+        exitPriceCents: 30,
+        entryPriceCents: 55,
+        symbol: 'DOGE',
+        closedAt: dogeStopAt,
+        windowCloseTime: Date.now() + 10 * 60 * 1000,
+      };
+      const bouncedFavorYes = {
+        lastClosedForSymbol: dogeStop,
+        side: 'yes',
+        priceCents: 69,
+        window: { probabilityUp: 70, probabilityDown: 30 },
+        recoveryCents: 6,
+        symbol: 'DOGE',
+        forCandidateSymbol: 'DOGE',
+        forCandidateSide: 'yes',
+        sameSideCooldownMs: 2 * 60 * 1000,
+        now: dogeStopAt + 30_000,
+      };
+      const dogeYesBlocked = checkPostStopRecovery(bouncedFavorYes);
+      check(!dogeYesBlocked.ok, 'DOGE YES blocked for 2m after stop even if bid bounced + thesis favors');
+      check(
+        /same-side sit-out ~2m/i.test(dogeYesBlocked.reason || ''),
+        'same-side block message mentions sit-out ~2m'
+      );
+      checkEq(
+        makeBot(mockClient({}))._protectionGateKey(dogeYesBlocked.reason),
+        'same-side-cooldown',
+        'protection gate key is same-side-cooldown'
+      );
+
+      const dogeNoOk = checkPostStopRecovery({
+        ...bouncedFavorYes,
+        forCandidateSide: 'no',
+        window: { probabilityUp: 30, probabilityDown: 70 },
+      });
+      check(dogeNoOk.ok, 'DOGE NO allowed after bounce (opposite side, cooldown does not apply)');
+
+      const ethOk = checkPostStopRecovery({
+        ...bouncedFavorYes,
+        forCandidateSymbol: 'ETH',
+        forCandidateSide: 'yes',
+      });
+      check(ethOk.ok, 'ETH allowed after DOGE bounce (peer coin, cooldown does not apply)');
+
+      const afterCooldown = checkPostStopRecovery({
+        ...bouncedFavorYes,
+        now: dogeStopAt + 2 * 60 * 1000 + 1,
+      });
+      check(afterCooldown.ok, 'DOGE YES allowed after 2m same-side sit-out');
+
+      const disabled = checkPostStopRecovery({
+        ...bouncedFavorYes,
+        sameSideCooldownMs: 0,
+      });
+      check(disabled.ok, 'same-side cooldown 0 allows knife-catch when bounce+thesis ok');
+
+      // Cooldown from closedAt even after session expiry (prefer keep until 2m)
+      const sessionEndedStop = {
+        ...dogeStop,
+        windowCloseTime: dogeStopAt + 10_000,
+      };
+      check(
+        isPostStopRecoverySessionExpired(sessionEndedStop, dogeStopAt + 30_000),
+        'session expired for cooldown-vs-session fixture'
+      );
+      const stillSitOut = checkPostStopRecovery({
+        ...bouncedFavorYes,
+        lastClosedForSymbol: sessionEndedStop,
+        now: dogeStopAt + 30_000,
+      });
+      check(!stillSitOut.ok, 'same-side sit-out still blocks after session end until 2m from closedAt');
+      check(
+        checkPostStopSameSideCooldown({
+          lastStopTrade: dogeStop,
+          forCandidateSymbol: 'DOGE',
+          forCandidateSide: 'yes',
+          cooldownMs: 2 * 60 * 1000,
+          now: dogeStopAt + 30_000,
+        }).ok === false,
+        'checkPostStopSameSideCooldown blocks DOGE YES inside window'
+      );
+    }
 
     checkEq(tradeWindowCloseMs({ closeTime: 12345 }), 12345, 'tradeWindowCloseMs reads backtest closeTime');
 
