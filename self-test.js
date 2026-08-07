@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
 const { KalshiClient, normalizeMarketPrices, priceInCents } = require('./kalshiClient');
 
 const ONLINE = process.env.ONLINE === '1' || process.env.ONLINE === 'true';
@@ -1005,6 +1005,159 @@ async function testBotTradingFlow() {
       engineConfidence: 70,
     });
     checkEq(diversifyBot.openTrades.length, 2, 'hard guard blocks third open on an occupied coin');
+  }
+
+  // Post-stop max-1: time-limited (default 1.5m), then maxOpenPositions again
+  {
+    const nowMs = Date.now();
+    checkEq(postStopMaxOneAgeMs({}), Math.round(1.5 * 60 * 1000), 'post-stop max-1 defaults to 1.5 minutes');
+    checkEq(postStopMaxOneAgeMs({ postStopMaxOneMinutes: 0 }), 0, 'post-stop max-1 0 disables cap');
+    checkEq(postStopMaxOneAgeMs({ postStopMaxOneMinutes: 2 }), 2 * 60 * 1000, 'post-stop max-1 uses configured minutes');
+    check(
+      isPostStopMaxOneActive(
+        { exitReason: 'stop_loss', closedAt: nowMs - 30_000 },
+        { postStopMaxOneMinutes: 1.5 },
+        nowMs
+      ),
+      'max-1 active within 1.5m of stop closedAt'
+    );
+    check(
+      !isPostStopMaxOneActive(
+        { exitReason: 'stop_loss', closedAt: nowMs - 100_000 },
+        { postStopMaxOneMinutes: 1.5 },
+        nowMs
+      ),
+      'max-1 inactive after 1.5m from stop closedAt'
+    );
+    check(
+      !isPostStopMaxOneActive(
+        { exitReason: 'stop_loss', closedAt: nowMs - 10_000 },
+        { postStopMaxOneMinutes: 0 },
+        nowMs
+      ),
+      'max-1 disabled when postStopMaxOneMinutes is 0'
+    );
+
+    const maxOneClient = {
+      hasCredentials: false,
+      async getOpenMarkets(series) {
+        const close = new Date(Date.now() + 12 * 60 * 1000).toISOString();
+        if (series.includes('ETH')) {
+          return [{ ticker: 'ETH-M1', close_time: close, floor_strike: 3000, yes_bid: 40, yes_ask: 42, no_bid: 58, no_ask: 60 }];
+        }
+        if (series.includes('BTC')) {
+          return [{ ticker: 'BTC-M1', close_time: close, floor_strike: 60000, yes_bid: 40, yes_ask: 42, no_bid: 58, no_ask: 60 }];
+        }
+        return [];
+      },
+      async getMarket() {
+        return null;
+      },
+      async createOrder() {
+        throw new Error('no');
+      },
+      async getBalance() {
+        return { balance: 0, portfolio_value: 0 };
+      },
+    };
+    const calmPreds = {
+      ETH: { ready: true, price: 3010, windows: { w5: win(85, 90), w10: win(80, 85), w15: win(75, 80) } },
+      BTC: { ready: true, price: 60100, windows: { w5: win(80, 85), w10: win(75, 80), w15: win(70, 75) } },
+    };
+
+    const youngStopBot = makeBot(maxOneClient, {
+      symbol: 'AUTO',
+      maxOpenPositions: 2,
+      edgeThresholdPct: 5,
+      minConfidence: 50,
+      stakeDollars: 10,
+      skimMode: 'off',
+      stopRecoveryCents: 0,
+      postStopMaxOneMinutes: 1.5,
+    });
+    youngStopBot.ledger.trades = [
+      {
+        id: 'open-btc',
+        status: 'open',
+        symbol: 'BTC',
+        ticker: 'BTC-OPEN',
+        side: 'yes',
+        contracts: 10,
+        stakeDollars: 10,
+        entryPriceCents: 42,
+        floorStrike: 60000,
+        openedAt: nowMs - 60_000,
+        windowCloseTime: nowMs + 10 * 60_000,
+        engineProbability: 70,
+        engineConfidence: 80,
+      },
+      {
+        // Stopped a coin we are not about to re-rank first — max-1 still applies
+        // from "latest closed is stop", independent of which symbol stopped.
+        id: 'stop-xrp',
+        status: 'closed',
+        exitReason: 'stop_loss',
+        symbol: 'XRP',
+        side: 'yes',
+        pnlCents: -200,
+        entryPriceCents: 55,
+        exitPriceCents: 42,
+        closedAt: nowMs - 30_000,
+        windowCloseTime: nowMs + 8 * 60_000,
+      },
+    ];
+    await youngStopBot.runCycle(calmPreds);
+    checkEq(youngStopBot.openTrades.length, 1, 'max-1 blocks 2nd open within 1.5m after stop');
+    check(/max 1 open until post-stop/i.test(youngStopBot.lastDecision || ''), 'max-1 Waiting cites post-stop calm');
+    checkEq(youngStopBot._lastProtectionGateKey, 'post-stop-max1', 'max-1 notes protection gate');
+
+    const agedStopBot = makeBot(maxOneClient, {
+      symbol: 'AUTO',
+      maxOpenPositions: 2,
+      edgeThresholdPct: 5,
+      minConfidence: 50,
+      stakeDollars: 10,
+      skimMode: 'off',
+      stopRecoveryCents: 0,
+      postStopMaxOneMinutes: 1.5,
+    });
+    agedStopBot.ledger.trades = [
+      {
+        id: 'open-btc-aged',
+        status: 'open',
+        symbol: 'BTC',
+        ticker: 'BTC-OPEN2',
+        side: 'yes',
+        contracts: 10,
+        stakeDollars: 10,
+        entryPriceCents: 42,
+        floorStrike: 60000,
+        openedAt: nowMs - 3 * 60_000,
+        windowCloseTime: nowMs + 10 * 60_000,
+        engineProbability: 70,
+        engineConfidence: 80,
+      },
+      {
+        id: 'stop-xrp-aged',
+        status: 'closed',
+        exitReason: 'stop_loss',
+        symbol: 'XRP',
+        side: 'yes',
+        pnlCents: -200,
+        entryPriceCents: 55,
+        exitPriceCents: 42,
+        closedAt: nowMs - 100_000, // > 1.5m
+        windowCloseTime: nowMs + 8 * 60_000,
+      },
+    ];
+    agedStopBot._lastProtectionGateKey = 'post-stop-max1';
+    await agedStopBot.runCycle(calmPreds);
+    checkEq(agedStopBot.openTrades.length, 2, 'after 1.5m post-stop, 2nd open allowed (maxOpenPositions)');
+    check(
+      agedStopBot.openTrades.some((t) => t.symbol === 'ETH'),
+      'aged max-1 allows ETH as second slot'
+    );
+    check(agedStopBot._lastProtectionGateKey == null, 'max-1 protection clears after window ages out');
   }
 
   // Settle and skim (stop entries so a replacement trade isn't opened same cycle)

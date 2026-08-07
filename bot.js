@@ -82,6 +82,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'stopRecoveryCents',
   'stopRecoveryMaxMinutes',
   'peerCascadeMaxMinutes',
+  'postStopMaxOneMinutes',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -238,6 +239,34 @@ function stopRecoveryMaxAgeMs(config = {}) {
 /** Default / hard-max minutes for the peer-cascade calm gate (not full session). */
 const PEER_CASCADE_DEFAULT_MINUTES = 3;
 const PEER_CASCADE_HARD_MAX_MINUTES = 5;
+
+/** Default minutes for post-stop max-1 concurrent open cap (then maxOpenPositions). */
+const POST_STOP_MAX_ONE_DEFAULT_MINUTES = 1.5;
+
+/**
+ * How long after a stop the bot caps concurrent opens at 1 (even if
+ * maxOpenPositions is higher). `postStopMaxOneMinutes: 0` disables the cap.
+ * Unset/invalid → 1.5 minutes from the stop's closedAt (openedAt fallback).
+ */
+function postStopMaxOneAgeMs(config = {}) {
+  const mins = Number(config.postStopMaxOneMinutes);
+  if (Number.isFinite(mins) && mins <= 0) return 0;
+  if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 60 * 1000);
+  return Math.round(POST_STOP_MAX_ONE_DEFAULT_MINUTES * 60 * 1000);
+}
+
+/**
+ * True while the latest closed trade is a stop_loss and we are still inside
+ * the post-stop max-1 window. Missing timestamps fail open (no sticky cap).
+ */
+function isPostStopMaxOneActive(lastStopTrade, config = {}, now = Date.now()) {
+  if (!lastStopTrade || lastStopTrade.exitReason !== 'stop_loss') return false;
+  const maxAgeMs = postStopMaxOneAgeMs(config);
+  if (maxAgeMs <= 0) return false;
+  const ref = stopTradeReferenceMs(lastStopTrade);
+  if (!Number.isFinite(ref)) return false;
+  return now - ref < maxAgeMs;
+}
 
 /**
  * Peer-cascade calm gate must always age out quickly (shorter than bounce recovery).
@@ -636,6 +665,9 @@ class TradingBot {
       // Peer-cascade calm gate max wait (minutes). Short post-stop protection;
       // default 3, hard-clamped to 5 — never a sticky full-session freeze.
       peerCascadeMaxMinutes: 3,
+      // After a stop, cap concurrent opens at 1 for this many minutes (from
+      // closedAt), then normal maxOpenPositions applies. 0 = disable max-1.
+      postStopMaxOneMinutes: 1.5,
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -1839,13 +1871,20 @@ class TradingBot {
     if (!predictions) return;
 
     // After a stop, don't stack a second leg while the wound is still fresh —
-    // the loss-string pattern was stop → instantly fill both slots again.
+    // briefly cap at 1 open (postStopMaxOneMinutes, default 1.5m), then
+    // normal maxOpenPositions applies again. Other gates still apply.
     const preferOtherThan = this._lastStopLossSymbol();
-    if (preferOtherThan && this.openTrades.length >= 1) {
+    const maxOneActive = isPostStopMaxOneActive(this._lastStopLossTrade(), this.config);
+    if (preferOtherThan && this.openTrades.length >= 1 && maxOneActive) {
+      const mins = Number(this.config.postStopMaxOneMinutes);
+      const minsLabel = Number.isFinite(mins) && mins > 0 ? mins : POST_STOP_MAX_ONE_DEFAULT_MINUTES;
       this.lastDecision =
-        `Waiting: after ${preferOtherThan} stop — max 1 open until post-stop calm (avoids loss strings).`;
+        `Waiting: after ${preferOtherThan} stop — max 1 open until post-stop calm (${minsLabel}m) (avoids loss strings).`;
       this._noteProtectionGate(this.lastDecision);
       return;
+    }
+    if (this._lastProtectionGateKey === 'post-stop-max1') {
+      this._noteProtectionGate(null);
     }
 
     // After a stop-loss, scan other coins first instead of immediately
@@ -1894,9 +1933,8 @@ class TradingBot {
 
   /**
    * After a stop (while it remains the latest closed trade), gate new entries:
-   * session/max-age expiry → allow; peers cascading → block all; stopped-coin
-   * bounce not met → block all; same-coin same-side thesis → knife-catch only.
-   * Peer unlock after bounce stays available once peers are calm.
+   * session expiry → allow; max-age → allow; peers cascading → block all;
+   * stopped-coin bounce not met → block all; same-coin same-side thesis → knife-catch only.
    */
   async _stoppedCoinRecoveryGate(candidateSymbol, candidateSide, candidatePriceCents, candidateWindow, predictions) {
     const lastStop = this._lastStopLossTrade();
@@ -1990,7 +2028,7 @@ class TradingBot {
       }
     }
 
-    // 4–5) Bounce required for everyone; knife-catch only same-coin same-side.
+    // 5–6) Bounce required for everyone; knife-catch only same-coin same-side.
     return checkPostStopRecovery({
       lastClosedForSymbol: lastStop,
       side: lastStop.side,
@@ -2297,6 +2335,8 @@ module.exports = {
   stopRecoveryCentsRequired,
   stopRecoveryMaxAgeMs,
   peerCascadeMaxAgeMs,
+  postStopMaxOneAgeMs,
+  isPostStopMaxOneActive,
   stopTradeReferenceMs,
   tradeWindowCloseMs,
   isPostStopRecoverySessionExpired,

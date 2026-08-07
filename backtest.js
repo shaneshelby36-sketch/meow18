@@ -43,6 +43,9 @@ function normalizeSettings(raw = {}) {
     peerCascadeMaxMinutes: Number.isFinite(Number(raw.peerCascadeMaxMinutes))
       ? Number(raw.peerCascadeMaxMinutes)
       : 3,
+    postStopMaxOneMinutes: Number.isFinite(Number(raw.postStopMaxOneMinutes))
+      ? Number(raw.postStopMaxOneMinutes)
+      : 1.5,
     stakeDollars: Number.isFinite(Number(raw.stakeDollars)) ? Number(raw.stakeDollars) : 10,
     stakingStrategy: raw.stakingStrategy === 'halve-after-win' ? 'halve-after-win' : 'fixed',
     maxOpenPositions: Math.max(1, Math.round(Number(raw.maxOpenPositions) || 2)),
