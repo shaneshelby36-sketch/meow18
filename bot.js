@@ -19,7 +19,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 6;
+const SETTINGS_DEFAULTS_VERSION = 7;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -655,7 +655,7 @@ class TradingBot {
       takeProfitCents: 15, // exit if held bid rises this many cents above entry (see final-5 override)
       nearCertainExitCents: 97, // if held bid reaches this, bank it — don't wait on settlement for the last few ¢
       minEntryCents: 40, // never buy a side cheaper than this — blocks longshot lottery tickets
-      minMinutesToOpen: 5, // don't open when fewer than this many minutes remain in the window
+      minMinutesToOpen: 3, // don't open when fewer than this many minutes remain in the window
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
       stopRecoveryCents: 8,
@@ -1716,7 +1716,7 @@ class TradingBot {
     const minutesLeft = (closeAt - Date.now()) / 60000;
     const minMinutesToOpen = Number.isFinite(Number(this.config.minMinutesToOpen))
       ? Number(this.config.minMinutesToOpen)
-      : 5;
+      : 3;
     if (minMinutesToOpen > 0 && minutesLeft < minMinutesToOpen) {
       this.lastDecision =
         `Skipped ${symbol}: only ${minutesLeft.toFixed(1)} min left (min ${minMinutesToOpen} to open).`;
@@ -2099,7 +2099,7 @@ class TradingBot {
     const minutesRemaining = Math.max(0.1, (closeTime - now) / 60000);
     const minMinutesToOpen = Number.isFinite(Number(this.config.minMinutesToOpen))
       ? Number(this.config.minMinutesToOpen)
-      : 5;
+      : 3;
     if (minMinutesToOpen > 0 && minutesRemaining < minMinutesToOpen) {
       this.lastDecision =
         `Waiting: ${symbol} window has only ${minutesRemaining.toFixed(1)} min left (need ≥ ${minMinutesToOpen} to open — avoids freeze-into-settle).`;

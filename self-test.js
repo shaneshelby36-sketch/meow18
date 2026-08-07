@@ -163,7 +163,7 @@ function makeBot(client, config = {}) {
     stopLossCents: config.stopLossCents ?? 23,
     takeProfitCents: config.takeProfitCents ?? 15,
     minEntryCents: config.minEntryCents ?? 40,
-    minMinutesToOpen: config.minMinutesToOpen ?? 5,
+    minMinutesToOpen: config.minMinutesToOpen ?? 3,
     stopRecoveryCents: config.stopRecoveryCents ?? 8,
     stakeDollars: config.stakeDollars ?? 10,
     maxOpenPositions: config.maxOpenPositions ?? 1,
@@ -1607,7 +1607,7 @@ async function testBotTradingFlow() {
     check(/stopped|bounce|recovery/i.test(recBot.lastDecision || ''), 'decision explains post-stop wait');
   }
 
-  // No new entries in the final 5 minutes of a window
+  // No new entries in the final 3 minutes of a window
   {
     const now = Date.now();
     const lateBot = makeBot(
@@ -1615,7 +1615,7 @@ async function testBotTradingFlow() {
         ticker: 'KXETH15M-LATE',
         status: 'open',
         floor_strike: 3000,
-        close_time: new Date(now + 3 * 60 * 1000).toISOString(),
+        close_time: new Date(now + 2 * 60 * 1000).toISOString(),
         yes_bid: 40,
         yes_ask: 42,
         no_bid: 58,
@@ -1626,7 +1626,7 @@ async function testBotTradingFlow() {
         edgeThresholdPct: 1,
         minConfidence: 50,
         minEntryCents: 20,
-        minMinutesToOpen: 5,
+        minMinutesToOpen: 3,
       }
     );
     const latePreds = {
@@ -1637,7 +1637,7 @@ async function testBotTradingFlow() {
       },
     };
     const lateOpp = await lateBot._evaluateSymbolForEdge('ETH', latePreds);
-    checkEq(lateOpp, null, 'blocks open with only ~3 min left');
+    checkEq(lateOpp, null, 'blocks open with only ~2 min left');
     check(/min left|to open/i.test(lateBot.lastDecision || ''), 'decision mentions min time to open');
   }
 
