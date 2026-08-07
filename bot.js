@@ -1352,48 +1352,64 @@ class TradingBot {
   }
 
   /**
-   * Live PnL after Kalshi fees: (exit − entry) × contracts − entryFees − exitFees.
-   * Matches Kalshi balance move more closely than gross price PnL.
+   * Trade PnL in cents: (exit − entry) × contracts.
+   * Matches Kalshi's trade PnL (price improvement included). Fees are tracked
+   * separately for the activity note — do not subtract here (v1.2.29 fee-aware
+   * netting under-reported real wins vs Kalshi, e.g. ETH $3.42 vs $4.57).
+   * entryFeesCents / exitFeesCents kept for call-site compat; ignored.
    */
-  _netPnlCents(entryCents, exitCents, contracts, entryFeesCents = 0, exitFeesCents = 0) {
+  _netPnlCents(entryCents, exitCents, contracts, _entryFeesCents = 0, _exitFeesCents = 0) {
     const n = Math.max(0, Math.floor(Number(contracts) || 0));
     const entry = Number(entryCents) || 0;
     const exit = Number(exitCents) || 0;
-    const gross = (exit - entry) * n;
-    const fees = Math.max(0, Math.round(Number(entryFeesCents) || 0)) +
-      Math.max(0, Math.round(Number(exitFeesCents) || 0));
-    return gross - fees;
+    return (exit - entry) * n;
   }
 
   /**
    * Average fill price for the held outcome (YES/NO cents).
-   * Prefer taker/maker fill cost (actual cash). For average_fill_price, Kalshi
-   * Create Order V2 quotes from the YES side — do NOT blindly complement by
-   * book_side. When intendedPriceCents is known, pick raw vs 100-raw closer
-   * to that limit (fixes stop 82→18 and TP 57→57).
+   * Prefer average_fill_price (limit-disambiguated). Fill-cost dollars are a
+   * fallback only when avg is missing — and only when the implied cents agree
+   * with the intended limit (~10¢). Preferring cost first caused:
+   *   - XRP false +$10: taker_fill_cost_dollars="0.00" on maker buys → 1¢ entry
+   *   - ETH under-count: cost near the limit hid average_fill_price improvement
    */
   _orderAvgFillPriceCents(order, heldSide, action, intendedPriceCents = null) {
     if (!order) return null;
     const filled = this._orderFillCount(order);
     const clampCents = (c) => Math.max(1, Math.min(99, Math.round(c)));
 
-    // Proceeds/cost first — actual dollars exchanged, already in held-outcome terms.
-    const costDollars = Number.parseFloat(
-      order.taker_fill_cost_dollars ??
-        order.maker_fill_cost_dollars ??
-        order.takerFillCostDollars ??
-        order.makerFillCostDollars ??
-        NaN
-    );
-    if (Number.isFinite(costDollars) && filled > 0) {
-      return clampCents((costDollars * 100) / filled);
-    }
-
     const avgDollars = Number.parseFloat(
       order.average_fill_price ?? order.averageFillPrice ?? NaN
     );
     if (Number.isFinite(avgDollars) && avgDollars > 0) {
       return this._disambiguateFillCents(avgDollars * 100, intendedPriceCents);
+    }
+
+    // Fallback: sum taker+maker fill cost (skip zero — maker fills often send
+    // taker_fill_cost_dollars="0.00", which must not become 1¢).
+    let costDollars = 0;
+    let hasPositiveCost = false;
+    for (const raw of [
+      order.taker_fill_cost_dollars ?? order.takerFillCostDollars,
+      order.maker_fill_cost_dollars ?? order.makerFillCostDollars,
+    ]) {
+      const n = Number.parseFloat(raw ?? NaN);
+      if (Number.isFinite(n) && n > 0) {
+        costDollars += n;
+        hasPositiveCost = true;
+      }
+    }
+    if (hasPositiveCost && filled > 0) {
+      const costCents = clampCents((costDollars * 100) / filled);
+      const intended = Math.round(Number(intendedPriceCents));
+      if (Number.isFinite(intended) && intended >= 1 && intended <= 99) {
+        if (Math.abs(costCents - intended) > 10) {
+          // Misleading cost with no average_fill_price — refuse rather than
+          // invent a far-from-limit price (XRP-style blowups).
+          return null;
+        }
+      }
+      return costCents;
     }
 
     const yesDollars = Number.parseFloat(order.yes_price_dollars ?? order.yesPriceDollars ?? NaN);
@@ -2464,7 +2480,7 @@ class TradingBot {
     this.ledger.trades.unshift(trade);
     if (this.ledger.trades.length > 200) this.ledger.trades.length = 200;
     this._noteProtectionGate(false); // open implies gate no longer blocking
-    this.lastDecision = `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${priceCents}¢ (confidence ${engineConfidence}%).`;
+    this.lastDecision = `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${trade.entryPriceCents}¢ (confidence ${engineConfidence}%).`;
     this._logActivity(this.lastDecision, {
       kind: 'open',
       symbol,

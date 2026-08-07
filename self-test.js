@@ -584,10 +584,106 @@ function testKalshiClient() {
         side: 'ask',
       },
       'yes',
-      'sell'
+      'sell',
+      18
     ),
     18,
-    'taker_fill_cost proceeds preferred over average_fill_price'
+    'average_fill_price preferred; disambiguated to stop limit (not raw 82)'
+  );
+  // XRP false +$10.32: maker buy ships taker_fill_cost_dollars="0.00" — must
+  // not book clamp(0)=1¢ entry (which invents (76−1)×14 ≈ $10.50).
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      {
+        average_fill_price: '0.6900',
+        taker_fill_cost_dollars: '0.00',
+        maker_fill_cost_dollars: '9.66',
+        fill_count: '14.00',
+        side: 'bid',
+      },
+      'yes',
+      'buy',
+      69
+    ),
+    69,
+    'maker-only buy: average_fill_price wins over zero/maker cost'
+  );
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      {
+        average_fill_price: '0.6900',
+        taker_fill_cost_dollars: '0.00',
+        maker_fill_cost_dollars: '0.00',
+        fill_count: '14.00',
+        side: 'bid',
+      },
+      'yes',
+      'buy',
+      69
+    ),
+    69,
+    'zero fill costs ignored; average_fill_price used'
+  );
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      {
+        average_fill_price: '0.7600',
+        taker_fill_cost_dollars: '20.00',
+        fill_count: '14.00',
+        side: 'ask',
+      },
+      'yes',
+      'sell',
+      76
+    ),
+    76,
+    'misleading taker_fill_cost ignored when average_fill_price present'
+  );
+  // Cost fallback only when average_fill_price is absent.
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      {
+        taker_fill_cost_dollars: '1.26',
+        maker_fill_cost_dollars: '1.26',
+        fill_count: '14.00',
+        side: 'ask',
+      },
+      'yes',
+      'sell',
+      18
+    ),
+    18,
+    'without avg: taker+maker fill costs summed for cents'
+  );
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      {
+        taker_fill_cost_dollars: '20.00',
+        fill_count: '14.00',
+        side: 'ask',
+      },
+      'yes',
+      'sell',
+      76
+    ),
+    null,
+    'without avg: cost far from sell limit refused (no invented price)'
+  );
+  // ETH under-count: fill_cost near buy limit must not hide avg price improvement.
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      {
+        average_fill_price: '0.5200',
+        taker_fill_cost_dollars: '9.52', // 17×$0.56 limit — agrees with intended, wrong vs avg
+        fill_count: '17.00',
+        side: 'bid',
+      },
+      'yes',
+      'buy',
+      56
+    ),
+    52,
+    'ETH-style: average_fill_price improvement beats limit-shaped fill_cost'
   );
   checkEq(
     fillBot._orderAvgFillPriceCents(
@@ -3021,7 +3117,136 @@ async function testBotTradingFlow() {
     check(tpTrade.pnlCents > 0, 'TP is a win');
   }
 
-  // Live PnL subtracts Kalshi fees (net, not gross)
+  // XRP false +$10.32: sell fill with misleading taker_fill_cost must book near
+  // sell limit; maker entry with taker cost "0.00" must keep real entry (not 1¢).
+  // PnL is gross (Kalshi-style); fees are a note only.
+  {
+    const xrpEntry = bot._orderAvgFillPriceCents(
+      {
+        average_fill_price: '0.6900',
+        taker_fill_cost_dollars: '0.00',
+        maker_fill_cost_dollars: '9.66',
+        fill_count: '14.00',
+        side: 'bid',
+      },
+      'yes',
+      'buy',
+      69
+    );
+    checkEq(xrpEntry, 69, 'XRP-style maker entry books 69¢ not 1¢');
+    // Old bug: entry=1 → (76−1)×14 = 1050 (~$10.50). Real gross: (76−69)×14 = 98.
+    checkEq(
+      bot._netPnlCents(1, 76, 14, 8, 10),
+      1050,
+      'sanity: 1¢ entry would invent the false ~$10.50 gross'
+    );
+    checkEq(
+      bot._netPnlCents(xrpEntry, 76, 14, 8, 10),
+      98,
+      'XRP-style PnL is $0.98 gross (fees not subtracted)'
+    );
+
+    const xrpClient = {
+      hasCredentials: true,
+      async createOrder({ action, side, priceCents, count }) {
+        checkEq(action, 'sell', 'XRP TP exit sells');
+        checkEq(side, 'yes', 'XRP TP exit side yes');
+        checkEq(priceCents, 76, 'XRP TP sells at pre_close/bid fill');
+        return normalizeCreateOrderResponse({
+          order_id: 'xrp-false-pnl-exit',
+          fill_count: `${count}.00`,
+          remaining_count: '0.00',
+          average_fill_price: '0.7600',
+          // Misleading: implies ~143¢/contract if trusted blindly (clamped 99).
+          taker_fill_cost_dollars: '20.00',
+          taker_fees_dollars: '0.10',
+          side: 'ask',
+        });
+      },
+      async getOrder(orderId) {
+        return {
+          order: {
+            order_id: orderId,
+            status: 'executed',
+            fill_count_fp: '14.00',
+            average_fill_price: '0.7600',
+            taker_fill_cost_dollars: '20.00',
+            taker_fees_dollars: '0.10',
+            side: 'ask',
+          },
+        };
+      },
+      async cancelOrder() {
+        return {};
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+    };
+    const xrpBot = makeBot(xrpClient, {
+      mode: 'live',
+      liveAuthorized: true,
+      skimMode: 'insurance',
+    });
+    xrpBot.config.mode = 'live';
+    xrpBot.config.liveAuthorized = true;
+    const xrpTrade = openTrade(xrpBot, {
+      mode: 'live',
+      liveOrderId: 'entry-xrp-false-pnl',
+      side: 'yes',
+      entryPriceCents: xrpEntry,
+      contracts: 14,
+      entryFeesCents: 8,
+      windowCloseTime: Date.now() + 10 * 60 * 1000,
+    });
+    const xrpClosed = await xrpBot._closePosition(xrpTrade, 76, 'take_profit', {
+      liveSellPriceCents: 76,
+    });
+    checkEq(xrpClosed, true, 'XRP-style TP closes');
+    checkEq(xrpTrade.exitPriceCents, 76, 'XRP-style TP books avg/sell limit not cost-derived 99¢');
+    checkEq(xrpTrade.pnlCents, 98, 'XRP-style TP PnL is $0.98 not false $10.32');
+    checkEq(xrpTrade.feesCents, 18, 'XRP-style fees still recorded for the note');
+    check(xrpTrade.pnlCents < 200, 'XRP-style TP must not invent huge PnL');
+    // 40% wallet of $0.98 = $0.39 — not the logged Wallet +$4.13 from false $10.32
+    checkEq(xrpTrade.skimmedCents, 39, 'XRP-style wallet skim matches real $0.98 win');
+  }
+
+  // ETH under-count: avg entry improvement + gross PnL ≈ Kalshi (not fee-netted limit prices)
+  {
+    const ethEntry = bot._orderAvgFillPriceCents(
+      {
+        average_fill_price: '0.5200',
+        taker_fill_cost_dollars: '9.52',
+        fill_count: '17.00',
+        side: 'bid',
+      },
+      'yes',
+      'buy',
+      56
+    );
+    const ethExit = bot._orderAvgFillPriceCents(
+      {
+        average_fill_price: '0.7900',
+        taker_fill_cost_dollars: '13.43',
+        fill_count: '17.00',
+        side: 'ask',
+      },
+      'yes',
+      'sell',
+      79
+    );
+    checkEq(ethEntry, 52, 'ETH-style entry uses avg improvement (52) not limit cost (56)');
+    checkEq(ethExit, 79, 'ETH-style exit uses average_fill_price');
+    // Old dashboard: (79−56)×17 − 49 = 342 ($3.42). Kalshi ≈ (79−52)×17 = 459 ($4.59).
+    checkEq(bot._netPnlCents(56, 79, 17, 24, 25), 391, 'limit prices gross without fee net');
+    checkEq(
+      bot._netPnlCents(ethEntry, ethExit, 17, 24, 25),
+      459,
+      'ETH-style PnL ~$4.59 matches Kalshi-style trade PnL (not $3.42)'
+    );
+  }
+
+  // Fees are recorded for the note; PnL stays gross (Kalshi trade PnL)
   {
     checkEq(
       bot._orderFeesCents({
@@ -3040,7 +3265,11 @@ async function testBotTradingFlow() {
       20,
       'V2 average_fee_paid × fills → cents'
     );
-    checkEq(bot._netPnlCents(42, 57, 10, 12, 15), (57 - 42) * 10 - 12 - 15, 'net PnL = gross − fees');
+    checkEq(
+      bot._netPnlCents(42, 57, 10, 12, 15),
+      (57 - 42) * 10,
+      'PnL is gross; fee args do not reduce it'
+    );
 
     const feeClient = {
       hasCredentials: true,
@@ -3102,7 +3331,7 @@ async function testBotTradingFlow() {
     checkEq(feeClosed, true, 'fee-aware TP closes');
     checkEq(feeTrade.exitFeesCents, 15, 'exit fees booked from order');
     checkEq(feeTrade.feesCents, 27, 'total fees = entry + exit');
-    checkEq(feeTrade.pnlCents, (57 - 42) * 10 - 27, 'PnL is net of fees');
+    checkEq(feeTrade.pnlCents, (57 - 42) * 10, 'PnL is gross; fees only in the note');
     check(
       feeBot.lastDecision.includes('fees $0.27'),
       'decision mentions fees without replacing P&L'
