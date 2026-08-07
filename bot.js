@@ -1769,93 +1769,149 @@ class TradingBot {
       const skipLiveSell = opts.skipLiveSell === true || reason === 'settled';
 
       if (isLive && !skipLiveSell) {
-        const sellPrice = Math.round(Number(opts.liveSellPriceCents != null ? opts.liveSellPriceCents : bookedExit));
-        if (!Number.isFinite(sellPrice) || sellPrice < 1 || sellPrice > 99) {
+        const baseSellPrice = Math.round(
+          Number(opts.liveSellPriceCents != null ? opts.liveSellPriceCents : bookedExit)
+        );
+        if (!Number.isFinite(baseSellPrice) || baseSellPrice < 1 || baseSellPrice > 99) {
           this.lastError =
-            `Live exit blocked for ${trade.symbol}: refusing sell at ${sellPrice}¢ (must be 1–99). Position left open.`;
+            `Live exit blocked for ${trade.symbol}: refusing sell at ${baseSellPrice}¢ (must be 1–99). Position left open.`;
           console.error('[bot]', this.lastError);
+          if (reason === 'stop_loss') {
+            trade.pendingForceExit = 'stop_loss';
+            this.lastDecision = 'Stop-loss sell failed — will retry next cycle.';
+            this._logActivity(this.lastDecision, {
+              kind: 'close',
+              symbol: trade.symbol,
+              side: trade.side,
+              tradeId: trade.id,
+            });
+            this._persist();
+          }
           return false;
         }
-        try {
-          const order = await this.client.createOrder({
-            ticker: trade.ticker,
-            side: trade.side,
-            action: 'sell',
-            count: trade.contracts,
-            priceCents: sellPrice,
-          });
-          const orderId = this._extractOrderId(order);
-          if (!orderId) throw new Error('sell response missing order_id');
-          const fill = await this._awaitOrderFill(orderId, {
-            minFill: trade.contracts,
-            attempts: 6,
-            delayMs: 350,
-            seedOrder: order,
-            heldSide: trade.side,
-            action: 'sell',
-          });
-          const filled = Math.max(0, Number(fill.filled) || 0);
-          if (fill.recovered) {
+
+        // Protective stop_loss: up to 3 increasingly aggressive sell attempts
+        // in one call so a transient miss does not leave inventory naked.
+        const maxAttempts = reason === 'stop_loss' ? 3 : 1;
+        let lastErr = null;
+        let soldOk = false;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          const sellPrice = Math.max(1, Math.min(99, baseSellPrice - attempt));
+          bookedExit = sellPrice;
+          if (attempt > 0) {
             console.warn(
-              `[bot] exit fill recovery on ${trade.ticker}: sell order ${orderId} filled ${filled} after timeout/cancel`
+              `[bot] stop-loss sell retry ${attempt + 1}/${maxAttempts} at ${sellPrice}¢ ` +
+                `on ${trade.ticker} (${trade.contracts} contracts)`
+            );
+            await this._sleep(400);
+          }
+          try {
+            const order = await this.client.createOrder({
+              ticker: trade.ticker,
+              side: trade.side,
+              action: 'sell',
+              count: trade.contracts,
+              priceCents: sellPrice,
+            });
+            const orderId = this._extractOrderId(order);
+            if (!orderId) throw new Error('sell response missing order_id');
+            const fill = await this._awaitOrderFill(orderId, {
+              minFill: trade.contracts,
+              attempts: 6,
+              delayMs: 350,
+              seedOrder: order,
+              heldSide: trade.side,
+              action: 'sell',
+            });
+            const filled = Math.max(0, Number(fill.filled) || 0);
+            if (fill.recovered) {
+              console.warn(
+                `[bot] exit fill recovery on ${trade.ticker}: sell order ${orderId} filled ${filled} after timeout/cancel`
+              );
+            }
+            if (filled > 0 && filled < trade.contracts) {
+              // Partial fill then cancel/timeout: ledger must shrink with exchange
+              // inventory. Book the sold slice; leave the remainder OPEN.
+              const avgPartial = this._orderAvgFillPriceCents(
+                fill.order,
+                trade.side,
+                'sell',
+                sellPrice
+              );
+              let exitPx = Number.isFinite(avgPartial) ? avgPartial : sellPrice;
+              exitPx = this._sanityCheckExitFillCents(
+                exitPx,
+                sellPrice,
+                trade.entryPriceCents,
+                reason
+              );
+              this._bookPartialLiveExit(
+                trade,
+                filled,
+                exitPx,
+                reason,
+                orderId,
+                this._orderFeesCents(fill.order)
+              );
+              lastErr = new Error(
+                `sell partially filled (got ${filled}/${filled + trade.contracts}, status ${
+                  fill.order && fill.order.status
+                }) — remainder left open`
+              );
+              // Remainder needs another protective exit — do not burn more
+              // same-call retries on a shrunk book; next cycle / pendingForceExit.
+              break;
+            }
+            if (!fill.ok || filled < trade.contracts) {
+              throw new Error(
+                `sell not fully filled (got ${filled}/${trade.contracts}, status ${
+                  fill.order && fill.order.status
+                })`
+              );
+            }
+            let avg = this._orderAvgFillPriceCents(fill.order, trade.side, 'sell', sellPrice);
+            if (Number.isFinite(avg)) {
+              avg = this._sanityCheckExitFillCents(
+                avg,
+                sellPrice,
+                trade.entryPriceCents,
+                reason
+              );
+              bookedExit = avg;
+            } else bookedExit = sellPrice;
+            trade.liveExitOrderId = orderId;
+            trade.exitFeesCents = this._orderFeesCents(fill.order);
+            soldOk = true;
+            break;
+          } catch (err) {
+            lastErr = err;
+            console.error(
+              `[bot] live exit attempt ${attempt + 1}/${maxAttempts} (${reason}) on ${trade.ticker}: ${err.message}`
             );
           }
-          if (filled > 0 && filled < trade.contracts) {
-            // Partial fill then cancel/timeout: ledger must shrink with exchange
-            // inventory. Book the sold slice; leave the remainder OPEN.
-            const avgPartial = this._orderAvgFillPriceCents(
-              fill.order,
-              trade.side,
-              'sell',
-              sellPrice
-            );
-            let exitPx = Number.isFinite(avgPartial) ? avgPartial : sellPrice;
-            exitPx = this._sanityCheckExitFillCents(
-              exitPx,
-              sellPrice,
-              trade.entryPriceCents,
-              reason
-            );
-            this._bookPartialLiveExit(
-              trade,
-              filled,
-              exitPx,
-              reason,
-              orderId,
-              this._orderFeesCents(fill.order)
-            );
-            throw new Error(
-              `sell partially filled (got ${filled}/${filled + trade.contracts}, status ${
-                fill.order && fill.order.status
-              }) — remainder left open`
-            );
-          }
-          if (!fill.ok || filled < trade.contracts) {
-            throw new Error(
-              `sell not fully filled (got ${filled}/${trade.contracts}, status ${
-                fill.order && fill.order.status
-              })`
-            );
-          }
-          let avg = this._orderAvgFillPriceCents(fill.order, trade.side, 'sell', sellPrice);
-          if (Number.isFinite(avg)) {
-            avg = this._sanityCheckExitFillCents(
-              avg,
-              sellPrice,
-              trade.entryPriceCents,
-              reason
-            );
-            bookedExit = avg;
-          } else bookedExit = sellPrice;
-          trade.liveExitOrderId = orderId;
-          trade.exitFeesCents = this._orderFeesCents(fill.order);
-        } catch (err) {
-          this.lastError = `Failed live exit (${reason}) on ${trade.ticker}: ${err.message}. Position left OPEN.`;
+        }
+
+        if (!soldOk) {
+          const msg = (lastErr && lastErr.message) || 'sell failed';
+          this.lastError = `Failed live exit (${reason}) on ${trade.ticker}: ${msg}. Position left OPEN.`;
           console.error('[bot]', this.lastError);
+          if (reason === 'stop_loss') {
+            trade.pendingForceExit = 'stop_loss';
+            this.lastDecision = 'Stop-loss sell failed — will retry next cycle.';
+            this._logActivity(this.lastDecision, {
+              kind: 'close',
+              symbol: trade.symbol,
+              side: trade.side,
+              tradeId: trade.id,
+            });
+            this._persist();
+          }
           return false;
         }
       }
 
+      delete trade.pendingForceExit;
       trade.status = 'closed';
       trade.closedAt = Date.now();
       trade.exitPriceCents = bookedExit;
@@ -2230,6 +2286,26 @@ class TradingBot {
       !holdThroughForConfidence &&
       heldSideBidCents != null &&
       heldSideBidCents >= trade.entryPriceCents;
+
+    // Failed protective exit: keep forcing sells every cycle until flat,
+    // even if the bid has bounced back above the stop level.
+    if (trade.pendingForceExit) {
+      const forceReason = String(trade.pendingForceExit);
+      if (
+        heldSideBidCents != null &&
+        Number.isFinite(heldSideBidCents) &&
+        heldSideBidCents >= 1 &&
+        heldSideBidCents <= 99
+      ) {
+        await this._closePosition(trade, heldSideBidCents, forceReason, {
+          liveSellPriceCents: heldSideBidCents,
+        });
+      } else {
+        this.lastDecision =
+          `Pending ${forceReason} exit on ${trade.symbol}: waiting for a tradable bid (1–99¢).`;
+      }
+      return;
+    }
 
     if (heldSideBidCents != null && stopLevel != null && heldSideBidCents <= stopLevel) {
       // Trigger on the live bid. Paper books the stop level (entry − drop).

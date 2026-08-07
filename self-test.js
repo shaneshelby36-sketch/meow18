@@ -189,6 +189,8 @@ function makeBot(client, config = {}) {
   bot.calibration = { buckets: {} };
   bot.isRunning = true;
   bot.lastError = null;
+  // Instant sleeps so stop-loss retry loops don't slow the suite.
+  bot._sleep = async () => {};
   return bot;
 }
 
@@ -2689,7 +2691,89 @@ async function testBotTradingFlow() {
   });
   await failBot._manageOpenTrade(failTrade, predictions(3100));
   checkEq(failTrade.status, 'open', 'failed live sell leaves position open');
-  check(liveOrders >= 1, 'failed live sell still attempted order');
+  checkEq(failTrade.pendingForceExit, 'stop_loss', 'failed stop sets pendingForceExit');
+  checkEq(liveOrders, 3, 'failed stop_loss retries sell up to 3 times');
+  check(
+    /will retry next cycle/i.test(String(failBot.lastDecision || '')),
+    'failed stop decision mentions retry next cycle'
+  );
+
+  // pendingForceExit: retry forced close even when bid bounced above stop
+  {
+    let forceOrders = 0;
+    const forcePrices = [];
+    const forceClient = {
+      hasCredentials: true,
+      async createOrder({ action, priceCents }) {
+        forceOrders += 1;
+        forcePrices.push(priceCents);
+        checkEq(action, 'sell', 'pendingForceExit issues sell');
+        // Fail first manage cycle (3 attempts), succeed on second cycle.
+        if (forceOrders <= 3) throw new Error('simulated force-exit miss');
+        return { order: { order_id: `force-${forceOrders}`, fill_count_fp: '10.00', yes_price: priceCents } };
+      },
+      async getOrder(orderId) {
+        return {
+          order: {
+            order_id: orderId,
+            status: 'executed',
+            fill_count_fp: '10.00',
+            yes_price: 55,
+          },
+        };
+      },
+      async cancelOrder() {
+        return {};
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+      async getMarket() {
+        // Bid above stop (entry 60, stopLoss 10 → stop at 50) so normal stop would NOT fire.
+        return {
+          status: 'active',
+          yes_bid: 55,
+          yes_ask: 57,
+          no_bid: 43,
+          no_ask: 45,
+          close_time: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+          floor_strike: 3000,
+        };
+      },
+      async getOpenMarkets() {
+        return [];
+      },
+    };
+    const forceBot = makeBot(forceClient, {
+      mode: 'live',
+      liveAuthorized: true,
+      stopLossCents: 10,
+      takeProfitCents: 50,
+    });
+    forceBot.config.mode = 'live';
+    forceBot.config.liveAuthorized = true;
+    const forceTrade = openTrade(forceBot, {
+      mode: 'live',
+      liveOrderId: 'entry-force',
+      side: 'yes',
+      entryPriceCents: 60,
+      windowCloseTime: Date.now() + 10 * 60 * 1000,
+      pendingForceExit: 'stop_loss',
+    });
+    await forceBot._manageOpenTrade(forceTrade, predictions(3100));
+    checkEq(forceTrade.status, 'open', 'pendingForceExit still open after failed retry cycle');
+    checkEq(forceTrade.pendingForceExit, 'stop_loss', 'pendingForceExit kept after failed retry');
+    checkEq(forceOrders, 3, 'pendingForceExit cycle retries 3 sells');
+    checkEq(forcePrices[0], 55, 'force exit attempt 1 at current bid');
+    checkEq(forcePrices[1], 54, 'force exit attempt 2 one cent more aggressive');
+    checkEq(forcePrices[2], 53, 'force exit attempt 3 two cents more aggressive');
+
+    await forceBot._manageOpenTrade(forceTrade, predictions(3100));
+    checkEq(forceTrade.status, 'closed', 'successful pendingForceExit closes trade');
+    checkEq(forceTrade.exitReason, 'stop_loss', 'pendingForceExit close reason stop_loss');
+    checkEq(forceTrade.pendingForceExit, undefined, 'successful close clears pendingForceExit');
+    check(forceOrders >= 4, 'second cycle placed the filling sell');
+  }
 
   // Live entry: partial fill still records inventory (does not orphan Kalshi fills)
   {
@@ -2995,6 +3079,7 @@ async function testBotTradingFlow() {
     checkEq(closedSlices.length, 1, 'partial sell books a closed slice');
     checkEq(closedSlices[0].contracts, 4, 'closed slice matches fill count');
     checkEq(closedSlices[0].exitPriceCents, 40, 'closed slice uses sell fill price');
+    checkEq(partialTrade.pendingForceExit, 'stop_loss', 'partial stop sets pendingForceExit');
     check(sellCalls >= 1, 'partial sell placed an order');
   }
 
