@@ -41,7 +41,14 @@ const {
   LOOKBACK_MIN,
 } = require('./backtest');
 const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
-const { KalshiClient, normalizeMarketPrices, priceInCents } = require('./kalshiClient');
+const {
+  KalshiClient,
+  normalizeMarketPrices,
+  priceInCents,
+  bookSideFromLegacy,
+  buildCreateOrderV2Body,
+  normalizeCreateOrderResponse,
+} = require('./kalshiClient');
 
 const ONLINE = process.env.ONLINE === '1' || process.env.ONLINE === 'true';
 
@@ -164,7 +171,7 @@ function makeBot(client, config = {}) {
     takeProfitCents: config.takeProfitCents ?? 15,
     minEntryCents: config.minEntryCents ?? 40,
     minMinutesToOpen: config.minMinutesToOpen ?? 3,
-    stopRecoveryCents: config.stopRecoveryCents ?? 8,
+    stopRecoveryCents: config.stopRecoveryCents ?? 6,
     stakeDollars: config.stakeDollars ?? 10,
     maxOpenPositions: config.maxOpenPositions ?? 1,
     skimMode: config.skimMode ?? 'off',
@@ -476,6 +483,50 @@ function testKalshiClient() {
   checkEq(client.hasCredentials, false, 'no credentials by default');
   client.setCredentials({ keyId: 'abc', privateKeyPem: 'not-a-real-key' });
   checkEq(client.hasCredentials, true, 'credentials flag after set');
+
+  // Create Order V2 mapping (legacy action/side → book bid/ask + dollar price)
+  checkEq(bookSideFromLegacy('yes', 'buy'), 'bid', 'buy YES → bid');
+  checkEq(bookSideFromLegacy('yes', 'sell'), 'ask', 'sell YES → ask');
+  checkEq(bookSideFromLegacy('no', 'buy'), 'ask', 'buy NO → ask');
+  checkEq(bookSideFromLegacy('no', 'sell'), 'bid', 'sell NO → bid');
+  const v2Body = buildCreateOrderV2Body({
+    ticker: 'KXBTC15M-TEST',
+    side: 'yes',
+    action: 'buy',
+    count: 10,
+    priceCents: 56,
+    clientOrderId: 'cid-test',
+  });
+  checkEq(v2Body.side, 'bid', 'V2 body book side');
+  checkEq(v2Body.count, '10.00', 'V2 body count_fp string');
+  checkEq(v2Body.price, '0.5600', 'V2 body dollar price');
+  checkEq(v2Body.time_in_force, 'good_till_canceled', 'V2 body TIF');
+  checkEq(v2Body.self_trade_prevention_type, 'taker_at_cross', 'V2 body STP');
+  checkEq(v2Body.client_order_id, 'cid-test', 'V2 body client_order_id');
+  let badPrice = false;
+  try {
+    buildCreateOrderV2Body({
+      ticker: 'T',
+      side: 'yes',
+      action: 'buy',
+      count: 1,
+      priceCents: 0,
+    });
+  } catch {
+    badPrice = true;
+  }
+  check(badPrice, 'V2 body refuses 0¢ (no silent clamp to 1)');
+  const flatNorm = normalizeCreateOrderResponse({ order_id: 'oid-flat', fill_count: '0.00' });
+  checkEq(flatNorm.order.order_id, 'oid-flat', 'normalize flat V2 create response');
+  const nestedNorm = normalizeCreateOrderResponse({ order: { order_id: 'oid-nested' } });
+  checkEq(nestedNorm.order.order_id, 'oid-nested', 'normalize nested legacy create response');
+
+  // fill_count_fp parsing (v1.2.17+) — never invent fills from status alone
+  const fillBot = makeBot(mockClient({}));
+  checkEq(fillBot._orderFillCount({ fill_count_fp: '3.00' }), 3, 'fill_count_fp string');
+  checkEq(fillBot._orderFillCount({ fill_count: 7 }), 7, 'fill_count integer');
+  checkEq(fillBot._orderFillCount({ status: 'executed' }), 0, 'status alone is not a fill');
+  checkEq(fillBot._orderFillCount({ fill_count_fp: '0.00', status: 'executed' }), 0, 'zero fill_count_fp stays zero');
 }
 
 // ───────────────────────────── backtest ─────────────────────────────
@@ -1181,7 +1232,7 @@ async function testBotTradingFlow() {
   check(closed && closed.pnlCents > 0, 'winning settle has positive PnL');
   check(closed.skimmedCents === 200 || bot.ledger.reserveCents >= 200, 'fixed skim applied');
 
-  // Insurance: 10/40/50; hysteresis arm $10 / floor $6
+  // Insurance: 20/40/40; hysteresis arm $10 / floor $6
   {
     const insSettings = { skimMode: 'insurance', insuranceCapDollars: 10, insuranceFloorDollars: 6 };
 
@@ -1194,8 +1245,8 @@ async function testBotTradingFlow() {
       rebuildInsurance: true,
     });
     checkEq(win.skimmedCents, 400, 'insurance win: 40% wallet');
-    checkEq(win.insuranceAddedCents, 100, 'insurance win: 10% to fund');
-    checkEq(win.insuranceCents, 100, 'insurance fund balance');
+    checkEq(win.insuranceAddedCents, 200, 'insurance win: 20% to fund');
+    checkEq(win.insuranceCents, 200, 'insurance fund balance');
     checkEq(win.insuranceReady, false, 'under arm: not ready after small win');
 
     const keepGoing = applyProfitBuckets({
@@ -1206,8 +1257,8 @@ async function testBotTradingFlow() {
       settings: insSettings,
       rebuildInsurance: true,
     });
-    checkEq(keepGoing.insuranceAddedCents, 100, 'keeps taking 10% past arm');
-    checkEq(keepGoing.insuranceCents, 1100, 'fund can grow above $10');
+    checkEq(keepGoing.insuranceAddedCents, 200, 'keeps taking 20% past arm');
+    checkEq(keepGoing.insuranceCents, 1200, 'fund can grow above $10');
     checkEq(keepGoing.insuranceReady, true, 'stays ready above arm');
 
     const absorbEarly = applyProfitBuckets({
@@ -1277,7 +1328,7 @@ async function testBotTradingFlow() {
       settings: insSettings,
       rebuildInsurance: true,
     });
-    checkEq(rearm.insuranceCents, 1000, 'win brings fund to arm');
+    checkEq(rearm.insuranceCents, 1100, 'win brings fund to arm');
     checkEq(rearm.insuranceReady, true, 're-arms at $10');
 
     const insBot = makeBot(mockClient(market), {
@@ -1288,7 +1339,7 @@ async function testBotTradingFlow() {
     });
     const tBoot = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
     await insBot._closePosition(tBoot, 60, 'take_profit');
-    checkEq(insBot.ledger.insuranceCents, 100, 'first win takes 10% from the start');
+    checkEq(insBot.ledger.insuranceCents, 200, 'first win takes 20% from the start');
     checkEq(insBot.ledger.reserveCents, 400, 'first win wallets 40%');
     for (let i = 0; i < 9; i += 1) {
       const t = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
@@ -1299,7 +1350,7 @@ async function testBotTradingFlow() {
     const before = insBot.ledger.insuranceCents;
     const tMore = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
     await insBot._closePosition(tMore, 60, 'take_profit');
-    checkEq(insBot.ledger.insuranceCents, before + 100, 'keeps building past arm');
+    checkEq(insBot.ledger.insuranceCents, before + 200, 'keeps building past arm');
 
     // Bot path: absorb while ready in the $6–$10 band, then disarm below floor
     // Loss of $2: 20 contracts × 10¢ drop (50→40)
@@ -1508,7 +1559,7 @@ async function testBotTradingFlow() {
   // Post-stop recovery: same-side blocked until bid bounces (not a timer)
   {
     checkEq(stopRecoveryCentsRequired({ stopRecoveryCents: 0 }), 0, 'recovery 0 disables gate');
-    checkEq(stopRecoveryCentsRequired({ stopRecoveryCents: 8 }), 8, 'recovery uses configured cents');
+    checkEq(stopRecoveryCentsRequired({ stopRecoveryCents: 6 }), 6, 'recovery uses configured cents');
     check(stopRecoveryCentsRequired({ stopLossCents: 23 }) >= 5, 'auto recovery floors at 5¢');
 
     const blocked = checkPostStopRecovery({

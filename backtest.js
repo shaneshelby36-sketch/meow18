@@ -36,7 +36,7 @@ function normalizeSettings(raw = {}) {
     stopLossCents: Number.isFinite(Number(raw.stopLossCents)) ? Number(raw.stopLossCents) : 23,
     takeProfitCents: Number.isFinite(Number(raw.takeProfitCents)) ? Number(raw.takeProfitCents) : 15,
     minEntryCents: Number.isFinite(Number(raw.minEntryCents)) ? Number(raw.minEntryCents) : 40,
-    stopRecoveryCents: Number.isFinite(Number(raw.stopRecoveryCents)) ? Number(raw.stopRecoveryCents) : 8,
+    stopRecoveryCents: Number.isFinite(Number(raw.stopRecoveryCents)) ? Number(raw.stopRecoveryCents) : 6,
     stopRecoveryMaxMinutes: Number.isFinite(Number(raw.stopRecoveryMaxMinutes))
       ? Number(raw.stopRecoveryMaxMinutes)
       : 15,

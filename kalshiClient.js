@@ -34,6 +34,58 @@ function normalizeMarketPrices(market) {
 }
 
 /**
+ * Map legacy (action, side) to V2 book_side.
+ * bid ≡ yes exposure, ask ≡ no exposure (Kalshi single-book convention).
+ */
+function bookSideFromLegacy(side, action) {
+  const s = String(side || '').toLowerCase();
+  const a = String(action || '').toLowerCase();
+  if ((a === 'buy' && s === 'yes') || (a === 'sell' && s === 'no')) return 'bid';
+  if ((a === 'buy' && s === 'no') || (a === 'sell' && s === 'yes')) return 'ask';
+  throw new Error(`Invalid Kalshi order direction: action=${action} side=${side}`);
+}
+
+/**
+ * Build Create Order V2 body (POST /portfolio/events/orders).
+ * priceCents is the limit on the traded outcome (1–99), same as legacy yes_price/no_price.
+ */
+function buildCreateOrderV2Body({ ticker, side, action, count, priceCents, clientOrderId }) {
+  const rounded = Math.round(Number(priceCents));
+  if (!Number.isFinite(rounded) || rounded < 1 || rounded > 99) {
+    throw new Error(`Invalid Kalshi limit price: ${priceCents}`);
+  }
+  const contracts = Math.floor(Number(count));
+  if (!Number.isFinite(contracts) || contracts < 1) {
+    throw new Error(`Invalid Kalshi order count: ${count}`);
+  }
+  return {
+    ticker,
+    side: bookSideFromLegacy(side, action),
+    count: `${contracts}.00`,
+    price: (rounded / 100).toFixed(4),
+    time_in_force: 'good_till_canceled',
+    self_trade_prevention_type: 'taker_at_cross',
+    client_order_id: clientOrderId || crypto.randomUUID(),
+  };
+}
+
+/** Accept V2 flat `{ order_id }` or legacy `{ order: { order_id } }`. */
+function normalizeCreateOrderResponse(data) {
+  const orderId =
+    (data && data.order_id) ||
+    (data && data.order && data.order.order_id) ||
+    null;
+  if (!orderId) {
+    throw new Error('create order response missing order_id');
+  }
+  const nested =
+    data && data.order && typeof data.order === 'object'
+      ? { ...data.order, order_id: orderId }
+      : { ...(data || {}), order_id: orderId };
+  return { ...(data || {}), order: nested };
+}
+
+/**
  * Thin REST client for Kalshi's trading API.
  *
  * IMPORTANT: Kalshi's API surface (base URL, field names, endpoint paths)
@@ -151,36 +203,41 @@ class KalshiClient {
   }
 
   async getOrder(orderId) {
+    // Get Order remains on /portfolio/orders/{id} (full Order object with fill_count_fp).
     return this._request('GET', `/portfolio/orders/${orderId}`);
   }
 
   /**
    * side: 'yes' | 'no'
    * action: 'buy' | 'sell'
-   * priceCents: limit price in cents (1-99)
+   * priceCents: limit price in cents (1-99) on the traded outcome
+   *
+   * Uses Create Order V2 (POST /portfolio/events/orders). Returns a shape
+   * compatible with legacy callers: `{ order: { order_id, ... } }`.
    */
   async createOrder({ ticker, side, action, count, priceCents, clientOrderId }) {
-    const priceField = side === 'yes' ? 'yes_price' : 'no_price';
-    const capped = Math.max(1, Math.min(99, Math.round(Number(priceCents))));
-    if (!Number.isFinite(capped) || capped < 1 || capped > 99) {
-      throw new Error(`Invalid Kalshi limit price: ${priceCents}`);
-    }
-    return this._request('POST', '/portfolio/orders', {
-      body: {
-        ticker,
-        side,
-        action,
-        count,
-        type: 'limit',
-        [priceField]: capped,
-        client_order_id: clientOrderId || crypto.randomUUID(),
-      },
+    const body = buildCreateOrderV2Body({
+      ticker,
+      side,
+      action,
+      count,
+      priceCents,
+      clientOrderId,
     });
+    const data = await this._request('POST', '/portfolio/events/orders', { body });
+    return normalizeCreateOrderResponse(data);
   }
 
   async cancelOrder(orderId) {
-    return this._request('DELETE', `/portfolio/orders/${orderId}`);
+    return this._request('DELETE', `/portfolio/events/orders/${orderId}`);
   }
 }
 
-module.exports = { KalshiClient, normalizeMarketPrices, priceInCents };
+module.exports = {
+  KalshiClient,
+  normalizeMarketPrices,
+  priceInCents,
+  bookSideFromLegacy,
+  buildCreateOrderV2Body,
+  normalizeCreateOrderResponse,
+};

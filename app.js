@@ -1184,7 +1184,7 @@ function buildCapitalLedgerHtml(capital, opts = {}) {
       <div class="capital-divider"></div>
       <div class="capital-row capital-total"><span>Total Equity</span><span>${formatMoneyCents(totalEquity)}</span></div>
       <div class="capital-row capital-pnl"><span>Net P&amp;L</span><span class="${pnlClass}">${formatMoneyCents(netPnl, { signed: true })}</span></div>
-      <p class="capital-formula">Insurance: every win is 10% Insurance / 40% Wallet / 50% Available. Arms at ${formatMoneyCents(insuranceCap)}; stays usable down to ${formatMoneyCents(insuranceFloor)}. Below the floor, Available takes losses until re-armed. Fund keeps growing with no hard cap. Manual Add seeds without touching Available.</p>
+      <p class="capital-formula">Insurance: every win is 20% Insurance / 40% Wallet / 40% Available. Arms at ${formatMoneyCents(insuranceCap)}; stays usable down to ${formatMoneyCents(insuranceFloor)}. Below the floor, Available takes losses until re-armed. Fund keeps growing with no hard cap. Manual Add seeds without touching Available.</p>
     </div>`;
 }
 
@@ -1282,7 +1282,7 @@ function updateSkimSliderDisplay() {
     display.textContent = `$${Math.round(input.value)} arm`;
     if (hint) {
       hint.textContent =
-        'Each win: 10% → Insurance, 40% → Wallet, 50% → Available. Arms at this amount; stays usable down to the $6 floor. Below floor, Available takes losses until re-armed. Fund keeps growing with no hard cap.';
+        'Each win: 20% → Insurance, 40% → Wallet, 40% → Available. Arms at this amount; stays usable down to the $6 floor. Below floor, Available takes losses until re-armed. Fund keeps growing with no hard cap.';
     }
     if (label) label.querySelector('span.field-hint') || hint;
   } else if (mode === 'percent') {
@@ -1306,7 +1306,7 @@ function formatSkimLabel(config) {
   if (config.skimMode === 'insurance') {
     const cap = config.insuranceCapDollars != null ? config.insuranceCapDollars : 10;
     const floor = config.insuranceFloorDollars != null ? config.insuranceFloorDollars : 6;
-    return `insurance 10/40/50 · arm $${cap} / floor $${floor}`;
+    return `insurance 20/40/40 · arm $${cap} / floor $${floor}`;
   }
   if (config.skimMode === 'percent') return `skim ${config.skimPercent}% of each win → Wallet`;
   return `skim $${Number(config.skimFixedDollars || 0).toFixed(0)} per win → Wallet`;
@@ -1386,7 +1386,7 @@ async function loadBotConfigIntoForm() {
     document.getElementById('bot-confidence').value = c.minConfidence;
     document.getElementById('bot-stoploss').value = c.stopLossCents;
     const stopRecEl = document.getElementById('bot-stoprecovery');
-    if (stopRecEl) stopRecEl.value = c.stopRecoveryCents != null ? c.stopRecoveryCents : 8;
+    if (stopRecEl) stopRecEl.value = c.stopRecoveryCents != null ? c.stopRecoveryCents : 6;
     document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 15;
     document.getElementById('bot-minentries').value = c.minEntryCents != null ? c.minEntryCents : 25;
     document.getElementById('bot-stake').value = c.stakeDollars;
@@ -1543,7 +1543,7 @@ function renderBacktestResults(data, dayLabel) {
     s.skimMode === 'off'
       ? 'off'
       : s.skimMode === 'insurance'
-        ? `insurance 10/40/50 · arm $${s.insuranceCapDollars != null ? s.insuranceCapDollars : 10} / floor $${s.insuranceFloorDollars != null ? s.insuranceFloorDollars : 6}`
+        ? `insurance 20/40/40 · arm $${s.insuranceCapDollars != null ? s.insuranceCapDollars : 10} / floor $${s.insuranceFloorDollars != null ? s.insuranceFloorDollars : 6}`
         : s.skimMode === 'percent'
         ? `${s.skimPercent}% of profit`
         : `$${Number(s.skimFixedDollars || 0).toFixed(0)} per win`;

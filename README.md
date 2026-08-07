@@ -49,6 +49,8 @@ Disk use: live `trade-log.json` is capped at 5000 events; the 12h ledger/tracker
 You can also set starting defaults via env (the dashboard can still override them once `DATA_DIR` persists):
 
 - `KALSHI_SYMBOL`, `KALSHI_EDGE_THRESHOLD_PCT`, `KALSHI_MIN_CONFIDENCE`, etc. (see `bot.js` / server boot)
+- Insurance mode (default skim): **20% Insurance / 40% Wallet / 40% Available** on wins; arm **$10** / floor **$6** hysteresis (`KALSHI_INSURANCE_CAP_DOLLARS`, `KALSHI_INSURANCE_FLOOR_DOLLARS`)
+- Post-stop bounce default: **+6¢** (`KALSHI_STOP_RECOVERY_CENTS`)
 
 ## Dashboard windows
 

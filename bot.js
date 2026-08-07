@@ -19,7 +19,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 9;
+const SETTINGS_DEFAULTS_VERSION = 10;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -429,8 +429,8 @@ function checkPostStopPeerCascade({
 /**
  * Profit split for skimMode === 'insurance':
  *   40% → Personal Wallet (locked paycheck)
- *   10% → Insurance Fund (builds from the start; no hard cap — keeps growing)
- *   50% → Active Bankroll (Available Cash)
+ *   20% → Insurance Fund (builds from the start; no hard cap — keeps growing)
+ *   40% → Active Bankroll (Available Cash)
  * Losses: sticky hysteresis — arm at insuranceCapDollars ($10), stay usable
  *         down to insuranceFloorDollars ($6). Absorb only while insuranceReady;
  *         below floor, disarm until balance ≥ arm again.
@@ -493,9 +493,9 @@ function applyProfitBuckets({
   }
 
   const wallet = Math.round(pnl * 0.4);
-  // Always take 10% into insurance when rebuilding (default: every win).
+  // Always take 20% into insurance when rebuilding (default: every win).
   // Arm threshold does not clip or stop contributions.
-  const insuranceAdd = rebuildInsurance ? Math.round(pnl * 0.1) : 0;
+  const insuranceAdd = rebuildInsurance ? Math.round(pnl * 0.2) : 0;
   nextInsurance += insuranceAdd;
 
   out.skimmedCents = wallet;
@@ -710,7 +710,7 @@ class TradingBot {
       minMinutesToOpen: 3, // don't open when fewer than this many minutes remain in the window
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
-      stopRecoveryCents: 8,
+      stopRecoveryCents: 6,
       // Clear the whole post-stop recovery gate this many minutes after the stop
       // (even if the bid never bounced). 0 = never expire by age. Default 15.
       stopRecoveryMaxMinutes: 15,
@@ -726,7 +726,7 @@ class TradingBot {
       skimMode: 'insurance', // 'insurance' | 'percent' | 'fixed' | 'off'
       skimPercent: 50, // used when skimMode === 'percent'
       skimFixedDollars: 5, // used when skimMode === 'fixed'
-      // Insurance fund (skimMode === 'insurance'): 10% fund / 40% wallet / 50% bankroll
+      // Insurance fund (skimMode === 'insurance'): 20% fund / 40% wallet / 40% bankroll
       // Hysteresis: arm at insuranceCapDollars, stay usable down to insuranceFloorDollars.
       insuranceCapDollars: INSURANCE_ARM_DEFAULT,
       insuranceFloorDollars: INSURANCE_FLOOR_DEFAULT,
@@ -1149,7 +1149,7 @@ class TradingBot {
   }
 
   /**
-   * Wins (insurance mode): 40% Wallet + 10% Insurance + 50% bankroll on every
+   * Wins (insurance mode): 40% Wallet + 20% Insurance + 40% bankroll on every
    * win from the start. Arm at $10 (sticky ready); stay usable down to $6 floor.
    * Until armed, losses hit Available; while ready, Insurance absorbs first.
    */
@@ -1411,7 +1411,8 @@ class TradingBot {
             count: trade.contracts,
             priceCents: sellPrice,
           });
-          const orderId = order && order.order && order.order.order_id;
+          const orderId =
+            (order && order.order && order.order.order_id) || (order && order.order_id) || null;
           if (!orderId) throw new Error('sell response missing order_id');
           const fill = await this._awaitOrderFill(orderId, {
             minFill: trade.contracts,
@@ -1996,7 +1997,8 @@ class TradingBot {
           count: trade.contracts,
           priceCents,
         });
-        const orderId = order && order.order && order.order.order_id;
+        const orderId =
+          (order && order.order && order.order.order_id) || (order && order.order_id) || null;
         if (!orderId) {
           this.lastError = `Live entry on ${symbol} returned no order_id — not recording trade.`;
           console.error('[bot]', this.lastError);
