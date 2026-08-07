@@ -1326,6 +1326,46 @@ class TradingBot {
   }
 
   /**
+   * Kalshi fees on an order, in cents (taker + maker, or V2 average_fee_paid × fills).
+   */
+  _orderFeesCents(order) {
+    if (!order || typeof order !== 'object') return 0;
+    const taker = Number.parseFloat(
+      order.taker_fees_dollars ?? order.takerFeesDollars ?? NaN
+    );
+    const maker = Number.parseFloat(
+      order.maker_fees_dollars ?? order.makerFeesDollars ?? NaN
+    );
+    let fees = 0;
+    if (Number.isFinite(taker) && taker > 0) fees += taker;
+    if (Number.isFinite(maker) && maker > 0) fees += maker;
+    if (fees > 0) return Math.max(0, Math.round(fees * 100));
+
+    const avgFee = Number.parseFloat(
+      order.average_fee_paid ?? order.averageFeePaid ?? NaN
+    );
+    const filled = this._orderFillCount(order);
+    if (Number.isFinite(avgFee) && avgFee > 0 && filled > 0) {
+      return Math.max(0, Math.round(avgFee * filled * 100));
+    }
+    return 0;
+  }
+
+  /**
+   * Live PnL after Kalshi fees: (exit − entry) × contracts − entryFees − exitFees.
+   * Matches Kalshi balance move more closely than gross price PnL.
+   */
+  _netPnlCents(entryCents, exitCents, contracts, entryFeesCents = 0, exitFeesCents = 0) {
+    const n = Math.max(0, Math.floor(Number(contracts) || 0));
+    const entry = Number(entryCents) || 0;
+    const exit = Number(exitCents) || 0;
+    const gross = (exit - entry) * n;
+    const fees = Math.max(0, Math.round(Number(entryFeesCents) || 0)) +
+      Math.max(0, Math.round(Number(exitFeesCents) || 0));
+    return gross - fees;
+  }
+
+  /**
    * Average fill price for the held outcome (YES/NO cents).
    * Prefer taker/maker fill cost (actual cash). For average_fill_price, Kalshi
    * Create Order V2 quotes from the YES side — do NOT blindly complement by
@@ -1590,12 +1630,18 @@ class TradingBot {
    * After a live sell partially fills, book the sold contracts as a closed
    * ledger row and shrink the still-open trade so inventory matches Kalshi.
    */
-  _bookPartialLiveExit(trade, soldContracts, exitPriceCents, reason, orderId) {
+  _bookPartialLiveExit(trade, soldContracts, exitPriceCents, reason, orderId, exitFeesCents = 0) {
     const sold = Math.max(0, Math.min(Math.floor(Number(soldContracts) || 0), trade.contracts));
     if (sold < 1) return;
     const remaining = trade.contracts - sold;
     const entry = Number(trade.entryPriceCents) || 0;
     const exitPx = Math.max(1, Math.min(99, Math.round(Number(exitPriceCents))));
+    const entryFeesTotal = Math.max(0, Math.round(Number(trade.entryFeesCents) || 0));
+    // Pro-rate entry fees across the sold slice when shrinking the open trade.
+    const entryFeesSlice =
+      trade.contracts > 0 ? Math.round((entryFeesTotal * sold) / (sold + remaining || sold)) : 0;
+    const exitFees = Math.max(0, Math.round(Number(exitFeesCents) || 0));
+    const feesCents = entryFeesSlice + exitFees;
     const closedSlice = {
       id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-partial-${sold}`,
       mode: trade.mode,
@@ -1614,7 +1660,10 @@ class TradingBot {
       closedAt: Date.now(),
       exitPriceCents: exitPx,
       exitReason: reason,
-      pnlCents: (exitPx - entry) * sold,
+      entryFeesCents: entryFeesSlice,
+      exitFeesCents: exitFees,
+      feesCents,
+      pnlCents: this._netPnlCents(entry, exitPx, sold, entryFeesSlice, exitFees),
       liveOrderId: trade.liveOrderId || null,
       liveExitOrderId: orderId || null,
       partialExitOf: trade.id,
@@ -1625,10 +1674,13 @@ class TradingBot {
 
     trade.contracts = remaining;
     trade.stakeDollars = +((remaining * entry) / 100).toFixed(2);
+    trade.entryFeesCents = Math.max(0, entryFeesTotal - entryFeesSlice);
 
+    const feeNote =
+      feesCents > 0 ? ` · fees $${(feesCents / 100).toFixed(2)}` : '';
     this.lastDecision =
       `Partial exit ${trade.symbol} ${String(trade.side).toUpperCase()}: sold ${sold} @ ${exitPx}¢ ` +
-      `(P&L $${(closedSlice.pnlCents / 100).toFixed(2)}); ${remaining} still open.`;
+      `(P&L $${(closedSlice.pnlCents / 100).toFixed(2)}${feeNote}); ${remaining} still open.`;
     this._logActivity(this.lastDecision, {
       kind: 'close',
       symbol: trade.symbol,
@@ -1655,6 +1707,9 @@ class TradingBot {
       status: 'closed',
       exitReason: closedSlice.exitReason,
       pnlCents: closedSlice.pnlCents,
+      feesCents: closedSlice.feesCents || 0,
+      entryFeesCents: closedSlice.entryFeesCents || 0,
+      exitFeesCents: closedSlice.exitFeesCents || 0,
       skimmedCents: closedSlice.skimmedCents || 0,
       insuranceAddedCents: closedSlice.insuranceAddedCents || 0,
       insuranceDrawnCents: closedSlice.insuranceDrawnCents || 0,
@@ -1669,6 +1724,7 @@ class TradingBot {
       contracts: trade.contracts,
       stakeDollars: trade.stakeDollars,
       entryPriceCents: trade.entryPriceCents,
+      entryFeesCents: trade.entryFeesCents || 0,
       floorStrike: trade.floorStrike,
       openedAt: trade.openedAt,
       windowCloseTime: trade.windowCloseTime,
@@ -1744,7 +1800,14 @@ class TradingBot {
               trade.entryPriceCents,
               reason
             );
-            this._bookPartialLiveExit(trade, filled, exitPx, reason, orderId);
+            this._bookPartialLiveExit(
+              trade,
+              filled,
+              exitPx,
+              reason,
+              orderId,
+              this._orderFeesCents(fill.order)
+            );
             throw new Error(
               `sell partially filled (got ${filled}/${filled + trade.contracts}, status ${
                 fill.order && fill.order.status
@@ -1769,6 +1832,7 @@ class TradingBot {
             bookedExit = avg;
           } else bookedExit = sellPrice;
           trade.liveExitOrderId = orderId;
+          trade.exitFeesCents = this._orderFeesCents(fill.order);
         } catch (err) {
           this.lastError = `Failed live exit (${reason}) on ${trade.ticker}: ${err.message}. Position left OPEN.`;
           console.error('[bot]', this.lastError);
@@ -1780,14 +1844,23 @@ class TradingBot {
       trade.closedAt = Date.now();
       trade.exitPriceCents = bookedExit;
       trade.exitReason = reason;
-      const entryCost = trade.entryPriceCents * trade.contracts;
-      const exitProceeds = bookedExit * trade.contracts;
-      trade.pnlCents = exitProceeds - entryCost;
+      const entryFees = Math.max(0, Math.round(Number(trade.entryFeesCents) || 0));
+      const exitFees = Math.max(0, Math.round(Number(trade.exitFeesCents) || 0));
+      trade.feesCents = entryFees + exitFees;
+      trade.pnlCents = this._netPnlCents(
+        trade.entryPriceCents,
+        bookedExit,
+        trade.contracts,
+        entryFees,
+        exitFees
+      );
 
       this._applyReserveFlow(trade);
       this._recordCalibration(trade);
 
-      let decision = `Closed ${trade.symbol} ${String(trade.side).toUpperCase()} via ${reason} at ${bookedExit}¢ (P&L $${(trade.pnlCents / 100).toFixed(2)}).`;
+      const feeNote =
+        trade.feesCents > 0 ? ` · fees $${(trade.feesCents / 100).toFixed(2)}` : '';
+      let decision = `Closed ${trade.symbol} ${String(trade.side).toUpperCase()} via ${reason} at ${bookedExit}¢ (P&L $${(trade.pnlCents / 100).toFixed(2)}${feeNote}).`;
       if (trade.insuranceDrawnCents > 0) {
         decision += ` Insurance absorbed $${(trade.insuranceDrawnCents / 100).toFixed(2)}.`;
       }
@@ -1830,6 +1903,9 @@ class TradingBot {
         status: 'closed',
         exitReason: trade.exitReason,
         pnlCents: trade.pnlCents,
+        feesCents: trade.feesCents || 0,
+        entryFeesCents: trade.entryFeesCents || 0,
+        exitFeesCents: trade.exitFeesCents || 0,
         skimmedCents: trade.skimmedCents || 0,
         insuranceAddedCents: trade.insuranceAddedCents || 0,
         insuranceDrawnCents: trade.insuranceDrawnCents || 0,
@@ -2371,11 +2447,12 @@ class TradingBot {
           trade.contracts = filled;
           trade.stakeDollars = +((trade.contracts * priceCents) / 100).toFixed(2);
         }
-        const avg = this._orderAvgFillPriceCents(fill.order, side, 'buy');
+        const avg = this._orderAvgFillPriceCents(fill.order, side, 'buy', priceCents);
         if (Number.isFinite(avg)) {
           trade.entryPriceCents = avg;
           trade.stakeDollars = +((trade.contracts * avg) / 100).toFixed(2);
         }
+        trade.entryFeesCents = this._orderFeesCents(fill.order);
         trade.liveOrderId = orderId;
       } catch (err) {
         this.lastError = `Failed to place live entry order: ${err.message}`;
@@ -2403,6 +2480,7 @@ class TradingBot {
       contracts: trade.contracts,
       stakeDollars: trade.stakeDollars,
       entryPriceCents: trade.entryPriceCents,
+      entryFeesCents: trade.entryFeesCents || 0,
       floorStrike: trade.floorStrike,
       openedAt: trade.openedAt,
       windowCloseTime: trade.windowCloseTime,

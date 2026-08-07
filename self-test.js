@@ -3021,6 +3021,94 @@ async function testBotTradingFlow() {
     check(tpTrade.pnlCents > 0, 'TP is a win');
   }
 
+  // Live PnL subtracts Kalshi fees (net, not gross)
+  {
+    checkEq(
+      bot._orderFeesCents({
+        taker_fees_dollars: '0.12',
+        maker_fees_dollars: '0.03',
+        fill_count: '10',
+      }),
+      15,
+      'taker+maker fees → cents'
+    );
+    checkEq(
+      bot._orderFeesCents({
+        average_fee_paid: '0.0200',
+        fill_count: '10.00',
+      }),
+      20,
+      'V2 average_fee_paid × fills → cents'
+    );
+    checkEq(bot._netPnlCents(42, 57, 10, 12, 15), (57 - 42) * 10 - 12 - 15, 'net PnL = gross − fees');
+
+    const feeClient = {
+      hasCredentials: true,
+      async getMarket() {
+        return {
+          status: 'active',
+          yes_bid: 57,
+          yes_ask: 59,
+          close_time: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+          floor_strike: 3000,
+        };
+      },
+      async getOpenMarkets() {
+        return [];
+      },
+      async createOrder() {
+        return {
+          order: {
+            order_id: 'oid-fee-exit',
+            fill_count: '10.00',
+            average_fill_price: '0.5700',
+            taker_fees_dollars: '0.15',
+          },
+        };
+      },
+      async getOrder(orderId) {
+        return {
+          order: {
+            order_id: orderId,
+            status: 'executed',
+            fill_count_fp: '10.00',
+            average_fill_price: '0.5700',
+            taker_fees_dollars: '0.15',
+          },
+        };
+      },
+      async cancelOrder() {
+        return {};
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+    };
+    const feeBot = makeBot(feeClient, { mode: 'live', liveAuthorized: true, skimMode: 'off' });
+    feeBot.config.mode = 'live';
+    feeBot.config.liveAuthorized = true;
+    const feeTrade = openTrade(feeBot, {
+      mode: 'live',
+      liveOrderId: 'entry-fee',
+      side: 'yes',
+      entryPriceCents: 42,
+      contracts: 10,
+      entryFeesCents: 12,
+      windowCloseTime: Date.now() + 10 * 60 * 1000,
+    });
+    const feeClosed = await feeBot._closePosition(feeTrade, 57, 'take_profit', {
+      liveSellPriceCents: 57,
+    });
+    checkEq(feeClosed, true, 'fee-aware TP closes');
+    checkEq(feeTrade.exitFeesCents, 15, 'exit fees booked from order');
+    checkEq(feeTrade.feesCents, 27, 'total fees = entry + exit');
+    checkEq(feeTrade.pnlCents, (57 - 42) * 10 - 27, 'PnL is net of fees');
+    check(
+      feeBot.lastDecision.includes('fees $0.27'),
+      'decision mentions fees without replacing P&L'
+    );
+  }
+
   // Live exit refuses 0/100 sell prices
   {
     const refuseBot = makeBot(

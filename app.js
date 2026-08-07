@@ -973,6 +973,10 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
         Number.isFinite(t.skimmedCents) && t.skimmedCents > 0
           ? ` · skim $${(t.skimmedCents / 100).toFixed(2)}`
           : '';
+      const fees =
+        Number.isFinite(t.feesCents) && t.feesCents > 0
+          ? ` · fees $${(t.feesCents / 100).toFixed(2)}`
+          : '';
       const conf = Number.isFinite(t.engineConfidence) ? ` · conf ${t.engineConfidence}%` : '';
       return `
         <div class="bot-log-row kind-${t.status === 'open' ? 'open' : 'close'}">
@@ -980,7 +984,7 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
           <span class="bot-log-msg">
             <strong>${t.symbol || '?'} ${side}</strong>
             ${status} · ${entry}${t.status === 'closed' ? ` → ${exit}` : ''}
-            ${Number.isFinite(t.stakeDollars) ? ` · $${Number(t.stakeDollars).toFixed(2)}` : ''}${conf}${skim}
+            ${Number.isFinite(t.stakeDollars) ? ` · $${Number(t.stakeDollars).toFixed(2)}` : ''}${conf}${fees}${skim}
             <span class="bot-log-sub">opened ${formatTradeTime(t.openedAt)}${t.mode ? ` · ${t.mode}` : ''}</span>
           </span>
           <span class="bot-log-pnl ${pnlClass}">${pnl != null ? formatMoneyCents(pnl, { signed: true }) : t.status === 'open' ? 'open' : ''}</span>

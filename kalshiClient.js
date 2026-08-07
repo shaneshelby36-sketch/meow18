@@ -110,6 +110,15 @@ function normalizeCreateOrderResponse(data) {
   if (nested.average_fill_price == null && data && data.average_fill_price != null) {
     nested.average_fill_price = data.average_fill_price;
   }
+  if (nested.average_fee_paid == null && data && data.average_fee_paid != null) {
+    nested.average_fee_paid = data.average_fee_paid;
+  }
+  if (nested.taker_fees_dollars == null && data && data.taker_fees_dollars != null) {
+    nested.taker_fees_dollars = data.taker_fees_dollars;
+  }
+  if (nested.maker_fees_dollars == null && data && data.maker_fees_dollars != null) {
+    nested.maker_fees_dollars = data.maker_fees_dollars;
+  }
   return { ...(data || {}), order: nested, order_id: orderId };
 }
 
