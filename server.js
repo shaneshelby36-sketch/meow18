@@ -13,7 +13,7 @@ const { buildPredictions } = require('./prediction');
 const { PredictionTracker } = require('./tracker');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
 const { KalshiClient } = require('./kalshiClient');
-const { TradingBot, SERIES_BY_SYMBOL } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, tradeableKalshiSymbols } = require('./bot');
 const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
 const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir, ARCHIVE_RETENTION_DAYS } = require('./paths');
 const APP_VERSION = require('./package.json').version;
@@ -519,8 +519,8 @@ app.get("/", (req, res) => {
   });
 
   const SYMBOL_TO_PRODUCT = { BTC: 'BTC-USD', XRP: 'XRP-USD', ETH: 'ETH-USD', SOL: 'SOL-USD', DOGE: 'DOGE-USD', BNB: 'BNB-USD', ZEC: 'ZEC-USD' };
-  // Same set the live AUTO bot can trade on Kalshi (ZEC excluded — no 15m market).
-  const AUTO_BACKTEST_SYMBOLS = Object.keys(SERIES_BY_SYMBOL);
+  // Same set the live AUTO bot can trade on Kalshi (ZEC: no 15m market; DOGE opted out).
+  const AUTO_BACKTEST_SYMBOLS = tradeableKalshiSymbols();
   const MAX_BACKTEST_HOURS = 168; // 7 full days of continuous minute data
 
   function parseBacktestSettings(source = {}) {

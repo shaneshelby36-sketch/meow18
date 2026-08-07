@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -3664,6 +3664,11 @@ async function testBotTradingFlow() {
   check(Array.isArray(status.openTrades), 'status openTrades array');
   check(Object.keys(SERIES_BY_SYMBOL).includes('ETH'), 'ETH series mapped');
   check(Object.keys(SERIES_BY_SYMBOL).includes('BTC'), 'BTC series mapped');
+  check(Object.keys(SERIES_BY_SYMBOL).includes('DOGE'), 'DOGE series kept for exit management');
+  check(!isKalshiTradeEnabled('DOGE'), 'DOGE opted out of new trades');
+  check(isKalshiTradeEnabled('BTC'), 'BTC still tradeable');
+  check(!tradeableKalshiSymbols().includes('DOGE'), 'AUTO tradeable set excludes DOGE');
+  check(tradeableKalshiSymbols().includes('ETH'), 'AUTO tradeable set includes ETH');
 }
 
 // ───────────────────────────── UI countdown logic (mirrored) ─────────────────────────────

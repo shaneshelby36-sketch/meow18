@@ -68,6 +68,18 @@ const SERIES_BY_SYMBOL = {
   BNB: 'KXBNB15M',
 };
 
+// Opted out of new entries (AUTO + single-symbol). Series stay mapped so any
+// leftover open position can still be managed/exited. Dashboard still tracks price.
+const DISABLED_TRADE_SYMBOLS = new Set(['DOGE']);
+
+function isKalshiTradeEnabled(symbol) {
+  return Boolean(SERIES_BY_SYMBOL[symbol]) && !DISABLED_TRADE_SYMBOLS.has(symbol);
+}
+
+function tradeableKalshiSymbols() {
+  return Object.keys(SERIES_BY_SYMBOL).filter((s) => isKalshiTradeEnabled(s));
+}
+
 // Settings that can be safely edited at runtime (via the API/dashboard)
 // without a restart. Deliberately excludes `mode` — switching paper/live
 // stays an env-var + restart decision, so a UI can never silently flip on
@@ -607,7 +619,7 @@ function applyProfitBuckets({
 }
 
 const EDITABLE_STRING_FIELDS = {
-  symbol: (v) => (v === 'AUTO' || SERIES_BY_SYMBOL[v] ? v : null),
+  symbol: (v) => (v === 'AUTO' || isKalshiTradeEnabled(v) ? v : null),
   skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
 };
@@ -842,6 +854,12 @@ class TradingBot {
       ...loadConfigOverrides(), // saved runtime edits win over env/defaults, except `mode`/`liveAuthorized`
     };
     normalizeInsuranceThresholds(this.config);
+    if (this.config.symbol !== 'AUTO' && !isKalshiTradeEnabled(this.config.symbol)) {
+      console.warn(
+        `[bot] ${this.config.symbol} is opted out of trading — switching symbol to AUTO`
+      );
+      this.config.symbol = 'AUTO';
+    }
     // `liveAuthorized` is a fixed ceiling for this process's lifetime — it
     // must only ever come from the server's own startup env-var gate.
     this.config.liveAuthorized = config.liveAuthorized === true;
@@ -2890,6 +2908,11 @@ class TradingBot {
    * worth acting on (or the market/prediction data isn't available).
    */
   async _evaluateSymbolForEdge(symbol, predictions) {
+    if (!isKalshiTradeEnabled(symbol)) {
+      this.lastDecision = `Waiting: ${symbol} is opted out of trading.`;
+      return null;
+    }
+
     if (this._hasOpenOnSymbol(symbol)) {
       this.lastDecision = `Waiting: already holding an open ${symbol} position (one open per coin).`;
       return null;
@@ -3022,7 +3045,7 @@ class TradingBot {
    * are tried first; the stopped coin is only chosen if nothing else clears.
    */
   async _findBestOpportunity(predictions, { preferOtherThan = null } = {}) {
-    const candidates = Object.keys(SERIES_BY_SYMBOL).filter(
+    const candidates = tradeableKalshiSymbols().filter(
       (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
     );
     const evaluations = await Promise.all(
@@ -3173,6 +3196,9 @@ class TradingBot {
 module.exports = {
   TradingBot,
   SERIES_BY_SYMBOL,
+  DISABLED_TRADE_SYMBOLS,
+  isKalshiTradeEnabled,
+  tradeableKalshiSymbols,
   stopRecoveryCentsRequired,
   stopRecoveryMaxAgeMs,
   peerCascadeMaxAgeMs,
