@@ -1748,20 +1748,40 @@ async function saveKalshiCredentials() {
   }
 }
 
+const LIVE_NOT_AUTHORIZED_HINT =
+  'Live is locked on this server. Set KALSHI_LIVE_TRADING=true, ' +
+  'KALSHI_LIVE_TRADING_CONFIRM=I_UNDERSTAND_THE_RISK (exact), ensure Kalshi credentials are present at boot, then restart. ' +
+  'Saving credentials in the UI alone cannot unlock live.';
+
 function updateModeButtons(mode, liveAuthorized) {
   const paperBtn = document.getElementById('mode-btn-paper');
   const liveBtn = document.getElementById('mode-btn-live');
+  const feedback = document.getElementById('mode-toggle-feedback');
   paperBtn.classList.toggle('active-mode', mode === 'paper');
   liveBtn.classList.toggle('active-mode', mode === 'live');
   liveBtn.classList.toggle('locked', !liveAuthorized);
-  liveBtn.title = liveAuthorized
-    ? ''
-    : 'Not authorized on this server — requires KALSHI_LIVE_TRADING and KALSHI_LIVE_TRADING_CONFIRM env vars plus a restart.';
+  liveBtn.title = liveAuthorized ? '' : LIVE_NOT_AUTHORIZED_HINT;
+  // Show the lock reason in the visible feedback line (tooltips alone are easy to miss).
+  if (feedback && !liveAuthorized) {
+    feedback.textContent = LIVE_NOT_AUTHORIZED_HINT;
+    feedback.style.color = 'var(--wait)';
+  } else if (feedback && liveAuthorized && feedback.textContent === LIVE_NOT_AUTHORIZED_HINT) {
+    feedback.textContent = '';
+  }
 }
 
 async function switchMode(requestedMode) {
   const { engineUrl } = loadSettings();
   const feedback = document.getElementById('mode-toggle-feedback');
+  const liveBtn = document.getElementById('mode-btn-live');
+
+  // Don't ask for a real-money confirm when the server has not authorized live —
+  // surface the lock reason immediately instead of a misleading "Switch to LIVE?" dialog.
+  if (requestedMode === 'live' && liveBtn && liveBtn.classList.contains('locked')) {
+    feedback.textContent = LIVE_NOT_AUTHORIZED_HINT;
+    feedback.style.color = 'var(--wait)';
+    return;
+  }
 
   if (requestedMode === 'live') {
     const confirmed = window.confirm(

@@ -528,6 +528,72 @@ function testKalshiClient() {
   checkEq(fillBot._orderFillCount({ fill_count: 7 }), 7, 'fill_count integer');
   checkEq(fillBot._orderFillCount({ status: 'executed' }), 0, 'status alone is not a fill');
   checkEq(fillBot._orderFillCount({ fill_count_fp: '0.00', status: 'executed' }), 0, 'zero fill_count_fp stays zero');
+  // Create Order V2 flat fill_count + average_fill_price
+  checkEq(fillBot._orderFillCount({ fill_count: '5.00' }), 5, 'V2 create fill_count string');
+  checkEq(
+    fillBot._orderFillCount({ initial_count_fp: '10.00', remaining_count_fp: '4.00' }),
+    6,
+    'fill derived from initial − remaining'
+  );
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      { average_fill_price: '0.4200', fill_count: '2.00', side: 'bid' },
+      'yes',
+      'buy'
+    ),
+    42,
+    'V2 buy YES bid-book average_fill_price → cents'
+  );
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      { average_fill_price: '0.8200', fill_count: '14.00', side: 'ask' },
+      'yes',
+      'sell'
+    ),
+    18,
+    'V2 sell YES ask-book average_fill_price → YES exit cents (complement)'
+  );
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      {
+        average_fill_price: '0.8200',
+        taker_fill_cost_dollars: '2.52',
+        fill_count: '14.00',
+        side: 'ask',
+      },
+      'yes',
+      'sell'
+    ),
+    18,
+    'taker_fill_cost proceeds preferred over ask-book average'
+  );
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      { average_fill_price: '0.5800', fill_count: '5.00', side: 'ask' },
+      'no',
+      'buy'
+    ),
+    58,
+    'V2 buy NO ask-book average_fill_price → NO entry cents'
+  );
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      { average_fill_price: '0.8200', fill_count: '10.00', side: 'bid' },
+      'no',
+      'sell'
+    ),
+    18,
+    'V2 sell NO bid-book average_fill_price → NO exit cents (complement)'
+  );
+  const v2FillNorm = normalizeCreateOrderResponse({
+    order_id: 'oid-v2-fill',
+    fill_count: '4.00',
+    remaining_count: '0.00',
+    average_fill_price: '0.5100',
+  });
+  checkEq(v2FillNorm.order.order_id, 'oid-v2-fill', 'normalize V2 create keeps order_id');
+  checkEq(v2FillNorm.order.fill_count, '4.00', 'normalize V2 create keeps fill_count on order');
+  checkEq(fillBot._orderFillCount(v2FillNorm.order), 4, 'normalized V2 create fill parses');
 }
 
 // ───────────────────────────── backtest ─────────────────────────────
@@ -2548,6 +2614,198 @@ async function testBotTradingFlow() {
     checkEq(entryOrders, 1, 'partial live entry placed one buy');
   }
 
+  // Late fill after poll timeout: polls empty → cancel → getOrder then shows fills
+  {
+    let polls = 0;
+    let canceled = false;
+    const lateFillClient = {
+      hasCredentials: true,
+      async createOrder() {
+        return { order_id: 'late-fill-oid', fill_count: '0.00', remaining_count: '8.00' };
+      },
+      async getOrder(orderId) {
+        polls += 1;
+        if (!canceled) {
+          return {
+            order: {
+              order_id: orderId,
+              status: 'resting',
+              fill_count_fp: '0.00',
+              remaining_count_fp: '8.00',
+            },
+          };
+        }
+        return {
+          order: {
+            order_id: orderId,
+            status: 'executed',
+            fill_count_fp: '8.00',
+            remaining_count_fp: '0.00',
+            average_fill_price: '0.5500',
+          },
+        };
+      },
+      async cancelOrder() {
+        canceled = true;
+        return {};
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+      async getOpenMarkets() {
+        return [];
+      },
+      async getMarket() {
+        return null;
+      },
+    };
+    const lateBot = makeBot(lateFillClient, {
+      mode: 'live',
+      liveAuthorized: true,
+      stakeDollars: 10,
+      minEntryCents: 1,
+      skimMode: 'off',
+    });
+    lateBot.config.mode = 'live';
+    lateBot.config.liveAuthorized = true;
+    lateBot.setRunning(true);
+    await lateBot._openPosition({
+      symbol: 'BTC',
+      ticker: 'KXBTC15M-LATE',
+      side: 'yes',
+      priceCents: 55,
+      floorStrike: 60000,
+      closeTime: Date.now() + 600_000,
+      engineProbability: 60,
+      engineConfidence: 70,
+    });
+    check(canceled, 'late-fill path cancels after poll timeout');
+    checkEq(lateBot.openTrades.length, 1, 'late fill after timeout still ledgers trade');
+    checkEq(lateBot.openTrades[0].contracts, 8, 'late fill uses recovered fill count');
+    checkEq(lateBot.openTrades[0].liveOrderId, 'late-fill-oid', 'late fill stores liveOrderId');
+    check(polls >= 2, 'late fill polled getOrder more than once');
+  }
+
+  // Fill detected only on post-cancel getOrder (cancel race)
+  {
+    let polls = 0;
+    let canceled = false;
+    const raceClient = {
+      hasCredentials: true,
+      async createOrder() {
+        return { order: { order_id: 'cancel-race-oid' } };
+      },
+      async getOrder(orderId) {
+        polls += 1;
+        if (!canceled) {
+          return {
+            order: {
+              order_id: orderId,
+              status: 'resting',
+              fill_count_fp: '0.00',
+            },
+          };
+        }
+        // After cancel: exchange reports the race fill that landed.
+        return {
+          order: {
+            order_id: orderId,
+            status: 'canceled',
+            fill_count_fp: '2.00',
+            yes_price: 48,
+          },
+        };
+      },
+      async cancelOrder() {
+        canceled = true;
+        return {};
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+      async getOpenMarkets() {
+        return [];
+      },
+      async getMarket() {
+        return null;
+      },
+    };
+    const raceBot = makeBot(raceClient, {
+      mode: 'live',
+      liveAuthorized: true,
+      stakeDollars: 5,
+      minEntryCents: 1,
+      skimMode: 'off',
+    });
+    raceBot.config.mode = 'live';
+    raceBot.config.liveAuthorized = true;
+    // Directly exercise await helper with short polls.
+    const fill = await raceBot._awaitOrderFill('cancel-race-oid', {
+      minFill: 5,
+      attempts: 2,
+      delayMs: 5,
+    });
+    check(canceled, 'cancel-race issues cancel');
+    checkEq(fill.filled, 2, 'fill detected after cancel');
+    check(fill.recovered === true, 'cancel-race marks recovered');
+    check(fill.ok === false, 'partial after cancel is not full ok');
+  }
+
+  // Seed from Create Order V2 immediate fill skips orphaning when polls would fail
+  {
+    let getOrderCalls = 0;
+    const seedClient = {
+      hasCredentials: true,
+      async createOrder({ count }) {
+        return normalizeCreateOrderResponse({
+          order_id: 'seed-immediate',
+          fill_count: `${count}.00`,
+          remaining_count: '0.00',
+          average_fill_price: '0.5000',
+        });
+      },
+      async getOrder() {
+        getOrderCalls += 1;
+        throw new Error('getOrder should not be required for immediate V2 fill');
+      },
+      async cancelOrder() {
+        throw new Error('cancel should not run for immediate V2 fill');
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+      async getOpenMarkets() {
+        return [];
+      },
+      async getMarket() {
+        return null;
+      },
+    };
+    const seedBot = makeBot(seedClient, {
+      mode: 'live',
+      liveAuthorized: true,
+      stakeDollars: 10,
+      minEntryCents: 1,
+      skimMode: 'off',
+    });
+    seedBot.config.mode = 'live';
+    seedBot.config.liveAuthorized = true;
+    await seedBot._openPosition({
+      symbol: 'ETH',
+      ticker: 'KXETH15M-SEED',
+      side: 'yes',
+      priceCents: 50,
+      floorStrike: 3000,
+      closeTime: Date.now() + 600_000,
+      engineProbability: 60,
+      engineConfidence: 70,
+    });
+    checkEq(seedBot.openTrades.length, 1, 'V2 immediate fill records trade from create seed');
+    checkEq(seedBot.openTrades[0].contracts, 20, 'V2 immediate fill uses create fill_count');
+    checkEq(seedBot.openTrades[0].entryPriceCents, 50, 'V2 immediate fill uses average_fill_price');
+    checkEq(getOrderCalls, 0, 'V2 immediate fill does not need getOrder');
+  }
+
   // Live exit: partial sell books sold slice + shrinks open remainder (no inventory desync)
   {
     let sellCalls = 0;
@@ -2604,6 +2862,67 @@ async function testBotTradingFlow() {
     checkEq(closedSlices[0].contracts, 4, 'closed slice matches fill count');
     checkEq(closedSlices[0].exitPriceCents, 40, 'closed slice uses sell fill price');
     check(sellCalls >= 1, 'partial sell placed an order');
+  }
+
+  // V2 sell YES stop_loss: ask-book average_fill_price must not book false win/skim
+  {
+    const stopMisparseClient = {
+      hasCredentials: true,
+      async createOrder({ action, side, priceCents, count }) {
+        checkEq(action, 'sell', 'stop misparse exit sells');
+        checkEq(side, 'yes', 'stop misparse exit side yes');
+        checkEq(priceCents, 18, 'stop misparse sells at bid limit');
+        return normalizeCreateOrderResponse({
+          order_id: 'stop-misparse-exit',
+          fill_count: `${count}.00`,
+          remaining_count: '0.00',
+          average_fill_price: '0.8200',
+          side: 'ask',
+        });
+      },
+      async getOrder(orderId) {
+        return {
+          order: {
+            order_id: orderId,
+            status: 'executed',
+            fill_count_fp: '14.00',
+            average_fill_price: '0.8200',
+            side: 'ask',
+          },
+        };
+      },
+      async cancelOrder() {
+        return {};
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+    };
+    const stopBot = makeBot(stopMisparseClient, {
+      mode: 'live',
+      liveAuthorized: true,
+      skimMode: 'insurance',
+    });
+    stopBot.config.mode = 'live';
+    stopBot.config.liveAuthorized = true;
+    stopBot.ledger.insuranceCents = 2000;
+    stopBot.ledger.insuranceReady = true;
+    const stopTrade = openTrade(stopBot, {
+      mode: 'live',
+      liveOrderId: 'entry-stop-misparse',
+      side: 'yes',
+      entryPriceCents: 42,
+      contracts: 14,
+      windowCloseTime: Date.now() + 10 * 60 * 1000,
+    });
+    const closed = await stopBot._closePosition(stopTrade, 18, 'stop_loss', {
+      liveSellPriceCents: 18,
+    });
+    checkEq(closed, true, 'stop misparse exit closes');
+    checkEq(stopTrade.exitPriceCents, 18, 'stop misparse books YES exit not ask complement');
+    checkEq(stopTrade.pnlCents, (18 - 42) * 14, 'stop misparse PnL reflects real loss');
+    check(stopTrade.pnlCents < 0, 'stop misparse is a loss');
+    checkEq(stopTrade.skimmedCents || 0, 0, 'loss on stop misparse gets no wallet skim');
   }
 
   // Live exit refuses 0/100 sell prices

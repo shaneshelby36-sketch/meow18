@@ -69,11 +69,24 @@ function buildCreateOrderV2Body({ ticker, side, action, count, priceCents, clien
   };
 }
 
-/** Accept V2 flat `{ order_id }` or legacy `{ order: { order_id } }`. */
+/**
+ * Accept V2 flat `{ order_id, fill_count, ... }`, legacy `{ order: { order_id } }`,
+ * or occasional `{ orders: [{ order_id }] }`. Always expose a nested `order`
+ * with fill fields preserved so callers can seed fill polling from create.
+ */
 function normalizeCreateOrderResponse(data) {
+  const fromArray =
+    data &&
+    Array.isArray(data.orders) &&
+    data.orders[0] &&
+    typeof data.orders[0] === 'object'
+      ? data.orders[0]
+      : null;
   const orderId =
     (data && data.order_id) ||
-    (data && data.order && data.order.order_id) ||
+    (data && data.orderId) ||
+    (data && data.order && (data.order.order_id || data.order.orderId)) ||
+    (fromArray && (fromArray.order_id || fromArray.orderId)) ||
     null;
   if (!orderId) {
     throw new Error('create order response missing order_id');
@@ -81,8 +94,23 @@ function normalizeCreateOrderResponse(data) {
   const nested =
     data && data.order && typeof data.order === 'object'
       ? { ...data.order, order_id: orderId }
-      : { ...(data || {}), order_id: orderId };
-  return { ...(data || {}), order: nested };
+      : fromArray
+        ? { ...fromArray, order_id: orderId }
+        : { ...(data || {}), order_id: orderId };
+  // Preserve V2 immediate-fill fields on the nested order for seed polling.
+  if (nested.fill_count == null && data && data.fill_count != null) {
+    nested.fill_count = data.fill_count;
+  }
+  if (nested.fill_count_fp == null && data && data.fill_count_fp != null) {
+    nested.fill_count_fp = data.fill_count_fp;
+  }
+  if (nested.remaining_count == null && data && data.remaining_count != null) {
+    nested.remaining_count = data.remaining_count;
+  }
+  if (nested.average_fill_price == null && data && data.average_fill_price != null) {
+    nested.average_fill_price = data.average_fill_price;
+  }
+  return { ...(data || {}), order: nested, order_id: orderId };
 }
 
 /**

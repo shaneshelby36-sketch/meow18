@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { dataPath, ensureDataDir, writeJsonAtomic, pruneArchiveFiles } = require('./paths');
+const { bookSideFromLegacy } = require('./kalshiClient');
 
 ensureDataDir();
 pruneArchiveFiles();
@@ -1225,9 +1226,17 @@ class TradingBot {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  _parseFpCount(raw) {
+    if (raw == null || raw === '') return null;
+    const n = Number.parseFloat(raw);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return Math.floor(n);
+  }
+
   _orderFillCount(order) {
     if (!order || typeof order !== 'object') return 0;
     // Prefer Kalshi's canonical fixed-point fields, then legacy integer / alias names.
+    // Create Order V2 uses `fill_count`; Get Order uses `fill_count_fp`.
     // Do not treat 0 as "missing" — only skip null/undefined/''.
     const candidates = [
       order.fill_count_fp,
@@ -1240,80 +1249,311 @@ class TradingBot {
       order.fillsCount,
       order.filled_count,
       order.filledCount,
+      order.quantity_filled,
+      order.quantityFilled,
     ];
     for (const raw of candidates) {
-      if (raw == null || raw === '') continue;
-      const n = Number.parseFloat(raw);
-      if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+      const n = this._parseFpCount(raw);
+      if (n != null) return n;
+    }
+    // Fallback: initial − remaining when fill_* was omitted entirely.
+    const initial = this._parseFpCount(
+      order.initial_count_fp ??
+        order.initialCountFp ??
+        order.initial_count ??
+        order.initialCount
+    );
+    const remaining = this._parseFpCount(
+      order.remaining_count_fp ??
+        order.remainingCountFp ??
+        order.remaining_count ??
+        order.remainingCount
+    );
+    if (initial != null && remaining != null && initial >= remaining) {
+      return initial - remaining;
     }
     return 0;
   }
 
-  _orderAvgFillPriceCents(order, side) {
-    if (!order) return null;
-    // Prefer dollar cost fields when present.
-    const costDollars = Number.parseFloat(
-      order.taker_fill_cost_dollars ?? order.maker_fill_cost_dollars ?? NaN
-    );
-    const filled = this._orderFillCount(order);
-    if (Number.isFinite(costDollars) && filled > 0) {
-      return Math.max(1, Math.min(99, Math.round((costDollars * 100) / filled)));
+  _unwrapOrderPayload(data) {
+    if (!data || typeof data !== 'object') return null;
+    if (data.order && typeof data.order === 'object') return data.order;
+    if (Array.isArray(data.orders) && data.orders[0] && typeof data.orders[0] === 'object') {
+      return data.orders[0];
     }
-    const yes = Number(order.yes_price ?? order.yesPrice);
-    const no = Number(order.no_price ?? order.noPrice);
-    if (side === 'yes' && Number.isFinite(yes)) return Math.round(yes);
-    if (side === 'no' && Number.isFinite(no)) return Math.round(no);
+    return data;
+  }
+
+  _extractOrderId(payload) {
+    const order = this._unwrapOrderPayload(payload) || payload;
+    if (!order || typeof order !== 'object') return null;
+    return (
+      order.order_id ||
+      order.orderId ||
+      (payload && payload.order_id) ||
+      (payload && payload.orderId) ||
+      null
+    );
+  }
+
+  _inferOrderBookSide(order, heldSide, action) {
+    const raw = String(order?.side ?? order?.book_side ?? order?.bookSide ?? '').toLowerCase();
+    if (raw === 'bid' || raw === 'ask') return raw;
+    if (heldSide && action) {
+      try {
+        return bookSideFromLegacy(heldSide, action);
+      } catch {
+        /* fall through */
+      }
+    }
     return null;
   }
 
   /**
-   * Poll Kalshi until the order is filled enough, or give up and cancel.
-   * Returns { ok, filled, avgPriceCents, order }.
+   * Convert a V2 book price (bid=YES, ask=NO) into the held outcome's cents.
    */
-  async _awaitOrderFill(orderId, { minFill = 1, attempts = 6, delayMs = 350 } = {}) {
-    let lastOrder = null;
+  _bookPriceToHeldOutcomeCents(bookPriceCents, heldSide, bookSide) {
+    const px = Math.max(1, Math.min(99, Math.round(Number(bookPriceCents))));
+    if (!heldSide || !bookSide) return px;
+    const held = String(heldSide).toLowerCase();
+    const book = String(bookSide).toLowerCase();
+    const direct = (held === 'yes' && book === 'bid') || (held === 'no' && book === 'ask');
+    return direct ? px : Math.max(1, Math.min(99, 100 - px));
+  }
+
+  /**
+   * Average fill price for the held outcome (YES/NO cents), not raw book_side.
+   * V2 Create Order reports average_fill_price on the order's book (bid=YES,
+   * ask=NO); sell YES uses ask, so 0.82 → 18¢ YES exit unless complemented.
+   * Prefer taker/maker fill cost — that is actual cash per contract.
+   */
+  _orderAvgFillPriceCents(order, heldSide, action) {
+    if (!order) return null;
+    const filled = this._orderFillCount(order);
+    const bookSide = this._inferOrderBookSide(order, heldSide, action);
+    const clampCents = (c) => Math.max(1, Math.min(99, Math.round(c)));
+
+    // Proceeds/cost first — actual dollars exchanged, already in held-outcome terms.
+    const costDollars = Number.parseFloat(
+      order.taker_fill_cost_dollars ??
+        order.maker_fill_cost_dollars ??
+        order.takerFillCostDollars ??
+        order.makerFillCostDollars ??
+        NaN
+    );
+    if (Number.isFinite(costDollars) && filled > 0) {
+      return clampCents((costDollars * 100) / filled);
+    }
+
+    const avgDollars = Number.parseFloat(
+      order.average_fill_price ?? order.averageFillPrice ?? NaN
+    );
+    if (Number.isFinite(avgDollars) && avgDollars > 0) {
+      return this._bookPriceToHeldOutcomeCents(avgDollars * 100, heldSide, bookSide);
+    }
+
+    const yesDollars = Number.parseFloat(order.yes_price_dollars ?? order.yesPriceDollars ?? NaN);
+    const noDollars = Number.parseFloat(order.no_price_dollars ?? order.noPriceDollars ?? NaN);
+    if (heldSide === 'yes' && Number.isFinite(yesDollars)) {
+      return clampCents(yesDollars * 100);
+    }
+    if (heldSide === 'no' && Number.isFinite(noDollars)) {
+      return clampCents(noDollars * 100);
+    }
+    const yes = Number(order.yes_price ?? order.yesPrice);
+    const no = Number(order.no_price ?? order.noPrice);
+    if (heldSide === 'yes' && Number.isFinite(yes) && yes > 0) return clampCents(yes);
+    if (heldSide === 'no' && Number.isFinite(no) && no > 0) return clampCents(no);
+    return null;
+  }
+
+  /**
+   * Guard against complement mis-parse on stop exits: if avg fill implies a
+   * large gain but the sell limit was at/below entry, trust the sell limit.
+   */
+  _sanityCheckExitFillCents(exitPx, sellPriceCents, entryPriceCents, reason) {
+    const exit = Math.round(Number(exitPx));
+    const sellLimit = Math.round(Number(sellPriceCents));
+    const entry = Math.round(Number(entryPriceCents));
+    if (!Number.isFinite(exit) || !Number.isFinite(sellLimit) || !Number.isFinite(entry)) {
+      return exitPx;
+    }
+    if (reason !== 'stop_loss') return exit;
+    const impliedGain = exit - entry;
+    if (impliedGain > 15 && sellLimit <= entry) {
+      console.warn(
+        `[bot] exit fill ${exit}¢ looks like book-side complement error on stop_loss ` +
+          `(entry ${entry}¢, sell limit ${sellLimit}¢) — using sell limit`
+      );
+      return sellLimit;
+    }
+    return exit;
+  }
+
+  async _fetchOrderSnapshot(orderId) {
+    const data = await this.client.getOrder(orderId);
+    return this._unwrapOrderPayload(data);
+  }
+
+  /**
+   * After cancel/timeout, keep re-fetching briefly so a late-matching fill
+   * (or a cancel that raced an execution) still lands in the ledger.
+   */
+  async _recoverOrderFillsAfterCancel(orderId, { priorOrder = null, attempts = 3, delayMs = 400 } = {}) {
+    let bestOrder = priorOrder;
+    let bestFilled = this._orderFillCount(priorOrder);
     for (let i = 0; i < attempts; i += 1) {
       try {
-        const data = await this.client.getOrder(orderId);
-        lastOrder = data.order || data;
-        const status = String(lastOrder.status || '').toLowerCase();
-        const filled = this._orderFillCount(lastOrder);
-        // Never invent a fill count from status alone — that desyncs the ledger
-        // from Kalshi inventory when fill_* fields are missing or misnamed.
-        if (filled >= minFill) {
-          return { ok: true, filled, avgPriceCents: null, order: lastOrder };
-        }
-        if (status === 'canceled' || status === 'cancelled') {
-          return { ok: false, filled, avgPriceCents: null, order: lastOrder };
-        }
-        if (
-          (status === 'executed' ||
+        const snap = await this._fetchOrderSnapshot(orderId);
+        if (snap) {
+          const filled = this._orderFillCount(snap);
+          if (filled > bestFilled || !bestOrder) {
+            bestOrder = snap;
+            bestFilled = filled;
+          }
+          const status = String(snap.status || '').toLowerCase();
+          if (
+            filled > 0 ||
+            status === 'canceled' ||
+            status === 'cancelled' ||
+            status === 'executed' ||
             status === 'filled' ||
             status === 'complete' ||
-            status === 'completed') &&
-          filled > 0
-        ) {
-          // Terminal status with a partial fill count — stop waiting.
-          return { ok: filled >= minFill, filled, avgPriceCents: null, order: lastOrder };
+            status === 'completed'
+          ) {
+            // Still take one more peek when empty+canceled so a post-cancel
+            // fill_count update can land; otherwise stop early when filled.
+            if (filled > 0 || i === attempts - 1) break;
+          }
+        }
+      } catch (err) {
+        console.warn(`[bot] getOrder ${orderId} post-cancel recovery failed:`, err.message);
+      }
+      if (i < attempts - 1) await this._sleep(delayMs);
+    }
+    if (bestFilled > 0 && this._orderFillCount(priorOrder) < bestFilled) {
+      console.warn(
+        `[bot] fill recovery: order ${orderId} shows ${bestFilled} filled after cancel/timeout ` +
+          `(was ${this._orderFillCount(priorOrder)}) — will ledger the fill`
+      );
+    } else if (bestFilled > 0 && !priorOrder) {
+      console.warn(
+        `[bot] fill recovery: order ${orderId} shows ${bestFilled} filled after cancel/timeout — will ledger the fill`
+      );
+    }
+    return { filled: bestFilled, order: bestOrder };
+  }
+
+  /**
+   * Poll Kalshi until the order is filled enough, or give up and cancel.
+   * Always re-checks fills after cancel so a race cannot orphan Kalshi inventory.
+   * Returns { ok, filled, avgPriceCents, order, recovered }.
+   */
+  async _awaitOrderFill(
+    orderId,
+    { minFill = 1, attempts = 6, delayMs = 350, seedOrder = null, heldSide = null, action = null } = {}
+  ) {
+    let lastOrder = seedOrder ? this._unwrapOrderPayload(seedOrder) || seedOrder : null;
+    let bestFilled = this._orderFillCount(lastOrder);
+    if (bestFilled >= minFill && lastOrder) {
+      return {
+        ok: true,
+        filled: bestFilled,
+        avgPriceCents: this._orderAvgFillPriceCents(lastOrder, heldSide, action),
+        order: lastOrder,
+        recovered: false,
+      };
+    }
+
+    for (let i = 0; i < attempts; i += 1) {
+      try {
+        const snap = await this._fetchOrderSnapshot(orderId);
+        if (snap) {
+          lastOrder = snap;
+          const status = String(lastOrder.status || '').toLowerCase();
+          const filled = this._orderFillCount(lastOrder);
+          if (filled > bestFilled) bestFilled = filled;
+          // Never invent a fill count from status alone — that desyncs the ledger
+          // from Kalshi inventory when fill_* fields are missing or misnamed.
+          if (filled >= minFill) {
+            return {
+              ok: true,
+              filled,
+              avgPriceCents: this._orderAvgFillPriceCents(lastOrder, heldSide, action),
+              order: lastOrder,
+              recovered: false,
+            };
+          }
+          if (status === 'canceled' || status === 'cancelled') {
+            // Terminal cancel (not necessarily ours): still treat any partial
+            // fills as inventory we own. Not a "recovery" unless we timed out.
+            return {
+              ok: filled >= minFill,
+              filled,
+              avgPriceCents: this._orderAvgFillPriceCents(lastOrder, heldSide, action),
+              order: lastOrder,
+              recovered: false,
+            };
+          }
+          if (
+            (status === 'executed' ||
+              status === 'filled' ||
+              status === 'complete' ||
+              status === 'completed') &&
+            filled > 0
+          ) {
+            return {
+              ok: filled >= minFill,
+              filled,
+              avgPriceCents: this._orderAvgFillPriceCents(lastOrder, heldSide, action),
+              order: lastOrder,
+              recovered: false,
+            };
+          }
         }
       } catch (err) {
         console.warn(`[bot] getOrder ${orderId} poll failed:`, err.message);
       }
       await this._sleep(delayMs);
     }
+
+    let canceled = false;
     try {
       await this.client.cancelOrder(orderId);
+      canceled = true;
     } catch (err) {
+      // Cancel often fails when the order already fully filled — that is OK;
+      // recovery getOrder below must still pick up the fill.
       console.warn(`[bot] cancelOrder ${orderId} failed:`, err.message);
     }
-    try {
-      const data = await this.client.getOrder(orderId);
-      lastOrder = data.order || data;
-    } catch {
-      // ignore
+
+    // Give the matching engine a beat, then re-fetch (possibly multiple times).
+    await this._sleep(delayMs);
+    const recovered = await this._recoverOrderFillsAfterCancel(orderId, {
+      priorOrder: lastOrder,
+      attempts: 3,
+      delayMs,
+    });
+    const filled = Math.max(bestFilled, recovered.filled);
+    const order = recovered.order || lastOrder;
+    const wasRecovery =
+      canceled &&
+      filled > 0 &&
+      (bestFilled < filled || bestFilled < minFill);
+    if (wasRecovery) {
+      console.warn(
+        `[bot] fill recovery: order ${orderId} filled ${filled} after poll timeout` +
+          (canceled ? '/cancel' : '') +
+          ' — recording inventory'
+      );
     }
-    const filled = this._orderFillCount(lastOrder);
-    return { ok: filled >= minFill, filled, avgPriceCents: null, order: lastOrder };
+    return {
+      ok: filled >= minFill,
+      filled,
+      avgPriceCents: this._orderAvgFillPriceCents(order, heldSide, action),
+      order,
+      recovered: wasRecovery || (filled > 0 && bestFilled < minFill),
+    };
   }
 
   /**
@@ -1442,20 +1682,33 @@ class TradingBot {
             count: trade.contracts,
             priceCents: sellPrice,
           });
-          const orderId =
-            (order && order.order && order.order.order_id) || (order && order.order_id) || null;
+          const orderId = this._extractOrderId(order);
           if (!orderId) throw new Error('sell response missing order_id');
           const fill = await this._awaitOrderFill(orderId, {
             minFill: trade.contracts,
             attempts: 6,
             delayMs: 350,
+            seedOrder: order,
+            heldSide: trade.side,
+            action: 'sell',
           });
           const filled = Math.max(0, Number(fill.filled) || 0);
+          if (fill.recovered) {
+            console.warn(
+              `[bot] exit fill recovery on ${trade.ticker}: sell order ${orderId} filled ${filled} after timeout/cancel`
+            );
+          }
           if (filled > 0 && filled < trade.contracts) {
             // Partial fill then cancel/timeout: ledger must shrink with exchange
             // inventory. Book the sold slice; leave the remainder OPEN.
-            const avgPartial = this._orderAvgFillPriceCents(fill.order, trade.side);
-            const exitPx = Number.isFinite(avgPartial) ? avgPartial : sellPrice;
+            const avgPartial = this._orderAvgFillPriceCents(fill.order, trade.side, 'sell');
+            let exitPx = Number.isFinite(avgPartial) ? avgPartial : sellPrice;
+            exitPx = this._sanityCheckExitFillCents(
+              exitPx,
+              sellPrice,
+              trade.entryPriceCents,
+              reason
+            );
             this._bookPartialLiveExit(trade, filled, exitPx, reason, orderId);
             throw new Error(
               `sell partially filled (got ${filled}/${filled + trade.contracts}, status ${
@@ -1470,9 +1723,16 @@ class TradingBot {
               })`
             );
           }
-          const avg = this._orderAvgFillPriceCents(fill.order, trade.side);
-          if (Number.isFinite(avg)) bookedExit = avg;
-          else bookedExit = sellPrice;
+          let avg = this._orderAvgFillPriceCents(fill.order, trade.side, 'sell');
+          if (Number.isFinite(avg)) {
+            avg = this._sanityCheckExitFillCents(
+              avg,
+              sellPrice,
+              trade.entryPriceCents,
+              reason
+            );
+            bookedExit = avg;
+          } else bookedExit = sellPrice;
           trade.liveExitOrderId = orderId;
         } catch (err) {
           this.lastError = `Failed live exit (${reason}) on ${trade.ticker}: ${err.message}. Position left OPEN.`;
@@ -2028,8 +2288,7 @@ class TradingBot {
           count: trade.contracts,
           priceCents,
         });
-        const orderId =
-          (order && order.order && order.order.order_id) || (order && order.order_id) || null;
+        const orderId = this._extractOrderId(order);
         if (!orderId) {
           this.lastError = `Live entry on ${symbol} returned no order_id — not recording trade.`;
           console.error('[bot]', this.lastError);
@@ -2039,21 +2298,45 @@ class TradingBot {
           minFill: trade.contracts,
           attempts: 6,
           delayMs: 350,
+          seedOrder: order,
+          heldSide: side,
+          action: 'buy',
         });
         // Accept any fill ≥1 even when the full size did not fill (after cancel).
         // Rejecting partials would orphan real Kalshi inventory with no ledger row.
-        const filled = Math.max(0, Number(fill.filled) || 0);
+        let filled = Math.max(0, Number(fill.filled) || 0);
+        // Last-chance: never abandon an entry while Kalshi may hold fills.
+        if (filled < 1) {
+          const lastChance = await this._recoverOrderFillsAfterCancel(orderId, {
+            priorOrder: fill.order,
+            attempts: 2,
+            delayMs: 400,
+          });
+          if (lastChance.filled > 0) {
+            filled = lastChance.filled;
+            fill.order = lastChance.order || fill.order;
+            fill.recovered = true;
+            console.warn(
+              `[bot] fill recovery: live entry ${symbol} order ${orderId} had ${filled} fills on final getOrder — recording trade`
+            );
+          }
+        }
         if (filled < 1) {
           this.lastError =
             `Live entry on ${symbol} did not fill (filled ${filled}/${trade.contracts}) — not recording trade.`;
           console.error('[bot]', this.lastError);
           return;
         }
+        if (fill.recovered) {
+          console.warn(
+            `[bot] entry fill recovery on ${symbol}: order ${orderId} filled ${filled}/${trade.contracts} after timeout/cancel — ledgered`
+          );
+        }
         if (filled < trade.contracts) {
           trade.contracts = filled;
           trade.stakeDollars = +((trade.contracts * priceCents) / 100).toFixed(2);
         }
-        const avg = this._orderAvgFillPriceCents(fill.order, side);
+        const avg = this._orderAvgFillPriceCents(fill.order, side, 'buy');
         if (Number.isFinite(avg)) {
           trade.entryPriceCents = avg;
           trade.stakeDollars = +((trade.contracts * avg) / 100).toFixed(2);
