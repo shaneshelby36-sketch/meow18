@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
 const { KalshiClient, normalizeMarketPrices, priceInCents } = require('./kalshiClient');
 
 const ONLINE = process.env.ONLINE === '1' || process.env.ONLINE === 'true';
@@ -170,11 +170,14 @@ function makeBot(client, config = {}) {
     skimMode: config.skimMode ?? 'off',
     skimPercent: config.skimPercent ?? 20,
     skimFixedDollars: config.skimFixedDollars ?? 5,
+    insuranceCapDollars: config.insuranceCapDollars ?? 10,
+    insuranceFloorDollars: config.insuranceFloorDollars ?? 6,
     paperStartingBalanceDollars: config.paperStartingBalanceDollars ?? 100,
     stakingStrategy: config.stakingStrategy ?? 'fixed',
     symbol: config.symbol ?? 'ETH',
   });
-  bot.ledger = { trades: [], reserveCents: 0, insuranceCents: 0, insuranceReady: false, periodStartTime: Date.now() };
+  normalizeInsuranceThresholds(bot.config);
+  bot.ledger = { trades: [], reserveCents: 0, insuranceCents: 0, insuranceReady: false, insuranceDepositedCents: 0, periodStartTime: Date.now() };
   bot.calibration = { buckets: {} };
   bot.isRunning = true;
   bot.lastError = null;
@@ -1178,51 +1181,109 @@ async function testBotTradingFlow() {
   check(closed && closed.pnlCents > 0, 'winning settle has positive PnL');
   check(closed.skimmedCents === 200 || bot.ledger.reserveCents >= 200, 'fixed skim applied');
 
-  // Insurance: 10/40/50 always; soft $10 marks ready but keeps building
+  // Insurance: 10/40/50; hysteresis arm $10 / floor $6
   {
+    const insSettings = { skimMode: 'insurance', insuranceCapDollars: 10, insuranceFloorDollars: 6 };
+
     const win = applyProfitBuckets({
       pnlCents: 1000,
       reserveCents: 0,
       insuranceCents: 0,
-      settings: { skimMode: 'insurance', insuranceCapDollars: 10 },
+      insuranceReady: false,
+      settings: insSettings,
       rebuildInsurance: true,
     });
     checkEq(win.skimmedCents, 400, 'insurance win: 40% wallet');
     checkEq(win.insuranceAddedCents, 100, 'insurance win: 10% to fund');
     checkEq(win.insuranceCents, 100, 'insurance fund balance');
+    checkEq(win.insuranceReady, false, 'under arm: not ready after small win');
 
     const keepGoing = applyProfitBuckets({
       pnlCents: 1000,
       reserveCents: 400,
       insuranceCents: 1000,
-      settings: { skimMode: 'insurance', insuranceCapDollars: 10 },
+      insuranceReady: true,
+      settings: insSettings,
       rebuildInsurance: true,
     });
-    checkEq(keepGoing.insuranceAddedCents, 100, 'keeps taking 10% past soft target');
+    checkEq(keepGoing.insuranceAddedCents, 100, 'keeps taking 10% past arm');
     checkEq(keepGoing.insuranceCents, 1100, 'fund can grow above $10');
+    checkEq(keepGoing.insuranceReady, true, 'stays ready above arm');
 
     const absorbEarly = applyProfitBuckets({
       pnlCents: -800,
       reserveCents: 400,
       insuranceCents: 500,
-      settings: { skimMode: 'insurance', insuranceCapDollars: 10 },
+      insuranceReady: false,
+      settings: insSettings,
     });
-    checkEq(absorbEarly.insuranceDrawnCents, 0, 'under target: hold fund, do not absorb yet');
-    checkEq(absorbEarly.insuranceCents, 500, 'under target: insurance unchanged on loss');
+    checkEq(absorbEarly.insuranceDrawnCents, 0, 'not ready: hold fund, do not absorb yet');
+    checkEq(absorbEarly.insuranceCents, 500, 'not ready: insurance unchanged on loss');
+    checkEq(absorbEarly.insuranceReady, false, 'not ready stays not ready under arm');
 
-    const absorbReady = applyProfitBuckets({
+    const absorbAtArm = applyProfitBuckets({
       pnlCents: -800,
       reserveCents: 400,
       insuranceCents: 1000,
-      settings: { skimMode: 'insurance', insuranceCapDollars: 10 },
+      insuranceReady: false,
+      settings: insSettings,
     });
-    checkEq(absorbReady.insuranceDrawnCents, 800, 'at/above target: insurance absorbs loss');
-    checkEq(absorbReady.insuranceCents, 200, 'at/above target: insurance reduced');
-    checkEq(absorbReady.reserveCents, 400, 'wallet untouched by loss');
+    checkEq(absorbAtArm.insuranceDrawnCents, 800, 'at arm: sync arms then absorbs loss');
+    checkEq(absorbAtArm.insuranceCents, 200, 'at arm: insurance reduced');
+    checkEq(absorbAtArm.insuranceReady, false, 'drawn below floor → not ready');
+    checkEq(absorbAtArm.reserveCents, 400, 'wallet untouched by loss');
+
+    // Absorb at $8 while ready (hysteresis band)
+    const absorbMid = applyProfitBuckets({
+      pnlCents: -200,
+      reserveCents: 400,
+      insuranceCents: 800,
+      insuranceReady: true,
+      settings: insSettings,
+    });
+    checkEq(absorbMid.insuranceDrawnCents, 200, 'ready at $8: still absorbs');
+    checkEq(absorbMid.insuranceCents, 600, 'ready at $8: balance after draw');
+    checkEq(absorbMid.insuranceReady, true, 'exactly at floor: still ready');
+
+    // Drop below $6 → stop absorbing / disarm
+    const absorbBelow = applyProfitBuckets({
+      pnlCents: -200,
+      reserveCents: 400,
+      insuranceCents: 600,
+      insuranceReady: true,
+      settings: insSettings,
+    });
+    checkEq(absorbBelow.insuranceDrawnCents, 200, 'at floor: still absorbs once');
+    checkEq(absorbBelow.insuranceCents, 400, 'below floor after draw');
+    checkEq(absorbBelow.insuranceReady, false, 'below $6: not ready');
+
+    const noAbsorbDisarmed = applyProfitBuckets({
+      pnlCents: -100,
+      reserveCents: 400,
+      insuranceCents: 800,
+      insuranceReady: false,
+      settings: insSettings,
+    });
+    checkEq(noAbsorbDisarmed.insuranceDrawnCents, 0, 'disarmed at $8: Available takes loss');
+    checkEq(noAbsorbDisarmed.insuranceCents, 800, 'disarmed: insurance unchanged');
+    checkEq(noAbsorbDisarmed.insuranceReady, false, 're-arm only at $10, not at $8');
+
+    // Re-arm only when balance ≥ $10
+    const rearm = applyProfitBuckets({
+      pnlCents: 1000,
+      reserveCents: 400,
+      insuranceCents: 900,
+      insuranceReady: false,
+      settings: insSettings,
+      rebuildInsurance: true,
+    });
+    checkEq(rearm.insuranceCents, 1000, 'win brings fund to arm');
+    checkEq(rearm.insuranceReady, true, 're-arms at $10');
 
     const insBot = makeBot(mockClient(market), {
       skimMode: 'insurance',
       insuranceCapDollars: 10,
+      insuranceFloorDollars: 6,
       stakeDollars: 10,
     });
     const tBoot = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
@@ -1233,12 +1294,84 @@ async function testBotTradingFlow() {
       const t = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
       await insBot._closePosition(t, 60, 'take_profit');
     }
-    check(insBot.ledger.insuranceCents >= 1000, 'fills soft $10 target');
-    checkEq(insBot.ledger.insuranceReady, true, 'marked ready after soft target');
+    check(insBot.ledger.insuranceCents >= 1000, 'fills arm $10');
+    checkEq(insBot.ledger.insuranceReady, true, 'marked ready after arm');
     const before = insBot.ledger.insuranceCents;
     const tMore = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
     await insBot._closePosition(tMore, 60, 'take_profit');
-    checkEq(insBot.ledger.insuranceCents, before + 100, 'keeps building past soft target');
+    checkEq(insBot.ledger.insuranceCents, before + 100, 'keeps building past arm');
+
+    // Bot path: absorb while ready in the $6–$10 band, then disarm below floor
+    // Loss of $2: 20 contracts × 10¢ drop (50→40)
+    insBot.ledger.insuranceCents = 800;
+    insBot.ledger.insuranceReady = true;
+    const tLossMid = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 20 });
+    await insBot._closePosition(tLossMid, 40, 'stop_loss');
+    checkEq(insBot.ledger.insuranceCents, 600, 'bot: absorb at $8 while ready → $6');
+    checkEq(insBot.ledger.insuranceReady, true, 'bot: still ready at floor');
+    const tLossFloor = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 20 });
+    await insBot._closePosition(tLossFloor, 40, 'stop_loss');
+    checkEq(insBot.ledger.insuranceCents, 400, 'bot: draw below floor');
+    checkEq(insBot.ledger.insuranceReady, false, 'bot: disarmed below $6');
+
+    // Floor clamp when floor >= arm
+    const clamped = makeBot(mockClient(market), {
+      skimMode: 'insurance',
+      insuranceCapDollars: 10,
+      insuranceFloorDollars: 15,
+    });
+    check(clamped.config.insuranceFloorDollars < clamped.config.insuranceCapDollars, 'floor clamped below arm');
+    checkEq(clamped.config.insuranceFloorDollars, 9, 'floor clamped to arm-1');
+  }
+
+  // Manual external insurance seed / top-up
+  {
+    const seedBot = makeBot(mockClient(market), {
+      skimMode: 'insurance',
+      insuranceCapDollars: 10,
+      insuranceFloorDollars: 6,
+      paperStartingBalanceDollars: 100,
+    });
+    seedBot.config.insuranceCapDollars = 10;
+    seedBot.config.insuranceFloorDollars = 6;
+    const beforeCap = seedBot._capitalStatus();
+    checkEq(beforeCap.insuranceCents, 0, 'starts with empty insurance');
+    checkEq(beforeCap.paperAvailableCents, 10000, 'starts with full Available');
+    checkEq(beforeCap.insuranceCapCents, 1000, 'capital reports arm cents');
+    checkEq(beforeCap.insuranceFloorCents, 600, 'capital reports floor cents');
+
+    const badZero = seedBot.depositInsurance(0);
+    checkEq(badZero.ok, false, 'rejects zero deposit');
+    const badNeg = seedBot.depositInsurance(-5);
+    checkEq(badNeg.ok, false, 'rejects negative deposit');
+    const badHuge = seedBot.depositInsurance(501);
+    checkEq(badHuge.ok, false, 'rejects over $500 per call');
+
+    const underArm = seedBot.depositInsurance(8);
+    checkEq(underArm.ok, true, 'accepts $8 seed');
+    checkEq(seedBot.ledger.insuranceCents, 800, 'under-arm seed credits insurance');
+    checkEq(seedBot.ledger.insuranceReady, false, 'under arm: deposit does not arm');
+
+    const seeded = seedBot.depositInsurance(2);
+    checkEq(seeded.ok, true, 'accepts top-up to arm');
+    checkEq(seedBot.ledger.insuranceCents, 1000, 'seed credits insurance to $10');
+    checkEq(seedBot.ledger.insuranceDepositedCents, 1000, 'tracks external deposit');
+    checkEq(seedBot.ledger.insuranceReady, true, 'ready flips at arm via deposit');
+    const afterSeed = seedBot._capitalStatus();
+    checkEq(afterSeed.paperAvailableCents, beforeCap.paperAvailableCents, 'Available unchanged by external seed');
+    checkEq(afterSeed.insuranceCents, 1000, 'capital shows seeded insurance');
+    checkEq(afterSeed.paperTotalCents, beforeCap.paperTotalCents + 1000, 'total capital rises by deposit');
+    check(
+      (seedBot.ledger.activityLog || []).some((e) => /Insurance seeded \+\$2\.00/.test(e.message)),
+      'activity log records manual seed'
+    );
+
+    const topUp = seedBot.depositInsurance(2.5);
+    checkEq(topUp.ok, true, 'accepts top-up');
+    checkEq(seedBot.ledger.insuranceCents, 1250, 'top-up adds to insurance');
+    checkEq(seedBot.ledger.insuranceDepositedCents, 1250, 'top-up tracked in deposits');
+    const afterTop = seedBot._capitalStatus();
+    checkEq(afterTop.paperAvailableCents, beforeCap.paperAvailableCents, 'Available still unchanged after top-up');
   }
 
   // Reject bad entry prices
@@ -2084,7 +2217,8 @@ async function testBotTradingFlow() {
         order: {
           order_id: orderId,
           status: 'executed',
-          fills_count: 1,
+          // Match openTrade default contracts (10) — never invent fills from status alone.
+          fill_count_fp: '10.00',
           yes_price: 42,
         },
       };
@@ -2178,6 +2312,144 @@ async function testBotTradingFlow() {
   await failBot._manageOpenTrade(failTrade, predictions(3100));
   checkEq(failTrade.status, 'open', 'failed live sell leaves position open');
   check(liveOrders >= 1, 'failed live sell still attempted order');
+
+  // Live entry: partial fill still records inventory (does not orphan Kalshi fills)
+  {
+    let entryOrders = 0;
+    const partialEntryClient = {
+      hasCredentials: true,
+      async createOrder({ count }) {
+        entryOrders += 1;
+        return { order: { order_id: `entry-partial-${entryOrders}`, requested: count } };
+      },
+      async getOrder(orderId) {
+        return {
+          order: {
+            order_id: orderId,
+            status: 'canceled',
+            fill_count_fp: '3.00',
+            yes_price: 50,
+          },
+        };
+      },
+      async cancelOrder() {
+        return {};
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+      async getOpenMarkets() {
+        return [];
+      },
+      async getMarket() {
+        return null;
+      },
+    };
+    const entryBot = makeBot(partialEntryClient, {
+      mode: 'live',
+      liveAuthorized: true,
+      stakeDollars: 10,
+      minEntryCents: 1,
+      skimMode: 'off',
+    });
+    entryBot.config.mode = 'live';
+    entryBot.config.liveAuthorized = true;
+    entryBot.setRunning(true);
+    await entryBot._openPosition({
+      symbol: 'ETH',
+      ticker: 'KXETH15M-PARTIAL',
+      side: 'yes',
+      priceCents: 50,
+      floorStrike: 3000,
+      closeTime: Date.now() + 600_000,
+      engineProbability: 60,
+      engineConfidence: 70,
+    });
+    checkEq(entryBot.openTrades.length, 1, 'partial live entry records a trade');
+    checkEq(entryBot.openTrades[0].contracts, 3, 'partial live entry keeps filled size');
+    checkEq(entryOrders, 1, 'partial live entry placed one buy');
+  }
+
+  // Live exit: partial sell books sold slice + shrinks open remainder (no inventory desync)
+  {
+    let sellCalls = 0;
+    const partialExitClient = {
+      hasCredentials: true,
+      async createOrder({ action, count }) {
+        sellCalls += 1;
+        checkEq(action, 'sell', 'partial exit issues sell');
+        checkEq(count, 10, 'partial exit attempts full size first');
+        return { order: { order_id: `sell-partial-${sellCalls}` } };
+      },
+      async getOrder(orderId) {
+        return {
+          order: {
+            order_id: orderId,
+            status: 'canceled',
+            fill_count_fp: '4.00',
+            yes_price: 40,
+          },
+        };
+      },
+      async cancelOrder() {
+        return {};
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+    };
+    const exitBot = makeBot(partialExitClient, {
+      mode: 'live',
+      liveAuthorized: true,
+      skimMode: 'off',
+    });
+    exitBot.config.mode = 'live';
+    exitBot.config.liveAuthorized = true;
+    const partialTrade = openTrade(exitBot, {
+      mode: 'live',
+      liveOrderId: 'entry-partial-exit',
+      side: 'yes',
+      entryPriceCents: 50,
+      contracts: 10,
+      windowCloseTime: Date.now() + 10 * 60 * 1000,
+    });
+    const closed = await exitBot._closePosition(partialTrade, 40, 'stop_loss', {
+      liveSellPriceCents: 40,
+    });
+    checkEq(closed, false, 'partial live sell does not fully close');
+    checkEq(partialTrade.status, 'open', 'remainder stays open after partial sell');
+    checkEq(partialTrade.contracts, 6, 'open size shrunk by filled sell count');
+    const closedSlices = exitBot.ledger.trades.filter(
+      (t) => t.status === 'closed' && t.partialExitOf === partialTrade.id
+    );
+    checkEq(closedSlices.length, 1, 'partial sell books a closed slice');
+    checkEq(closedSlices[0].contracts, 4, 'closed slice matches fill count');
+    checkEq(closedSlices[0].exitPriceCents, 40, 'closed slice uses sell fill price');
+    check(sellCalls >= 1, 'partial sell placed an order');
+  }
+
+  // Live exit refuses 0/100 sell prices
+  {
+    const refuseBot = makeBot(
+      {
+        hasCredentials: true,
+        async createOrder() {
+          throw new Error('createOrder must not run for invalid sell price');
+        },
+      },
+      { mode: 'live', liveAuthorized: true }
+    );
+    refuseBot.config.mode = 'live';
+    const t = openTrade(refuseBot, {
+      mode: 'live',
+      liveOrderId: 'entry-refuse',
+      side: 'yes',
+      contracts: 2,
+    });
+    const ok = await refuseBot._closePosition(t, 0, 'settled_timeout', { liveSellPriceCents: 0 });
+    checkEq(ok, false, 'refuse sell at 0¢');
+    checkEq(t.status, 'open', 'invalid sell price leaves position open');
+  }
 
   // Status payload shape
   const status = bot.status();

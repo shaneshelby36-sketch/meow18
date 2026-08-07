@@ -707,7 +707,33 @@ body[data-view-mode="bot"] .asset-picker {
 .capital-row span:first-child { color: var(--text-dim); }
 .capital-divider {
   border-top: 1px solid var(--line);
-  margin: 8px 0;
+  margin: 6px 0;
+}
+.insurance-deposit-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 8px 0 2px;
+}
+.insurance-deposit-row input[type="number"] {
+  flex: 1 1 110px;
+  min-width: 96px;
+  max-width: 160px;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+}
+.insurance-deposit-hint {
+  margin: 0 0 4px;
+}
+#bot-insurance-deposit-feedback {
+  min-height: 0;
+  margin: 0 0 4px;
 }
 .capital-total {
   font-weight: 700;

@@ -99,6 +99,7 @@ const bot = KALSHI_ENABLED
         skimFixedDollars: parseFloat(process.env.KALSHI_SKIM_FIXED_DOLLARS || '5'),
         skimPercent: parseFloat(process.env.KALSHI_SKIM_PERCENT || '50'),
         insuranceCapDollars: parseFloat(process.env.KALSHI_INSURANCE_CAP_DOLLARS || '10'),
+        insuranceFloorDollars: parseFloat(process.env.KALSHI_INSURANCE_FLOOR_DOLLARS || '6'),
         paperStartingBalanceDollars: parseFloat(process.env.KALSHI_PAPER_STARTING_BALANCE || '100'),
         mode: wantsLive ? 'live' : 'paper',
         // Fixed ceiling for this process's lifetime, set only from the
@@ -483,6 +484,17 @@ app.get("/", (req, res) => {
     res.status(result.ok ? 200 : 400).json(result);
   });
 
+  app.post('/api/bot/insurance/deposit', (req, res) => {
+    if (!bot) {
+      res.status(404).json({ enabled: false, message: 'Bot is not enabled (set KALSHI_ENABLED=true).' });
+      return;
+    }
+    const body = req.body || {};
+    const dollars = body.dollars != null ? body.dollars : body.amount;
+    const result = bot.depositInsurance(dollars);
+    res.status(result.ok ? 200 : 400).json(result);
+  });
+
   app.post('/api/bot/running', (req, res) => {
     if (!bot) {
       res.status(404).json({ enabled: false, message: 'Bot is not enabled (set KALSHI_ENABLED=true).' });
@@ -527,6 +539,7 @@ app.get("/", (req, res) => {
       skimPercent: source.skimPercent ?? live.skimPercent,
       skimFixedDollars: source.skimFixedDollars ?? live.skimFixedDollars,
       insuranceCapDollars: source.insuranceCapDollars ?? live.insuranceCapDollars,
+      insuranceFloorDollars: source.insuranceFloorDollars ?? live.insuranceFloorDollars,
       paperStartingBalanceDollars: source.paperStartingBalanceDollars ?? live.paperStartingBalanceDollars,
       assumedEntryCents: source.assumedEntryCents ?? 50,
     };

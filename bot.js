@@ -19,7 +19,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 7;
+const SETTINGS_DEFAULTS_VERSION = 9;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -88,8 +88,54 @@ const EDITABLE_NUMERIC_FIELDS = [
   'skimPercent',
   'skimFixedDollars',
   'insuranceCapDollars',
+  'insuranceFloorDollars',
   'paperStartingBalanceDollars',
 ];
+
+/** Default arm ($10) / floor ($6) for insurance hysteresis. */
+const INSURANCE_ARM_DEFAULT = 10;
+const INSURANCE_FLOOR_DEFAULT = 6;
+
+/**
+ * Resolve arm/floor cents. Floor must be strictly below arm — clamp if not.
+ */
+function insuranceArmFloorCents(settings = {}) {
+  const armDollars = Number.isFinite(Number(settings.insuranceCapDollars))
+    ? Number(settings.insuranceCapDollars)
+    : INSURANCE_ARM_DEFAULT;
+  let floorDollars = Number.isFinite(Number(settings.insuranceFloorDollars))
+    ? Number(settings.insuranceFloorDollars)
+    : INSURANCE_FLOOR_DEFAULT;
+  const armCents = Math.max(0, Math.round(armDollars * 100));
+  let floorCents = Math.max(0, Math.round(floorDollars * 100));
+  if (floorCents >= armCents) {
+    floorCents = armCents >= 100 ? armCents - 100 : Math.max(0, armCents - 1);
+  }
+  return { armCents, floorCents };
+}
+
+/** Sticky ready: arm on ≥ arm, disarm below floor, else keep prior flag. */
+function syncInsuranceReady(balanceCents, ready, armCents, floorCents) {
+  const bal = Number(balanceCents) || 0;
+  if (bal >= armCents) return true;
+  if (bal < floorCents) return false;
+  return !!ready;
+}
+
+/** Clamp config knobs so floor stays strictly below arm. */
+function normalizeInsuranceThresholds(config) {
+  if (!config || typeof config !== 'object') return config;
+  let arm = Number(config.insuranceCapDollars);
+  let floor = Number(config.insuranceFloorDollars);
+  if (!Number.isFinite(arm) || arm < 0) arm = INSURANCE_ARM_DEFAULT;
+  if (!Number.isFinite(floor) || floor < 0) floor = INSURANCE_FLOOR_DEFAULT;
+  if (floor >= arm) {
+    floor = arm >= 1 ? arm - 1 : 0;
+  }
+  config.insuranceCapDollars = arm;
+  config.insuranceFloorDollars = floor;
+  return config;
+}
 
 /**
  * Cents the held-side bid must bounce above the stop-exit before same-side
@@ -383,16 +429,17 @@ function checkPostStopPeerCascade({
 /**
  * Profit split for skimMode === 'insurance':
  *   40% → Personal Wallet (locked paycheck)
- *   10% → Insurance Fund (builds from the start; soft $10 target is not a
- *          hard stop — it may keep growing "just in case")
+ *   10% → Insurance Fund (builds from the start; no hard cap — keeps growing)
  *   50% → Active Bankroll (Available Cash)
- * Losses: Insurance only absorbs once it has reached the soft target;
- *         until then the fund just keeps building (wallet untouched either way).
+ * Losses: sticky hysteresis — arm at insuranceCapDollars ($10), stay usable
+ *         down to insuranceFloorDollars ($6). Absorb only while insuranceReady;
+ *         below floor, disarm until balance ≥ arm again.
  */
 function applyProfitBuckets({
   pnlCents,
   reserveCents = 0,
   insuranceCents = 0,
+  insuranceReady = false,
   settings = {},
   rebuildInsurance = true,
 }) {
@@ -407,14 +454,10 @@ function applyProfitBuckets({
     insuranceOverflowCents: 0,
     insuranceDrawnCents: 0,
     insuranceReleasedCents: 0,
+    insuranceReady: !!insuranceReady,
   };
 
-  const targetCents = Math.max(
-    0,
-    Math.round((Number.isFinite(Number(settings.insuranceCapDollars))
-      ? Number(settings.insuranceCapDollars)
-      : 10) * 100)
-  );
+  const { armCents, floorCents } = insuranceArmFloorCents(settings);
 
   if (settings.skimMode !== 'insurance') {
     if (pnl <= 0) return out;
@@ -430,22 +473,28 @@ function applyProfitBuckets({
     return out;
   }
 
+  let ready = syncInsuranceReady(nextInsurance, !!insuranceReady, armCents, floorCents);
+
   if (pnl < 0) {
-    // Hold until the soft target is funded — don't nibble the buffer early.
-    if (nextInsurance < targetCents) {
-      return out;
+    // Absorb uses sticky ready (not balance >= arm), so $7–$9.99 still pays.
+    if (ready && nextInsurance > 0) {
+      const loss = -pnl;
+      const drawn = Math.min(nextInsurance, loss);
+      nextInsurance -= drawn;
+      out.insuranceDrawnCents = drawn;
+      out.insuranceCents = nextInsurance;
     }
-    const loss = -pnl;
-    const drawn = Math.min(nextInsurance, loss);
-    out.insuranceDrawnCents = drawn;
-    out.insuranceCents = nextInsurance - drawn;
+    out.insuranceReady = syncInsuranceReady(nextInsurance, ready, armCents, floorCents);
     return out;
   }
-  if (pnl === 0) return out;
+  if (pnl === 0) {
+    out.insuranceReady = ready;
+    return out;
+  }
 
   const wallet = Math.round(pnl * 0.4);
   // Always take 10% into insurance when rebuilding (default: every win).
-  // Soft $10 target does not clip or stop contributions.
+  // Arm threshold does not clip or stop contributions.
   const insuranceAdd = rebuildInsurance ? Math.round(pnl * 0.1) : 0;
   nextInsurance += insuranceAdd;
 
@@ -453,6 +502,7 @@ function applyProfitBuckets({
   out.insuranceAddedCents = insuranceAdd;
   out.reserveCents = nextReserve + wallet;
   out.insuranceCents = nextInsurance;
+  out.insuranceReady = syncInsuranceReady(nextInsurance, ready, armCents, floorCents);
   return out;
 }
 
@@ -545,6 +595,7 @@ function loadLedger() {
       if (data.reserveCents == null) data.reserveCents = 0;
       if (data.insuranceCents == null) data.insuranceCents = 0;
       if (data.insuranceReady == null) data.insuranceReady = false;
+      if (data.insuranceDepositedCents == null) data.insuranceDepositedCents = 0;
       if (data.periodStartTime == null) data.periodStartTime = Date.now();
       if (!Array.isArray(data.activityLog)) data.activityLog = [];
       return data;
@@ -557,6 +608,7 @@ function loadLedger() {
     reserveCents: 0,
     insuranceCents: 0,
     insuranceReady: false,
+    insuranceDepositedCents: 0,
     periodStartTime: Date.now(),
     activityLog: [],
   };
@@ -675,13 +727,16 @@ class TradingBot {
       skimPercent: 50, // used when skimMode === 'percent'
       skimFixedDollars: 5, // used when skimMode === 'fixed'
       // Insurance fund (skimMode === 'insurance'): 10% fund / 40% wallet / 50% bankroll
-      insuranceCapDollars: 10, // fund builds to this, then 10% overflows into Active Bankroll
+      // Hysteresis: arm at insuranceCapDollars, stay usable down to insuranceFloorDollars.
+      insuranceCapDollars: INSURANCE_ARM_DEFAULT,
+      insuranceFloorDollars: INSURANCE_FLOOR_DEFAULT,
       paperStartingBalanceDollars: 100, // trading bankroll (also the capital backing paper trades)
       mode: 'paper', // 'paper' | 'live'
       liveAuthorized: false,
       ...config,
       ...loadConfigOverrides(), // saved runtime edits win over env/defaults, except `mode`/`liveAuthorized`
     };
+    normalizeInsuranceThresholds(this.config);
     // `liveAuthorized` is a fixed ceiling for this process's lifetime — it
     // must only ever come from the server's own startup env-var gate.
     this.config.liveAuthorized = config.liveAuthorized === true;
@@ -791,6 +846,9 @@ class TradingBot {
       this.config[field] = value;
       applied[field] = value;
     }
+    normalizeInsuranceThresholds(this.config);
+    if (applied.insuranceCapDollars != null) applied.insuranceCapDollars = this.config.insuranceCapDollars;
+    if (applied.insuranceFloorDollars != null) applied.insuranceFloorDollars = this.config.insuranceFloorDollars;
     saveConfigOverrides(collectConfigOverrides(this.config));
     return { applied, config: this.config };
   }
@@ -804,6 +862,7 @@ class TradingBot {
       reserveCents: 0,
       insuranceCents: 0,
       insuranceReady: false,
+      insuranceDepositedCents: 0,
       periodStartTime: Date.now(),
       activityLog: [],
     };
@@ -815,6 +874,50 @@ class TradingBot {
     this._persist();
     saveCalibration(this.calibration);
     return { ok: true, message: 'Paper trading history and statistics were reset.' };
+  }
+
+  /**
+   * External seed / top-up into the Insurance Fund (user's own money).
+   * Does not pull from Available or Wallet — credits insurance + deposited capital
+   * so Available and Net P&L stay honest while Total Equity rises by the deposit.
+   */
+  depositInsurance(dollars) {
+    const amount = Number(dollars);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return { ok: false, message: 'Deposit amount must be a positive number of dollars.' };
+    }
+    if (amount > 500) {
+      return { ok: false, message: 'Max $500 per deposit. Split larger seeds into multiple adds.' };
+    }
+    const cents = Math.round(amount * 100);
+    if (cents < 1) {
+      return { ok: false, message: 'Amount rounds to less than 1¢.' };
+    }
+
+    this.ledger.insuranceCents = (Number(this.ledger.insuranceCents) || 0) + cents;
+    this.ledger.insuranceDepositedCents = (Number(this.ledger.insuranceDepositedCents) || 0) + cents;
+
+    const { armCents, floorCents } = insuranceArmFloorCents(this.config);
+    this.ledger.insuranceReady = syncInsuranceReady(
+      this.ledger.insuranceCents,
+      !!this.ledger.insuranceReady,
+      armCents,
+      floorCents
+    );
+
+    const msg = `Insurance seeded +$${(cents / 100).toFixed(2)} (manual).`;
+    this.lastDecision = msg;
+    this._logActivity(msg, { kind: 'insurance', pnlCents: cents });
+    this._persist();
+
+    return {
+      ok: true,
+      message: msg,
+      insuranceCents: this.ledger.insuranceCents,
+      insuranceDepositedCents: this.ledger.insuranceDepositedCents,
+      insuranceReady: !!this.ledger.insuranceReady,
+      capital: this._capitalStatus(),
+    };
   }
 
   _logActivity(message, meta = {}) {
@@ -908,13 +1011,18 @@ class TradingBot {
     const startingCents = Math.round(this.config.paperStartingBalanceDollars * 100);
     const reserveCents = this.ledger.reserveCents || 0;
     const insuranceCents = this.ledger.insuranceCents || 0;
-    const paperTotalCents = startingCents + closedPnlCents;
+    const insuranceDepositedCents = this.ledger.insuranceDepositedCents || 0;
+    // External insurance seeds expand total capital so Available is not diluted.
+    const paperTotalCents = startingCents + closedPnlCents + insuranceDepositedCents;
     return {
       startingCents,
       paperTotalCents,
       reserveCents,
       insuranceCents,
-      insuranceCapCents: Math.max(0, Math.round((Number(this.config.insuranceCapDollars) || 10) * 100)),
+      insuranceDepositedCents,
+      insuranceCapCents: insuranceArmFloorCents(this.config).armCents,
+      insuranceFloorCents: insuranceArmFloorCents(this.config).floorCents,
+      insuranceReady: !!this.ledger.insuranceReady,
       openExposureCents,
       paperAvailableCents: Math.max(0, paperTotalCents - reserveCents - insuranceCents - openExposureCents),
     };
@@ -1042,28 +1150,23 @@ class TradingBot {
 
   /**
    * Wins (insurance mode): 40% Wallet + 10% Insurance + 50% bankroll on every
-   * win from the start. Soft $10 target arms absorb (fund may keep growing).
-   * Until armed, losses hit Available; once armed, Insurance absorbs first.
+   * win from the start. Arm at $10 (sticky ready); stay usable down to $6 floor.
+   * Until armed, losses hit Available; while ready, Insurance absorbs first.
    */
   _applyReserveFlow(trade) {
     const pnlCents = Number(trade.pnlCents) || 0;
-    const targetCents = Math.max(
-      0,
-      Math.round((Number(this.config.insuranceCapDollars) || 10) * 100)
-    );
 
     const flow = applyProfitBuckets({
       pnlCents,
       reserveCents: this.ledger.reserveCents || 0,
       insuranceCents: this.ledger.insuranceCents || 0,
+      insuranceReady: !!this.ledger.insuranceReady,
       settings: this.config,
-      rebuildInsurance: true, // always keep building — soft target is not a stop
+      rebuildInsurance: true, // always keep building — arm is not a hard cap
     });
     this.ledger.reserveCents = flow.reserveCents;
     this.ledger.insuranceCents = flow.insuranceCents;
-    if ((this.ledger.insuranceCents || 0) >= targetCents) {
-      this.ledger.insuranceReady = true;
-    }
+    this.ledger.insuranceReady = !!flow.insuranceReady;
     trade.skimmedCents = flow.skimmedCents;
     trade.insuranceAddedCents = flow.insuranceAddedCents;
     trade.insuranceOverflowCents = flow.insuranceOverflowCents;
@@ -1093,15 +1196,26 @@ class TradingBot {
 
   _orderFillCount(order) {
     if (!order || typeof order !== 'object') return 0;
-    const raw =
-      order.fill_count ??
-      order.fillCount ??
-      order.filled_count ??
-      order.filledCount ??
-      order.fill_count_fp ??
-      order.fillCountFp;
-    const n = Number.parseFloat(raw);
-    return Number.isFinite(n) ? Math.floor(n) : 0;
+    // Prefer Kalshi's canonical fixed-point fields, then legacy integer / alias names.
+    // Do not treat 0 as "missing" — only skip null/undefined/''.
+    const candidates = [
+      order.fill_count_fp,
+      order.fillCountFp,
+      order.fills_count_fp,
+      order.fillsCountFp,
+      order.fill_count,
+      order.fillCount,
+      order.fills_count,
+      order.fillsCount,
+      order.filled_count,
+      order.filledCount,
+    ];
+    for (const raw of candidates) {
+      if (raw == null || raw === '') continue;
+      const n = Number.parseFloat(raw);
+      if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+    }
+    return 0;
   }
 
   _orderAvgFillPriceCents(order, side) {
@@ -1133,22 +1247,23 @@ class TradingBot {
         lastOrder = data.order || data;
         const status = String(lastOrder.status || '').toLowerCase();
         const filled = this._orderFillCount(lastOrder);
-        if (
-          filled >= minFill ||
-          status === 'executed' ||
-          status === 'filled' ||
-          status === 'complete' ||
-          status === 'completed'
-        ) {
-          return {
-            ok: filled >= minFill || status === 'executed' || status === 'filled',
-            filled: Math.max(filled, status === 'executed' || status === 'filled' ? minFill : filled),
-            avgPriceCents: null,
-            order: lastOrder,
-          };
+        // Never invent a fill count from status alone — that desyncs the ledger
+        // from Kalshi inventory when fill_* fields are missing or misnamed.
+        if (filled >= minFill) {
+          return { ok: true, filled, avgPriceCents: null, order: lastOrder };
         }
         if (status === 'canceled' || status === 'cancelled') {
           return { ok: false, filled, avgPriceCents: null, order: lastOrder };
+        }
+        if (
+          (status === 'executed' ||
+            status === 'filled' ||
+            status === 'complete' ||
+            status === 'completed') &&
+          filled > 0
+        ) {
+          // Terminal status with a partial fill count — stop waiting.
+          return { ok: filled >= minFill, filled, avgPriceCents: null, order: lastOrder };
         }
       } catch (err) {
         console.warn(`[bot] getOrder ${orderId} poll failed:`, err.message);
@@ -1168,6 +1283,99 @@ class TradingBot {
     }
     const filled = this._orderFillCount(lastOrder);
     return { ok: filled >= minFill, filled, avgPriceCents: null, order: lastOrder };
+  }
+
+  /**
+   * After a live sell partially fills, book the sold contracts as a closed
+   * ledger row and shrink the still-open trade so inventory matches Kalshi.
+   */
+  _bookPartialLiveExit(trade, soldContracts, exitPriceCents, reason, orderId) {
+    const sold = Math.max(0, Math.min(Math.floor(Number(soldContracts) || 0), trade.contracts));
+    if (sold < 1) return;
+    const remaining = trade.contracts - sold;
+    const entry = Number(trade.entryPriceCents) || 0;
+    const exitPx = Math.max(1, Math.min(99, Math.round(Number(exitPriceCents))));
+    const closedSlice = {
+      id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-partial-${sold}`,
+      mode: trade.mode,
+      symbol: trade.symbol,
+      ticker: trade.ticker,
+      side: trade.side,
+      contracts: sold,
+      stakeDollars: +((sold * entry) / 100).toFixed(2),
+      entryPriceCents: entry,
+      floorStrike: trade.floorStrike,
+      openedAt: trade.openedAt,
+      windowCloseTime: trade.windowCloseTime,
+      engineProbability: trade.engineProbability,
+      engineConfidence: trade.engineConfidence,
+      status: 'closed',
+      closedAt: Date.now(),
+      exitPriceCents: exitPx,
+      exitReason: reason,
+      pnlCents: (exitPx - entry) * sold,
+      liveOrderId: trade.liveOrderId || null,
+      liveExitOrderId: orderId || null,
+      partialExitOf: trade.id,
+    };
+    this._applyReserveFlow(closedSlice);
+    this.ledger.trades.unshift(closedSlice);
+    if (this.ledger.trades.length > 200) this.ledger.trades.length = 200;
+
+    trade.contracts = remaining;
+    trade.stakeDollars = +((remaining * entry) / 100).toFixed(2);
+
+    this.lastDecision =
+      `Partial exit ${trade.symbol} ${String(trade.side).toUpperCase()}: sold ${sold} @ ${exitPx}¢ ` +
+      `(P&L $${(closedSlice.pnlCents / 100).toFixed(2)}); ${remaining} still open.`;
+    this._logActivity(this.lastDecision, {
+      kind: 'close',
+      symbol: trade.symbol,
+      side: trade.side,
+      pnlCents: closedSlice.pnlCents,
+      tradeId: closedSlice.id,
+    });
+    upsertTradeLog({
+      id: closedSlice.id,
+      mode: closedSlice.mode,
+      symbol: closedSlice.symbol,
+      ticker: closedSlice.ticker,
+      side: closedSlice.side,
+      contracts: closedSlice.contracts,
+      stakeDollars: closedSlice.stakeDollars,
+      entryPriceCents: closedSlice.entryPriceCents,
+      exitPriceCents: closedSlice.exitPriceCents,
+      floorStrike: closedSlice.floorStrike,
+      openedAt: closedSlice.openedAt,
+      closedAt: closedSlice.closedAt,
+      windowCloseTime: closedSlice.windowCloseTime,
+      engineProbability: closedSlice.engineProbability,
+      engineConfidence: closedSlice.engineConfidence,
+      status: 'closed',
+      exitReason: closedSlice.exitReason,
+      pnlCents: closedSlice.pnlCents,
+      skimmedCents: closedSlice.skimmedCents || 0,
+      insuranceAddedCents: closedSlice.insuranceAddedCents || 0,
+      insuranceDrawnCents: closedSlice.insuranceDrawnCents || 0,
+      partialExitOf: trade.id,
+    });
+    upsertTradeLog({
+      id: trade.id,
+      mode: trade.mode,
+      symbol: trade.symbol,
+      ticker: trade.ticker,
+      side: trade.side,
+      contracts: trade.contracts,
+      stakeDollars: trade.stakeDollars,
+      entryPriceCents: trade.entryPriceCents,
+      floorStrike: trade.floorStrike,
+      openedAt: trade.openedAt,
+      windowCloseTime: trade.windowCloseTime,
+      engineProbability: trade.engineProbability,
+      engineConfidence: trade.engineConfidence,
+      status: 'open',
+    });
+    this._persist();
   }
 
   /**
@@ -1210,9 +1418,22 @@ class TradingBot {
             attempts: 6,
             delayMs: 350,
           });
-          if (!fill.ok || fill.filled < trade.contracts) {
+          const filled = Math.max(0, Number(fill.filled) || 0);
+          if (filled > 0 && filled < trade.contracts) {
+            // Partial fill then cancel/timeout: ledger must shrink with exchange
+            // inventory. Book the sold slice; leave the remainder OPEN.
+            const avgPartial = this._orderAvgFillPriceCents(fill.order, trade.side);
+            const exitPx = Number.isFinite(avgPartial) ? avgPartial : sellPrice;
+            this._bookPartialLiveExit(trade, filled, exitPx, reason, orderId);
             throw new Error(
-              `sell not fully filled (got ${fill.filled || 0}/${trade.contracts}, status ${
+              `sell partially filled (got ${filled}/${filled + trade.contracts}, status ${
+                fill.order && fill.order.status
+              }) — remainder left open`
+            );
+          }
+          if (!fill.ok || filled < trade.contracts) {
+            throw new Error(
+              `sell not fully filled (got ${filled}/${trade.contracts}, status ${
                 fill.order && fill.order.status
               })`
             );
@@ -1786,14 +2007,17 @@ class TradingBot {
           attempts: 6,
           delayMs: 350,
         });
-        if (!fill.ok || fill.filled < 1) {
+        // Accept any fill ≥1 even when the full size did not fill (after cancel).
+        // Rejecting partials would orphan real Kalshi inventory with no ledger row.
+        const filled = Math.max(0, Number(fill.filled) || 0);
+        if (filled < 1) {
           this.lastError =
-            `Live entry on ${symbol} did not fill (filled ${fill.filled || 0}/${trade.contracts}) — not recording trade.`;
+            `Live entry on ${symbol} did not fill (filled ${filled}/${trade.contracts}) — not recording trade.`;
           console.error('[bot]', this.lastError);
           return;
         }
-        if (fill.filled < trade.contracts) {
-          trade.contracts = fill.filled;
+        if (filled < trade.contracts) {
+          trade.contracts = filled;
           trade.stakeDollars = +((trade.contracts * priceCents) / 100).toFixed(2);
         }
         const avg = this._orderAvgFillPriceCents(fill.order, side);
@@ -2317,6 +2541,7 @@ class TradingBot {
         netPnlCents: closed.reduce((sum, t) => sum + (t.pnlCents || 0), 0),
         reserveCents: this.ledger.reserveCents || 0,
         insuranceCents: this.ledger.insuranceCents || 0,
+        insuranceDepositedCents: this.ledger.insuranceDepositedCents || 0,
         lifetimeTrades: permanentLog.length,
       },
       capital: {
@@ -2343,4 +2568,9 @@ module.exports = {
   checkPostStopRecovery,
   checkPostStopPeerCascade,
   applyProfitBuckets,
+  insuranceArmFloorCents,
+  syncInsuranceReady,
+  normalizeInsuranceThresholds,
+  INSURANCE_ARM_DEFAULT,
+  INSURANCE_FLOOR_DEFAULT,
 };

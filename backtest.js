@@ -30,7 +30,7 @@ function makeSeries(historySlice) {
 
 function normalizeSettings(raw = {}) {
   const skimMode = ['insurance', 'percent', 'fixed', 'off'].includes(raw.skimMode) ? raw.skimMode : 'insurance';
-  return {
+  const out = {
     edgeThresholdPct: Number.isFinite(Number(raw.edgeThresholdPct)) ? Number(raw.edgeThresholdPct) : 1,
     minConfidence: Number.isFinite(Number(raw.minConfidence)) ? Number(raw.minConfidence) : 55,
     stopLossCents: Number.isFinite(Number(raw.stopLossCents)) ? Number(raw.stopLossCents) : 23,
@@ -53,12 +53,17 @@ function normalizeSettings(raw = {}) {
     skimPercent: Number.isFinite(Number(raw.skimPercent)) ? Number(raw.skimPercent) : 50,
     skimFixedDollars: Number.isFinite(Number(raw.skimFixedDollars)) ? Number(raw.skimFixedDollars) : 5,
     insuranceCapDollars: Number.isFinite(Number(raw.insuranceCapDollars)) ? Number(raw.insuranceCapDollars) : 10,
+    insuranceFloorDollars: Number.isFinite(Number(raw.insuranceFloorDollars)) ? Number(raw.insuranceFloorDollars) : 6,
     paperStartingBalanceDollars: Number.isFinite(Number(raw.paperStartingBalanceDollars))
       ? Number(raw.paperStartingBalanceDollars)
       : 100,
     // No historical Kalshi book — assume even-money (50¢) so edge is vs a coin flip.
     assumedEntryCents: Number.isFinite(Number(raw.assumedEntryCents)) ? Number(raw.assumedEntryCents) : 50,
   };
+  if (out.insuranceFloorDollars >= out.insuranceCapDollars) {
+    out.insuranceFloorDollars = out.insuranceCapDollars >= 1 ? out.insuranceCapDollars - 1 : 0;
+  }
+  return out;
 }
 
 function pickWindowKey(minutesRemaining) {
@@ -76,12 +81,13 @@ function computeSkim(pnlCents, settings) {
   return Math.round(pnlCents * (settings.skimPercent / 100));
 }
 
-/** Wins → wallet/insurance per settings; losses draw insurance when in insurance mode. */
-function applyReserveFlow(pnlCents, reserveCents, insuranceCents, settings, { rebuildInsurance = true } = {}) {
+/** Wins → wallet/insurance per settings; losses draw insurance when ready (hysteresis). */
+function applyReserveFlow(pnlCents, reserveCents, insuranceCents, settings, { rebuildInsurance = true, insuranceReady = false } = {}) {
   return applyProfitBuckets({
     pnlCents,
     reserveCents,
     insuranceCents: insuranceCents || 0,
+    insuranceReady,
     settings,
     rebuildInsurance,
   });
@@ -353,13 +359,13 @@ function backtestWithSettings(
       if (exitPrice == null) continue;
 
       const pnlCents = exitPrice * trade.contracts - trade.entryPriceCents * trade.contracts;
-      const targetCents = Math.max(0, Math.round((Number(settings.insuranceCapDollars) || 10) * 100));
       const flow = applyReserveFlow(pnlCents, reserveCents, insuranceCents, settings, {
         rebuildInsurance: true,
+        insuranceReady,
       });
       reserveCents = flow.reserveCents;
       insuranceCents = flow.insuranceCents;
-      if (insuranceCents >= targetCents) insuranceReady = true;
+      insuranceReady = !!flow.insuranceReady;
       closedPnlCents += pnlCents;
       closedTrades.push({
         ...trade,
@@ -652,13 +658,13 @@ function backtestWithSettings(
     const won = trade.side === 'yes' ? settledUp : !settledUp;
     const exitPrice = won ? 100 : 0;
     const pnlCents = exitPrice * trade.contracts - trade.entryPriceCents * trade.contracts;
-    const targetCents = Math.max(0, Math.round((Number(settings.insuranceCapDollars) || 10) * 100));
     const flow = applyReserveFlow(pnlCents, reserveCents, insuranceCents, settings, {
       rebuildInsurance: true,
+      insuranceReady,
     });
     reserveCents = flow.reserveCents;
     insuranceCents = flow.insuranceCents;
-    if (insuranceCents >= targetCents) insuranceReady = true;
+    insuranceReady = !!flow.insuranceReady;
     closedPnlCents += pnlCents;
     closedTrades.push({
       ...trade,
@@ -832,6 +838,7 @@ function huntBestSettings(candlesBySymbol, baseSettings = {}, runOptions = {}) {
             skimPercent: base.skimPercent,
             skimFixedDollars: base.skimFixedDollars,
             insuranceCapDollars: base.insuranceCapDollars,
+            insuranceFloorDollars: base.insuranceFloorDollars,
           },
           trades: trading.trades,
           wins: trading.wins,

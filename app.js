@@ -1131,8 +1131,8 @@ function formatMoneyCents(cents, { signed = false } = {}) {
 
 /**
  * Display-only capital ledger. Uses existing capital fields as-is:
- * Available Cash + Open Positions + Reserved Profit = Total Equity
- * Net P&L = Total Equity − Starting Bankroll
+ * Available + Open + Wallet + Insurance = Total Equity
+ * Net P&L = Total Equity − Starting Bankroll − Insurance deposits (manual seeds)
  */
 function buildCapitalLedgerHtml(capital) {
   if (!capital) return '';
@@ -1142,11 +1142,15 @@ function buildCapitalLedgerHtml(capital) {
   const reserved = Number(capital.reserveCents) || 0;
   const insurance = Number(capital.insuranceCents) || 0;
   const insuranceCap = Number(capital.insuranceCapCents) || 1000;
+  const insuranceFloor = Number(capital.insuranceFloorCents) || 600;
+  const deposited = Number(capital.insuranceDepositedCents) || 0;
+  const insuranceReady = !!capital.insuranceReady;
   const totalEquity = available + openPositions + reserved + insurance;
-  const netPnl = totalEquity - starting;
+  const netPnl = totalEquity - starting - deposited;
   const pnlClass = netPnl > 0 ? 'chip-positive' : netPnl < 0 ? 'chip-negative' : '';
   const reservedClass = reserved > 0 ? 'chip-positive' : '';
   const insuranceClass = insurance > 0 ? 'chip-positive' : '';
+  const readyLabel = insuranceReady ? ' · armed' : '';
 
   return `
     <div class="capital-ledger">
@@ -1156,18 +1160,62 @@ function buildCapitalLedgerHtml(capital) {
         <span class="${reservedClass}">${formatMoneyCents(reserved)}</span>
       </div>
       <div class="capital-row capital-reserved">
-        <span>Insurance Fund <em>(soft target ${formatMoneyCents(insuranceCap)})</em></span>
+        <span>Insurance Fund <em>(arm ${formatMoneyCents(insuranceCap)} / floor ${formatMoneyCents(insuranceFloor)}${readyLabel})</em></span>
         <span class="${insuranceClass}">${formatMoneyCents(insurance)}</span>
       </div>
+      <div class="insurance-deposit-row">
+        <input id="bot-insurance-deposit" type="number" min="0.01" max="500" step="0.01" inputmode="decimal" placeholder="Amount $" aria-label="Insurance deposit dollars" />
+        <button class="btn-secondary" id="bot-insurance-deposit-btn" type="button">Add to Insurance</button>
+      </div>
+      <p class="field-hint insurance-deposit-hint">Seed or top up with your own money (external — does not take from Available). Max $500 per add.</p>
+      <p class="settings-hint" id="bot-insurance-deposit-feedback"></p>
       <div class="capital-divider"></div>
       <div class="capital-row"><span>Starting Bankroll</span><span>${formatMoneyCents(starting)}</span></div>
+      ${deposited > 0 ? `<div class="capital-row"><span>Insurance deposits <em>(manual)</em></span><span>${formatMoneyCents(deposited)}</span></div>` : ''}
       <div class="capital-row"><span>Available Cash</span><span>${formatMoneyCents(available)}</span></div>
       <div class="capital-row"><span>Open Positions Value</span><span>${formatMoneyCents(openPositions)}</span></div>
       <div class="capital-divider"></div>
       <div class="capital-row capital-total"><span>Total Equity</span><span>${formatMoneyCents(totalEquity)}</span></div>
       <div class="capital-row capital-pnl"><span>Net P&amp;L</span><span class="${pnlClass}">${formatMoneyCents(netPnl, { signed: true })}</span></div>
-      <p class="capital-formula">Insurance: every win is 10% Insurance / 40% Wallet / 50% Available from the start. Soft $10 target = armed — fund keeps growing past it, and only then absorbs losses. Until armed, losses hit Available; Wallet stays locked.</p>
+      <p class="capital-formula">Insurance: every win is 10% Insurance / 40% Wallet / 50% Available. Arms at ${formatMoneyCents(insuranceCap)}; stays usable down to ${formatMoneyCents(insuranceFloor)}. Below the floor, Available takes losses until re-armed. Fund keeps growing with no hard cap. Manual Add seeds without touching Available.</p>
     </div>`;
+}
+
+async function depositInsuranceFromUi() {
+  const input = document.getElementById('bot-insurance-deposit');
+  const feedback = document.getElementById('bot-insurance-deposit-feedback');
+  const btn = document.getElementById('bot-insurance-deposit-btn');
+  if (!input || !feedback) return;
+  const dollars = parseFloat(input.value);
+  if (!Number.isFinite(dollars) || dollars <= 0) {
+    feedback.textContent = 'Enter a positive dollar amount.';
+    feedback.style.color = 'var(--down)';
+    return;
+  }
+  const { engineUrl } = loadSettings();
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(`${engineUrl}/api/bot/insurance/deposit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dollars }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.message || `Deposit failed (HTTP ${res.status}).`);
+    await refreshBotStatus();
+    const afterFeedback = document.getElementById('bot-insurance-deposit-feedback');
+    if (afterFeedback) {
+      afterFeedback.textContent = data.message || 'Insurance updated.';
+      afterFeedback.style.color = 'var(--up)';
+    }
+  } catch (err) {
+    const errFeedback = document.getElementById('bot-insurance-deposit-feedback') || feedback;
+    errFeedback.textContent = `Could not add to Insurance: ${err.message}`;
+    errFeedback.style.color = 'var(--down)';
+  } finally {
+    const afterBtn = document.getElementById('bot-insurance-deposit-btn');
+    if (afterBtn) afterBtn.disabled = false;
+  }
 }
 
 function chip(label, value, colorClass) {
@@ -1205,10 +1253,10 @@ function updateSkimSliderDisplay() {
   if (mode === 'insurance') {
     input.min = '1';
     input.max = '50';
-    display.textContent = `$${Math.round(input.value)} target`;
+    display.textContent = `$${Math.round(input.value)} arm`;
     if (hint) {
       hint.textContent =
-        'Each win: 10% → Insurance, 40% → Wallet, 50% → Available. Soft target arms the fund (keeps growing past it). Losses only draw Insurance once armed; until then Available takes the hit.';
+        'Each win: 10% → Insurance, 40% → Wallet, 50% → Available. Arms at this amount; stays usable down to the $6 floor. Below floor, Available takes losses until re-armed. Fund keeps growing with no hard cap.';
     }
     if (label) label.querySelector('span.field-hint') || hint;
   } else if (mode === 'percent') {
@@ -1231,7 +1279,8 @@ function formatSkimLabel(config) {
   if (!config || config.skimMode === 'off') return 'skim off';
   if (config.skimMode === 'insurance') {
     const cap = config.insuranceCapDollars != null ? config.insuranceCapDollars : 10;
-    return `insurance 10/40/50 · $${cap} soft target`;
+    const floor = config.insuranceFloorDollars != null ? config.insuranceFloorDollars : 6;
+    return `insurance 10/40/50 · arm $${cap} / floor $${floor}`;
   }
   if (config.skimMode === 'percent') return `skim ${config.skimPercent}% of each win → Wallet`;
   return `skim $${Number(config.skimFixedDollars || 0).toFixed(0)} per win → Wallet`;
@@ -1468,7 +1517,7 @@ function renderBacktestResults(data, dayLabel) {
     s.skimMode === 'off'
       ? 'off'
       : s.skimMode === 'insurance'
-        ? `insurance 10/40/50 · $${s.insuranceCapDollars != null ? s.insuranceCapDollars : 10} soft target`
+        ? `insurance 10/40/50 · arm $${s.insuranceCapDollars != null ? s.insuranceCapDollars : 10} / floor $${s.insuranceFloorDollars != null ? s.insuranceFloorDollars : 6}`
         : s.skimMode === 'percent'
         ? `${s.skimPercent}% of profit`
         : `$${Number(s.skimFixedDollars || 0).toFixed(0)} per win`;
@@ -1730,6 +1779,20 @@ function wireBotUI() {
   document.getElementById('bot-dashboard-toggle').addEventListener('click', (event) => setBotRunning(event.currentTarget.dataset.running === 'true'));
   document.getElementById('bot-dashboard-open').addEventListener('click', openBotOverlay);
   document.getElementById('bot-reset-paper').addEventListener('click', resetPaperHistory);
+  const botOverlay = document.getElementById('bot-overlay');
+  if (botOverlay) {
+    botOverlay.addEventListener('click', (event) => {
+      if (event.target && event.target.id === 'bot-insurance-deposit-btn') {
+        depositInsuranceFromUi();
+      }
+    });
+    botOverlay.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && event.target && event.target.id === 'bot-insurance-deposit') {
+        event.preventDefault();
+        depositInsuranceFromUi();
+      }
+    });
+  }
   document.querySelectorAll('.backtest-day-btn').forEach((btn) => {
     btn.addEventListener('click', () => runBacktest(btn.dataset.hours, { hunt: false }));
   });

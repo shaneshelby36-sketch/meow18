@@ -347,7 +347,7 @@
               <input id="bot-skim-amount" type="range" min="0" max="100" step="1" />
               <span class="slider-value" id="bot-skim-amount-value">—</span>
             </div>
-            <span class="field-hint" id="bot-skim-hint">Insurance: from the start, each win is 10% Insurance / 40% Wallet / 50% Available. Soft $10 arms the fund (keeps building past it). Losses only draw Insurance once armed; until then Available takes the hit.</span>
+            <span class="field-hint" id="bot-skim-hint">Insurance: each win is 10% Insurance / 40% Wallet / 50% Available. Arms at the arm amount (default $10); stays usable down to the $6 floor. Below floor, Available takes losses until re-armed at arm again. Fund keeps growing with no hard cap.</span>
           </label>
         </div>
         <div class="settings-actions">
