@@ -54,6 +54,9 @@ function normalizeSettings(raw = {}) {
     skimFixedDollars: Number.isFinite(Number(raw.skimFixedDollars)) ? Number(raw.skimFixedDollars) : 5,
     insuranceCapDollars: Number.isFinite(Number(raw.insuranceCapDollars)) ? Number(raw.insuranceCapDollars) : 10,
     insuranceFloorDollars: Number.isFinite(Number(raw.insuranceFloorDollars)) ? Number(raw.insuranceFloorDollars) : 6,
+    insuranceOverflowDollars: Number.isFinite(Number(raw.insuranceOverflowDollars))
+      ? Number(raw.insuranceOverflowDollars)
+      : 15,
     paperStartingBalanceDollars: Number.isFinite(Number(raw.paperStartingBalanceDollars))
       ? Number(raw.paperStartingBalanceDollars)
       : 100,
@@ -62,6 +65,9 @@ function normalizeSettings(raw = {}) {
   };
   if (out.insuranceFloorDollars >= out.insuranceCapDollars) {
     out.insuranceFloorDollars = out.insuranceCapDollars >= 1 ? out.insuranceCapDollars - 1 : 0;
+  }
+  if (out.insuranceOverflowDollars < out.insuranceCapDollars) {
+    out.insuranceOverflowDollars = out.insuranceCapDollars;
   }
   return out;
 }
@@ -839,6 +845,7 @@ function huntBestSettings(candlesBySymbol, baseSettings = {}, runOptions = {}) {
             skimFixedDollars: base.skimFixedDollars,
             insuranceCapDollars: base.insuranceCapDollars,
             insuranceFloorDollars: base.insuranceFloorDollars,
+            insuranceOverflowDollars: base.insuranceOverflowDollars,
           },
           trades: trading.trades,
           wins: trading.wins,

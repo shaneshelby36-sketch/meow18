@@ -19,7 +19,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 10;
+const SETTINGS_DEFAULTS_VERSION = 11;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -89,12 +89,14 @@ const EDITABLE_NUMERIC_FIELDS = [
   'skimFixedDollars',
   'insuranceCapDollars',
   'insuranceFloorDollars',
+  'insuranceOverflowDollars',
   'paperStartingBalanceDollars',
 ];
 
-/** Default arm ($10) / floor ($6) for insurance hysteresis. */
+/** Default arm ($10) / floor ($6) for insurance hysteresis; soft fill ceiling ($15). */
 const INSURANCE_ARM_DEFAULT = 10;
 const INSURANCE_FLOOR_DEFAULT = 6;
+const INSURANCE_OVERFLOW_DEFAULT = 15;
 
 /**
  * Resolve arm/floor cents. Floor must be strictly below arm — clamp if not.
@@ -114,6 +116,14 @@ function insuranceArmFloorCents(settings = {}) {
   return { armCents, floorCents };
 }
 
+/** Soft ceiling for the 20% win skim (cents). Fund may sit above via manual seed. */
+function insuranceOverflowCents(settings = {}) {
+  const dollars = Number.isFinite(Number(settings.insuranceOverflowDollars))
+    ? Number(settings.insuranceOverflowDollars)
+    : INSURANCE_OVERFLOW_DEFAULT;
+  return Math.max(0, Math.round(dollars * 100));
+}
+
 /** Sticky ready: arm on ≥ arm, disarm below floor, else keep prior flag. */
 function syncInsuranceReady(balanceCents, ready, armCents, floorCents) {
   const bal = Number(balanceCents) || 0;
@@ -122,18 +132,23 @@ function syncInsuranceReady(balanceCents, ready, armCents, floorCents) {
   return !!ready;
 }
 
-/** Clamp config knobs so floor stays strictly below arm. */
+/** Clamp config knobs so floor stays strictly below arm; normalize overflow. */
 function normalizeInsuranceThresholds(config) {
   if (!config || typeof config !== 'object') return config;
   let arm = Number(config.insuranceCapDollars);
   let floor = Number(config.insuranceFloorDollars);
+  let overflow = Number(config.insuranceOverflowDollars);
   if (!Number.isFinite(arm) || arm < 0) arm = INSURANCE_ARM_DEFAULT;
   if (!Number.isFinite(floor) || floor < 0) floor = INSURANCE_FLOOR_DEFAULT;
+  if (!Number.isFinite(overflow) || overflow < 0) overflow = INSURANCE_OVERFLOW_DEFAULT;
   if (floor >= arm) {
     floor = arm >= 1 ? arm - 1 : 0;
   }
+  // Overflow is a soft fill ceiling — keep it at least at arm so hysteresis still makes sense.
+  if (overflow < arm) overflow = arm;
   config.insuranceCapDollars = arm;
   config.insuranceFloorDollars = floor;
+  config.insuranceOverflowDollars = overflow;
   return config;
 }
 
@@ -429,8 +444,11 @@ function checkPostStopPeerCascade({
 /**
  * Profit split for skimMode === 'insurance':
  *   40% → Personal Wallet (locked paycheck)
- *   20% → Insurance Fund (builds from the start; no hard cap — keeps growing)
+ *   20% → Insurance Fund (builds until insuranceOverflowDollars soft ceiling)
  *   40% → Active Bankroll (Available Cash)
+ * Soft overflow: while fund ≥ overflow, the 20% skim stays in Available instead
+ * (wallet still 40%). Partial fills up to the ceiling; remainder → Available.
+ * Fund does not auto-empty at the ceiling — it stays as cushion.
  * Losses: sticky hysteresis — arm at insuranceCapDollars ($10), stay usable
  *         down to insuranceFloorDollars ($6). Absorb only while insuranceReady;
  *         below floor, disarm until balance ≥ arm again.
@@ -458,6 +476,7 @@ function applyProfitBuckets({
   };
 
   const { armCents, floorCents } = insuranceArmFloorCents(settings);
+  const overflowCapCents = insuranceOverflowCents(settings);
 
   if (settings.skimMode !== 'insurance') {
     if (pnl <= 0) return out;
@@ -493,13 +512,18 @@ function applyProfitBuckets({
   }
 
   const wallet = Math.round(pnl * 0.4);
-  // Always take 20% into insurance when rebuilding (default: every win).
-  // Arm threshold does not clip or stop contributions.
-  const insuranceAdd = rebuildInsurance ? Math.round(pnl * 0.2) : 0;
+  // Take up to 20% into insurance when rebuilding, stopping at the soft overflow
+  // ceiling. Arm threshold does not clip contributions; overflow does.
+  // Remainder of the 20% stays in Available (not wallet).
+  const desiredAdd = rebuildInsurance ? Math.round(pnl * 0.2) : 0;
+  const room = Math.max(0, overflowCapCents - nextInsurance);
+  const insuranceAdd = Math.min(desiredAdd, room);
+  const overflowAdd = desiredAdd - insuranceAdd;
   nextInsurance += insuranceAdd;
 
   out.skimmedCents = wallet;
   out.insuranceAddedCents = insuranceAdd;
+  out.insuranceOverflowCents = overflowAdd;
   out.reserveCents = nextReserve + wallet;
   out.insuranceCents = nextInsurance;
   out.insuranceReady = syncInsuranceReady(nextInsurance, ready, armCents, floorCents);
@@ -728,8 +752,10 @@ class TradingBot {
       skimFixedDollars: 5, // used when skimMode === 'fixed'
       // Insurance fund (skimMode === 'insurance'): 20% fund / 40% wallet / 40% bankroll
       // Hysteresis: arm at insuranceCapDollars, stay usable down to insuranceFloorDollars.
+      // Soft fill ceiling: insuranceOverflowDollars — excess 20% skim → Available.
       insuranceCapDollars: INSURANCE_ARM_DEFAULT,
       insuranceFloorDollars: INSURANCE_FLOOR_DEFAULT,
+      insuranceOverflowDollars: INSURANCE_OVERFLOW_DEFAULT,
       paperStartingBalanceDollars: 100, // trading bankroll (also the capital backing paper trades)
       mode: 'paper', // 'paper' | 'live'
       liveAuthorized: false,
@@ -849,6 +875,9 @@ class TradingBot {
     normalizeInsuranceThresholds(this.config);
     if (applied.insuranceCapDollars != null) applied.insuranceCapDollars = this.config.insuranceCapDollars;
     if (applied.insuranceFloorDollars != null) applied.insuranceFloorDollars = this.config.insuranceFloorDollars;
+    if (applied.insuranceOverflowDollars != null) {
+      applied.insuranceOverflowDollars = this.config.insuranceOverflowDollars;
+    }
     saveConfigOverrides(collectConfigOverrides(this.config));
     return { applied, config: this.config };
   }
@@ -1022,6 +1051,7 @@ class TradingBot {
       insuranceDepositedCents,
       insuranceCapCents: insuranceArmFloorCents(this.config).armCents,
       insuranceFloorCents: insuranceArmFloorCents(this.config).floorCents,
+      insuranceOverflowCents: insuranceOverflowCents(this.config),
       insuranceReady: !!this.ledger.insuranceReady,
       openExposureCents,
       paperAvailableCents: Math.max(0, paperTotalCents - reserveCents - insuranceCents - openExposureCents),
@@ -1150,7 +1180,8 @@ class TradingBot {
 
   /**
    * Wins (insurance mode): 40% Wallet + 20% Insurance + 40% bankroll on every
-   * win from the start. Arm at $10 (sticky ready); stay usable down to $6 floor.
+   * win from the start, until the soft overflow ceiling ($15). Excess 20% →
+   * Available. Arm at $10 (sticky ready); stay usable down to $6 floor.
    * Until armed, losses hit Available; while ready, Insurance absorbs first.
    */
   _applyReserveFlow(trade) {
@@ -1162,7 +1193,7 @@ class TradingBot {
       insuranceCents: this.ledger.insuranceCents || 0,
       insuranceReady: !!this.ledger.insuranceReady,
       settings: this.config,
-      rebuildInsurance: true, // always keep building — arm is not a hard cap
+      rebuildInsurance: true, // keep building until soft overflow ceiling
     });
     this.ledger.reserveCents = flow.reserveCents;
     this.ledger.insuranceCents = flow.insuranceCents;
@@ -1472,7 +1503,7 @@ class TradingBot {
         decision += ` Insurance +$${(trade.insuranceAddedCents / 100).toFixed(2)}.`;
       }
       if (trade.insuranceOverflowCents > 0) {
-        decision += ` Insurance full — $${(trade.insuranceOverflowCents / 100).toFixed(2)} → bankroll.`;
+        decision += ` Insurance full — $${(trade.insuranceOverflowCents / 100).toFixed(2)} → available.`;
       }
       if (trade.insuranceReleasedCents > 0) {
         decision += ` Insurance released $${(trade.insuranceReleasedCents / 100).toFixed(2)} → bankroll.`;
@@ -2571,8 +2602,10 @@ module.exports = {
   checkPostStopPeerCascade,
   applyProfitBuckets,
   insuranceArmFloorCents,
+  insuranceOverflowCents,
   syncInsuranceReady,
   normalizeInsuranceThresholds,
   INSURANCE_ARM_DEFAULT,
   INSURANCE_FLOOR_DEFAULT,
+  INSURANCE_OVERFLOW_DEFAULT,
 };

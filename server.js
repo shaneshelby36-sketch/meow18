@@ -100,6 +100,7 @@ const bot = KALSHI_ENABLED
         skimPercent: parseFloat(process.env.KALSHI_SKIM_PERCENT || '50'),
         insuranceCapDollars: parseFloat(process.env.KALSHI_INSURANCE_CAP_DOLLARS || '10'),
         insuranceFloorDollars: parseFloat(process.env.KALSHI_INSURANCE_FLOOR_DOLLARS || '6'),
+        insuranceOverflowDollars: parseFloat(process.env.KALSHI_INSURANCE_OVERFLOW_DOLLARS || '15'),
         paperStartingBalanceDollars: parseFloat(process.env.KALSHI_PAPER_STARTING_BALANCE || '100'),
         mode: wantsLive ? 'live' : 'paper',
         // Fixed ceiling for this process's lifetime, set only from the
@@ -541,6 +542,7 @@ app.get("/", (req, res) => {
       skimFixedDollars: source.skimFixedDollars ?? live.skimFixedDollars,
       insuranceCapDollars: source.insuranceCapDollars ?? live.insuranceCapDollars,
       insuranceFloorDollars: source.insuranceFloorDollars ?? live.insuranceFloorDollars,
+      insuranceOverflowDollars: source.insuranceOverflowDollars ?? live.insuranceOverflowDollars,
       paperStartingBalanceDollars: source.paperStartingBalanceDollars ?? live.paperStartingBalanceDollars,
       assumedEntryCents: source.assumedEntryCents ?? 50,
     };

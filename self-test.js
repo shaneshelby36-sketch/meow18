@@ -179,6 +179,7 @@ function makeBot(client, config = {}) {
     skimFixedDollars: config.skimFixedDollars ?? 5,
     insuranceCapDollars: config.insuranceCapDollars ?? 10,
     insuranceFloorDollars: config.insuranceFloorDollars ?? 6,
+    insuranceOverflowDollars: config.insuranceOverflowDollars ?? 15,
     paperStartingBalanceDollars: config.paperStartingBalanceDollars ?? 100,
     stakingStrategy: config.stakingStrategy ?? 'fixed',
     symbol: config.symbol ?? 'ETH',
@@ -1232,9 +1233,14 @@ async function testBotTradingFlow() {
   check(closed && closed.pnlCents > 0, 'winning settle has positive PnL');
   check(closed.skimmedCents === 200 || bot.ledger.reserveCents >= 200, 'fixed skim applied');
 
-  // Insurance: 20/40/40; hysteresis arm $10 / floor $6
+  // Insurance: 20/40/40; hysteresis arm $10 / floor $6; soft overflow $15
   {
-    const insSettings = { skimMode: 'insurance', insuranceCapDollars: 10, insuranceFloorDollars: 6 };
+    const insSettings = {
+      skimMode: 'insurance',
+      insuranceCapDollars: 10,
+      insuranceFloorDollars: 6,
+      insuranceOverflowDollars: 15,
+    };
 
     const win = applyProfitBuckets({
       pnlCents: 1000,
@@ -1247,6 +1253,7 @@ async function testBotTradingFlow() {
     checkEq(win.skimmedCents, 400, 'insurance win: 40% wallet');
     checkEq(win.insuranceAddedCents, 200, 'insurance win: 20% to fund');
     checkEq(win.insuranceCents, 200, 'insurance fund balance');
+    checkEq(win.insuranceOverflowCents, 0, 'under overflow: no overflow');
     checkEq(win.insuranceReady, false, 'under arm: not ready after small win');
 
     const keepGoing = applyProfitBuckets({
@@ -1258,8 +1265,75 @@ async function testBotTradingFlow() {
       rebuildInsurance: true,
     });
     checkEq(keepGoing.insuranceAddedCents, 200, 'keeps taking 20% past arm');
-    checkEq(keepGoing.insuranceCents, 1200, 'fund can grow above $10');
+    checkEq(keepGoing.insuranceCents, 1200, 'fund can grow above $10 toward overflow');
+    checkEq(keepGoing.insuranceOverflowCents, 0, 'past arm but under overflow: no overflow');
     checkEq(keepGoing.insuranceReady, true, 'stays ready above arm');
+
+    // Fill exactly to $15 overflow ceiling
+    const fillToOverflow = applyProfitBuckets({
+      pnlCents: 1500,
+      reserveCents: 0,
+      insuranceCents: 1200,
+      insuranceReady: true,
+      settings: insSettings,
+      rebuildInsurance: true,
+    });
+    checkEq(fillToOverflow.insuranceAddedCents, 300, 'fills remaining room to $15');
+    checkEq(fillToOverflow.insuranceCents, 1500, 'fund at overflow cap $15');
+    checkEq(fillToOverflow.insuranceOverflowCents, 0, 'exact fill: no overflow skim');
+    checkEq(fillToOverflow.skimmedCents, 600, 'wallet still 40% at exact fill');
+
+    // At cap: full 20% → Available
+    const atCapOverflow = applyProfitBuckets({
+      pnlCents: 1000,
+      reserveCents: 400,
+      insuranceCents: 1500,
+      insuranceReady: true,
+      settings: insSettings,
+      rebuildInsurance: true,
+    });
+    checkEq(atCapOverflow.insuranceAddedCents, 0, 'at overflow: no insurance add');
+    checkEq(atCapOverflow.insuranceCents, 1500, 'at overflow: fund stays at $15 (no auto-empty)');
+    checkEq(atCapOverflow.insuranceOverflowCents, 200, 'at overflow: 20% → available');
+    checkEq(atCapOverflow.skimmedCents, 400, 'at overflow: wallet still 40%');
+
+    // Partial overflow: fill up to $15, remainder of 20% → Available
+    const partialOverflow = applyProfitBuckets({
+      pnlCents: 1000,
+      reserveCents: 0,
+      insuranceCents: 1400,
+      insuranceReady: true,
+      settings: insSettings,
+      rebuildInsurance: true,
+    });
+    checkEq(partialOverflow.insuranceAddedCents, 100, 'partial: fills $1 to cap');
+    checkEq(partialOverflow.insuranceCents, 1500, 'partial: fund at $15');
+    checkEq(partialOverflow.insuranceOverflowCents, 100, 'partial: remainder of 20% → available');
+    checkEq(partialOverflow.skimmedCents, 400, 'partial: wallet still 40%');
+
+    // Resume fill after a loss draws fund below $15
+    const afterDraw = applyProfitBuckets({
+      pnlCents: -300,
+      reserveCents: 400,
+      insuranceCents: 1500,
+      insuranceReady: true,
+      settings: insSettings,
+    });
+    checkEq(afterDraw.insuranceDrawnCents, 300, 'draw from full fund');
+    checkEq(afterDraw.insuranceCents, 1200, 'after draw: below overflow');
+    checkEq(afterDraw.insuranceReady, true, 'after modest draw: still ready');
+
+    const resumeFill = applyProfitBuckets({
+      pnlCents: 1000,
+      reserveCents: 400,
+      insuranceCents: afterDraw.insuranceCents,
+      insuranceReady: afterDraw.insuranceReady,
+      settings: insSettings,
+      rebuildInsurance: true,
+    });
+    checkEq(resumeFill.insuranceAddedCents, 200, 'resume: 20% fills again after draw');
+    checkEq(resumeFill.insuranceCents, 1400, 'resume: fund rebuilding toward $15');
+    checkEq(resumeFill.insuranceOverflowCents, 0, 'resume: under cap, no overflow');
 
     const absorbEarly = applyProfitBuckets({
       pnlCents: -800,
@@ -1335,22 +1409,40 @@ async function testBotTradingFlow() {
       skimMode: 'insurance',
       insuranceCapDollars: 10,
       insuranceFloorDollars: 6,
+      insuranceOverflowDollars: 15,
       stakeDollars: 10,
     });
     const tBoot = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
     await insBot._closePosition(tBoot, 60, 'take_profit');
     checkEq(insBot.ledger.insuranceCents, 200, 'first win takes 20% from the start');
     checkEq(insBot.ledger.reserveCents, 400, 'first win wallets 40%');
-    for (let i = 0; i < 9; i += 1) {
+    for (let i = 0; i < 6; i += 1) {
       const t = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
       await insBot._closePosition(t, 60, 'take_profit');
     }
+    // 7 wins × $2 = $14
+    checkEq(insBot.ledger.insuranceCents, 1400, 'bot fills toward overflow ($14)');
     check(insBot.ledger.insuranceCents >= 1000, 'fills arm $10');
     checkEq(insBot.ledger.insuranceReady, true, 'marked ready after arm');
-    const before = insBot.ledger.insuranceCents;
-    const tMore = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
-    await insBot._closePosition(tMore, 60, 'take_profit');
-    checkEq(insBot.ledger.insuranceCents, before + 200, 'keeps building past arm');
+    const tToCap = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
+    await insBot._closePosition(tToCap, 60, 'take_profit');
+    checkEq(insBot.ledger.insuranceCents, 1500, 'bot fills to overflow cap $15');
+    checkEq(tToCap.insuranceAddedCents, 100, 'bot partial: $1 into fund');
+    checkEq(tToCap.insuranceOverflowCents, 100, 'bot partial: $1 → available');
+    const tOverflow = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
+    await insBot._closePosition(tOverflow, 60, 'take_profit');
+    checkEq(insBot.ledger.insuranceCents, 1500, 'bot at cap: fund unchanged');
+    checkEq(tOverflow.insuranceAddedCents, 0, 'bot at cap: no insurance add');
+    checkEq(tOverflow.insuranceOverflowCents, 200, 'bot at cap: full 20% → available');
+    check(/Insurance full — \$2\.00 → available/.test(insBot.lastDecision), 'activity notes overflow to available');
+
+    // Resume after draw below $15
+    insBot.ledger.insuranceCents = 1200;
+    insBot.ledger.insuranceReady = true;
+    const tResume = openTrade(insBot, { side: 'yes', entryPriceCents: 50, contracts: 100 });
+    await insBot._closePosition(tResume, 60, 'take_profit');
+    checkEq(insBot.ledger.insuranceCents, 1400, 'bot resume fill after draw below cap');
+    checkEq(tResume.insuranceOverflowCents, 0, 'bot resume: no overflow under cap');
 
     // Bot path: absorb while ready in the $6–$10 band, then disarm below floor
     // Loss of $2: 20 contracts × 10¢ drop (50→40)
@@ -1370,9 +1462,11 @@ async function testBotTradingFlow() {
       skimMode: 'insurance',
       insuranceCapDollars: 10,
       insuranceFloorDollars: 15,
+      insuranceOverflowDollars: 15,
     });
     check(clamped.config.insuranceFloorDollars < clamped.config.insuranceCapDollars, 'floor clamped below arm');
     checkEq(clamped.config.insuranceFloorDollars, 9, 'floor clamped to arm-1');
+    checkEq(clamped.config.insuranceOverflowDollars, 15, 'overflow default preserved');
   }
 
   // Manual external insurance seed / top-up
@@ -1390,6 +1484,7 @@ async function testBotTradingFlow() {
     checkEq(beforeCap.paperAvailableCents, 10000, 'starts with full Available');
     checkEq(beforeCap.insuranceCapCents, 1000, 'capital reports arm cents');
     checkEq(beforeCap.insuranceFloorCents, 600, 'capital reports floor cents');
+    checkEq(beforeCap.insuranceOverflowCents, 1500, 'capital reports overflow cents');
 
     const badZero = seedBot.depositInsurance(0);
     checkEq(badZero.ok, false, 'rejects zero deposit');
