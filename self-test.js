@@ -542,16 +542,38 @@ function testKalshiClient() {
       'buy'
     ),
     42,
-    'V2 buy YES bid-book average_fill_price → cents'
+    'V2 buy YES average_fill_price → cents (raw YES quote)'
+  );
+  // Without sellLimit, do not blind-complement ask-book averages (TP 57 was
+  // wrongly logged as 43 when 0.57 was already YES dollars).
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      { average_fill_price: '0.5700', fill_count: '5.00', side: 'ask' },
+      'yes',
+      'sell'
+    ),
+    57,
+    'V2 sell YES average_fill_price without limit stays raw (not blind complement)'
   );
   checkEq(
     fillBot._orderAvgFillPriceCents(
       { average_fill_price: '0.8200', fill_count: '14.00', side: 'ask' },
       'yes',
-      'sell'
+      'sell',
+      18
     ),
     18,
-    'V2 sell YES ask-book average_fill_price → YES exit cents (complement)'
+    'sell YES avg 0.82 with stop limit 18 → complement (closer to limit)'
+  );
+  checkEq(
+    fillBot._orderAvgFillPriceCents(
+      { average_fill_price: '0.5700', fill_count: '5.00', side: 'ask' },
+      'yes',
+      'sell',
+      57
+    ),
+    57,
+    'sell YES avg 0.57 with TP limit 57 → raw (not complement to 43)'
   );
   checkEq(
     fillBot._orderAvgFillPriceCents(
@@ -565,7 +587,7 @@ function testKalshiClient() {
       'sell'
     ),
     18,
-    'taker_fill_cost proceeds preferred over ask-book average'
+    'taker_fill_cost proceeds preferred over average_fill_price'
   );
   checkEq(
     fillBot._orderAvgFillPriceCents(
@@ -574,16 +596,32 @@ function testKalshiClient() {
       'buy'
     ),
     58,
-    'V2 buy NO ask-book average_fill_price → NO entry cents'
+    'V2 buy NO average_fill_price → raw cents without blind book_side flip'
   );
   checkEq(
     fillBot._orderAvgFillPriceCents(
       { average_fill_price: '0.8200', fill_count: '10.00', side: 'bid' },
       'no',
-      'sell'
+      'sell',
+      18
     ),
     18,
-    'V2 sell NO bid-book average_fill_price → NO exit cents (complement)'
+    'sell NO avg 0.82 with sell limit 18 → complement (closer to limit)'
+  );
+  checkEq(
+    fillBot._sanityCheckExitFillCents(30, 70, 50, 'take_profit'),
+    70,
+    'sanity: TP exit << entry with sellLimit >= entry → use closer-to-limit'
+  );
+  checkEq(
+    fillBot._sanityCheckExitFillCents(82, 18, 42, 'stop_loss'),
+    18,
+    'sanity: stop exit >> entry with sellLimit <= entry → use closer-to-limit'
+  );
+  checkEq(
+    fillBot._sanityCheckExitFillCents(57, 57, 42, 'take_profit'),
+    57,
+    'sanity: good TP fill passes through'
   );
   const v2FillNorm = normalizeCreateOrderResponse({
     order_id: 'oid-v2-fill',
@@ -2923,6 +2961,64 @@ async function testBotTradingFlow() {
     checkEq(stopTrade.pnlCents, (18 - 42) * 14, 'stop misparse PnL reflects real loss');
     check(stopTrade.pnlCents < 0, 'stop misparse is a loss');
     checkEq(stopTrade.skimmedCents || 0, 0, 'loss on stop misparse gets no wallet skim');
+  }
+
+  // V2 sell YES take_profit: average_fill_price already YES — must not complement to fake loss
+  {
+    const tpMisparseClient = {
+      hasCredentials: true,
+      async createOrder({ action, side, priceCents, count }) {
+        checkEq(action, 'sell', 'TP exit sells');
+        checkEq(side, 'yes', 'TP exit side yes');
+        checkEq(priceCents, 57, 'TP sells at take-profit limit');
+        return normalizeCreateOrderResponse({
+          order_id: 'tp-misparse-exit',
+          fill_count: `${count}.00`,
+          remaining_count: '0.00',
+          average_fill_price: '0.5700',
+          side: 'ask',
+        });
+      },
+      async getOrder(orderId) {
+        return {
+          order: {
+            order_id: orderId,
+            status: 'executed',
+            fill_count_fp: '10.00',
+            average_fill_price: '0.5700',
+            side: 'ask',
+          },
+        };
+      },
+      async cancelOrder() {
+        return {};
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+    };
+    const tpBot = makeBot(tpMisparseClient, {
+      mode: 'live',
+      liveAuthorized: true,
+      skimMode: 'off',
+    });
+    tpBot.config.mode = 'live';
+    tpBot.config.liveAuthorized = true;
+    const tpTrade = openTrade(tpBot, {
+      mode: 'live',
+      liveOrderId: 'entry-tp-misparse',
+      side: 'yes',
+      entryPriceCents: 42,
+      contracts: 10,
+      windowCloseTime: Date.now() + 10 * 60 * 1000,
+    });
+    const closed = await tpBot._closePosition(tpTrade, 57, 'take_profit', {
+      liveSellPriceCents: 57,
+    });
+    checkEq(closed, true, 'TP misparse exit closes');
+    checkEq(tpTrade.exitPriceCents, 57, 'TP books 57¢ not blind complement 43¢');
+    checkEq(tpTrade.pnlCents, (57 - 42) * 10, 'TP PnL is a real gain');
+    check(tpTrade.pnlCents > 0, 'TP is a win');
   }
 
   // Live exit refuses 0/100 sell prices

@@ -1310,27 +1310,31 @@ class TradingBot {
   }
 
   /**
-   * Convert a V2 book price (bid=YES, ask=NO) into the held outcome's cents.
+   * Pick raw vs 100-raw for held-outcome cents when Kalshi's average_fill_price
+   * is ambiguous (sometimes YES dollars, sometimes the complement). Prefer the
+   * candidate closer to a known intended limit (sell/buy price).
    */
-  _bookPriceToHeldOutcomeCents(bookPriceCents, heldSide, bookSide) {
-    const px = Math.max(1, Math.min(99, Math.round(Number(bookPriceCents))));
-    if (!heldSide || !bookSide) return px;
-    const held = String(heldSide).toLowerCase();
-    const book = String(bookSide).toLowerCase();
-    const direct = (held === 'yes' && book === 'bid') || (held === 'no' && book === 'ask');
-    return direct ? px : Math.max(1, Math.min(99, 100 - px));
+  _disambiguateFillCents(rawCents, intendedPriceCents) {
+    const clampCents = (c) => Math.max(1, Math.min(99, Math.round(c)));
+    const raw = clampCents(rawCents);
+    const intended = Math.round(Number(intendedPriceCents));
+    if (!Number.isFinite(intended) || intended < 1 || intended > 99) return raw;
+    const complement = clampCents(100 - raw);
+    const rawDist = Math.abs(raw - intended);
+    const compDist = Math.abs(complement - intended);
+    return compDist < rawDist ? complement : raw;
   }
 
   /**
-   * Average fill price for the held outcome (YES/NO cents), not raw book_side.
-   * V2 Create Order reports average_fill_price on the order's book (bid=YES,
-   * ask=NO); sell YES uses ask, so 0.82 → 18¢ YES exit unless complemented.
-   * Prefer taker/maker fill cost — that is actual cash per contract.
+   * Average fill price for the held outcome (YES/NO cents).
+   * Prefer taker/maker fill cost (actual cash). For average_fill_price, Kalshi
+   * Create Order V2 quotes from the YES side — do NOT blindly complement by
+   * book_side. When intendedPriceCents is known, pick raw vs 100-raw closer
+   * to that limit (fixes stop 82→18 and TP 57→57).
    */
-  _orderAvgFillPriceCents(order, heldSide, action) {
+  _orderAvgFillPriceCents(order, heldSide, action, intendedPriceCents = null) {
     if (!order) return null;
     const filled = this._orderFillCount(order);
-    const bookSide = this._inferOrderBookSide(order, heldSide, action);
     const clampCents = (c) => Math.max(1, Math.min(99, Math.round(c)));
 
     // Proceeds/cost first — actual dollars exchanged, already in held-outcome terms.
@@ -1349,7 +1353,7 @@ class TradingBot {
       order.average_fill_price ?? order.averageFillPrice ?? NaN
     );
     if (Number.isFinite(avgDollars) && avgDollars > 0) {
-      return this._bookPriceToHeldOutcomeCents(avgDollars * 100, heldSide, bookSide);
+      return this._disambiguateFillCents(avgDollars * 100, intendedPriceCents);
     }
 
     const yesDollars = Number.parseFloat(order.yes_price_dollars ?? order.yesPriceDollars ?? NaN);
@@ -1368,8 +1372,9 @@ class TradingBot {
   }
 
   /**
-   * Guard against complement mis-parse on stop exits: if avg fill implies a
-   * large gain but the sell limit was at/below entry, trust the sell limit.
+   * Guard against average_fill_price complement mis-parse on exits.
+   * Stop: exit >> entry while sellLimit <= entry → closer-to-limit interpretation.
+   * TP / bank / near-certain: exit << entry while sellLimit >= entry → reject bad parse.
    */
   _sanityCheckExitFillCents(exitPx, sellPriceCents, entryPriceCents, reason) {
     const exit = Math.round(Number(exitPx));
@@ -1378,14 +1383,39 @@ class TradingBot {
     if (!Number.isFinite(exit) || !Number.isFinite(sellLimit) || !Number.isFinite(entry)) {
       return exitPx;
     }
-    if (reason !== 'stop_loss') return exit;
-    const impliedGain = exit - entry;
-    if (impliedGain > 15 && sellLimit <= entry) {
-      console.warn(
-        `[bot] exit fill ${exit}¢ looks like book-side complement error on stop_loss ` +
-          `(entry ${entry}¢, sell limit ${sellLimit}¢) — using sell limit`
-      );
-      return sellLimit;
+
+    const closerToLimit = () => {
+      const complement = Math.max(1, Math.min(99, 100 - exit));
+      const exitDist = Math.abs(exit - sellLimit);
+      const compDist = Math.abs(complement - sellLimit);
+      const chosen = compDist < exitDist ? complement : sellLimit;
+      return chosen;
+    };
+
+    const profitReasons = new Set(['take_profit', 'pre_close_bank', 'near_certain']);
+    if (profitReasons.has(reason)) {
+      const impliedLoss = entry - exit;
+      if (impliedLoss > 15 && sellLimit >= entry) {
+        const fixed = closerToLimit();
+        console.warn(
+          `[bot] exit fill ${exit}¢ looks like fill-price mis-parse on ${reason} ` +
+            `(entry ${entry}¢, sell limit ${sellLimit}¢) — using ${fixed}¢`
+        );
+        return fixed;
+      }
+      return exit;
+    }
+
+    if (reason === 'stop_loss') {
+      const impliedGain = exit - entry;
+      if (impliedGain > 15 && sellLimit <= entry) {
+        const fixed = closerToLimit();
+        console.warn(
+          `[bot] exit fill ${exit}¢ looks like fill-price mis-parse on stop_loss ` +
+            `(entry ${entry}¢, sell limit ${sellLimit}¢) — using ${fixed}¢`
+        );
+        return fixed;
+      }
     }
     return exit;
   }
@@ -1701,7 +1731,12 @@ class TradingBot {
           if (filled > 0 && filled < trade.contracts) {
             // Partial fill then cancel/timeout: ledger must shrink with exchange
             // inventory. Book the sold slice; leave the remainder OPEN.
-            const avgPartial = this._orderAvgFillPriceCents(fill.order, trade.side, 'sell');
+            const avgPartial = this._orderAvgFillPriceCents(
+              fill.order,
+              trade.side,
+              'sell',
+              sellPrice
+            );
             let exitPx = Number.isFinite(avgPartial) ? avgPartial : sellPrice;
             exitPx = this._sanityCheckExitFillCents(
               exitPx,
@@ -1723,7 +1758,7 @@ class TradingBot {
               })`
             );
           }
-          let avg = this._orderAvgFillPriceCents(fill.order, trade.side, 'sell');
+          let avg = this._orderAvgFillPriceCents(fill.order, trade.side, 'sell', sellPrice);
           if (Number.isFinite(avg)) {
             avg = this._sanityCheckExitFillCents(
               avg,
