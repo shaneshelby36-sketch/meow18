@@ -490,7 +490,8 @@ app.get("/", (req, res) => {
       return;
     }
     const body = req.body || {};
-    const dollars = body.dollars != null ? body.dollars : body.amount;
+    const raw = body.dollars != null ? body.dollars : body.amount;
+    const dollars = typeof raw === 'string' ? Number(String(raw).trim()) : Number(raw);
     const result = bot.depositInsurance(dollars);
     res.status(result.ok ? 200 : 400).json(result);
   });

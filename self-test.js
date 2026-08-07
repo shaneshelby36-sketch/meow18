@@ -1372,6 +1372,38 @@ async function testBotTradingFlow() {
     checkEq(seedBot.ledger.insuranceDepositedCents, 1250, 'top-up tracked in deposits');
     const afterTop = seedBot._capitalStatus();
     checkEq(afterTop.paperAvailableCents, beforeCap.paperAvailableCents, 'Available still unchanged after top-up');
+
+    // Persist + reload so UI status refresh would see the seeded fund.
+    seedBot._persist();
+    const ledgerPath = dataPath('bot-ledger.json');
+    check(fs.existsSync(ledgerPath), 'ledger file written after insurance deposit');
+    const reloaded = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'));
+    checkEq(reloaded.insuranceCents, 1250, 'persisted insuranceCents survives reload');
+    checkEq(reloaded.insuranceDepositedCents, 1250, 'persisted insuranceDepositedCents survives reload');
+
+    // String dollars (JSON body / form-like) must still credit.
+    const fromString = seedBot.depositInsurance('1.00');
+    checkEq(fromString.ok, true, 'accepts string dollar amount');
+    checkEq(seedBot.ledger.insuranceCents, 1350, 'string deposit credits cents');
+  }
+
+  // UI: insurance deposit controls must not duplicate ids across dashboard + overlay
+  {
+    const appSrc = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    check(
+      /buildCapitalLedgerHtml\(capital,\s*\{\s*depositControls:\s*true\s*\}\)/.test(appSrc),
+      'overlay status uses depositControls: true'
+    );
+    check(
+      /buildCapitalLedgerHtml\(capital,\s*\{\s*depositControls:\s*false\s*\}\)/.test(appSrc),
+      'dashboard uses depositControls: false (no duplicate ids)'
+    );
+    check(
+      /function insuranceDepositEls\(/.test(appSrc) && /getElementById\('bot-overlay'\)/.test(appSrc),
+      'deposit UI scopes lookups to bot-overlay'
+    );
+    const depositIdHits = (appSrc.match(/id="bot-insurance-deposit"/g) || []).length;
+    checkEq(depositIdHits, 1, 'deposit input id template appears once in app.js');
   }
 
   // Reject bad entry prices

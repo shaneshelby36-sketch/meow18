@@ -771,7 +771,7 @@ async function refreshBotStatus() {
     const activityScroll = captureLogScroll('bot-activity-log-list', 'bottom');
     const tradeScroll = captureLogScroll('bot-trade-log-list', 'top');
     body.innerHTML = [
-      buildCapitalLedgerHtml(capital),
+      buildCapitalLedgerHtml(capital, { depositControls: true }),
       buildOpenPositionsHtml(data.openTrades),
       `<div class="bot-stat-chips">${chips.join('')}</div>`,
       buildTradeLogHtml(data.tradeLog, data.tradeLogTotal),
@@ -856,7 +856,7 @@ function renderBotDashboard(data) {
   const capital = data.capital || {};
   const openCount = (data.openTrades || []).length;
   stats.innerHTML = [
-    buildCapitalLedgerHtml(capital),
+    buildCapitalLedgerHtml(capital, { depositControls: false }),
     buildOpenPositionsHtml(data.openTrades),
     chip('Open', openCount),
     chip('Trades opened', data.stats.totalAttempts),
@@ -1130,12 +1130,16 @@ function formatMoneyCents(cents, { signed = false } = {}) {
 }
 
 /**
- * Display-only capital ledger. Uses existing capital fields as-is:
+ * Capital ledger. Uses existing capital fields as-is:
  * Available + Open + Wallet + Insurance = Total Equity
  * Net P&L = Total Equity − Starting Bankroll − Insurance deposits (manual seeds)
+ *
+ * Deposit controls are overlay-only (`depositControls: true`) so the dashboard
+ * summary cannot duplicate `#bot-insurance-deposit*` ids and steal getElementById.
  */
-function buildCapitalLedgerHtml(capital) {
+function buildCapitalLedgerHtml(capital, opts = {}) {
   if (!capital) return '';
+  const depositControls = opts.depositControls === true;
   const starting = Number(capital.startingCents) || 0;
   const available = Number(capital.paperAvailableCents) || 0;
   const openPositions = Number(capital.openExposureCents) || 0;
@@ -1151,6 +1155,14 @@ function buildCapitalLedgerHtml(capital) {
   const reservedClass = reserved > 0 ? 'chip-positive' : '';
   const insuranceClass = insurance > 0 ? 'chip-positive' : '';
   const readyLabel = insuranceReady ? ' · armed' : '';
+  const depositBlock = depositControls
+    ? `<div class="insurance-deposit-row">
+        <input id="bot-insurance-deposit" type="number" min="0.01" max="500" step="0.01" inputmode="decimal" placeholder="Amount $" aria-label="Insurance deposit dollars" />
+        <button class="btn-secondary" id="bot-insurance-deposit-btn" type="button">Add to Insurance</button>
+      </div>
+      <p class="field-hint insurance-deposit-hint">Seed or top up with your own money (external — does not take from Available). Max $500 per add.</p>
+      <p class="settings-hint" id="bot-insurance-deposit-feedback" role="status" aria-live="polite"></p>`
+    : '';
 
   return `
     <div class="capital-ledger">
@@ -1163,12 +1175,7 @@ function buildCapitalLedgerHtml(capital) {
         <span>Insurance Fund <em>(arm ${formatMoneyCents(insuranceCap)} / floor ${formatMoneyCents(insuranceFloor)}${readyLabel})</em></span>
         <span class="${insuranceClass}">${formatMoneyCents(insurance)}</span>
       </div>
-      <div class="insurance-deposit-row">
-        <input id="bot-insurance-deposit" type="number" min="0.01" max="500" step="0.01" inputmode="decimal" placeholder="Amount $" aria-label="Insurance deposit dollars" />
-        <button class="btn-secondary" id="bot-insurance-deposit-btn" type="button">Add to Insurance</button>
-      </div>
-      <p class="field-hint insurance-deposit-hint">Seed or top up with your own money (external — does not take from Available). Max $500 per add.</p>
-      <p class="settings-hint" id="bot-insurance-deposit-feedback"></p>
+      ${depositBlock}
       <div class="capital-divider"></div>
       <div class="capital-row"><span>Starting Bankroll</span><span>${formatMoneyCents(starting)}</span></div>
       ${deposited > 0 ? `<div class="capital-row"><span>Insurance deposits <em>(manual)</em></span><span>${formatMoneyCents(deposited)}</span></div>` : ''}
@@ -1181,18 +1188,42 @@ function buildCapitalLedgerHtml(capital) {
     </div>`;
 }
 
+function insuranceDepositEls() {
+  const root = document.getElementById('bot-overlay') || document;
+  return {
+    input: root.querySelector('#bot-insurance-deposit'),
+    feedback: root.querySelector('#bot-insurance-deposit-feedback'),
+    btn: root.querySelector('#bot-insurance-deposit-btn'),
+  };
+}
+
+function setInsuranceDepositFeedback(message, ok) {
+  const { feedback } = insuranceDepositEls();
+  if (!feedback) {
+    console[ok ? 'log' : 'error']('[insurance deposit]', message);
+    return;
+  }
+  feedback.textContent = message;
+  feedback.style.color = ok ? 'var(--up)' : 'var(--down)';
+}
+
 async function depositInsuranceFromUi() {
-  const input = document.getElementById('bot-insurance-deposit');
-  const feedback = document.getElementById('bot-insurance-deposit-feedback');
-  const btn = document.getElementById('bot-insurance-deposit-btn');
-  if (!input || !feedback) return;
-  const dollars = parseFloat(input.value);
+  const { input, feedback, btn } = insuranceDepositEls();
+  if (!input || !feedback) {
+    console.error('[insurance deposit] controls missing — open the bot panel and try again.');
+    return;
+  }
+  const dollars = parseFloat(String(input.value || '').trim());
   if (!Number.isFinite(dollars) || dollars <= 0) {
-    feedback.textContent = 'Enter a positive dollar amount.';
-    feedback.style.color = 'var(--down)';
+    setInsuranceDepositFeedback('Enter a positive dollar amount.', false);
+    input.focus();
     return;
   }
   const { engineUrl } = loadSettings();
+  if (!engineUrl) {
+    setInsuranceDepositFeedback('Engine URL is not set. Open Settings and connect first.', false);
+    return;
+  }
   if (btn) btn.disabled = true;
   try {
     const res = await fetch(`${engineUrl}/api/bot/insurance/deposit`, {
@@ -1202,19 +1233,14 @@ async function depositInsuranceFromUi() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) throw new Error(data.message || `Deposit failed (HTTP ${res.status}).`);
+    input.value = '';
     await refreshBotStatus();
-    const afterFeedback = document.getElementById('bot-insurance-deposit-feedback');
-    if (afterFeedback) {
-      afterFeedback.textContent = data.message || 'Insurance updated.';
-      afterFeedback.style.color = 'var(--up)';
-    }
+    setInsuranceDepositFeedback(data.message || 'Insurance updated.', true);
   } catch (err) {
-    const errFeedback = document.getElementById('bot-insurance-deposit-feedback') || feedback;
-    errFeedback.textContent = `Could not add to Insurance: ${err.message}`;
-    errFeedback.style.color = 'var(--down)';
+    setInsuranceDepositFeedback(`Could not add to Insurance: ${err.message}`, false);
   } finally {
-    const afterBtn = document.getElementById('bot-insurance-deposit-btn');
-    if (afterBtn) afterBtn.disabled = false;
+    const after = insuranceDepositEls();
+    if (after.btn) after.btn.disabled = false;
   }
 }
 
@@ -1782,7 +1808,11 @@ function wireBotUI() {
   const botOverlay = document.getElementById('bot-overlay');
   if (botOverlay) {
     botOverlay.addEventListener('click', (event) => {
-      if (event.target && event.target.id === 'bot-insurance-deposit-btn') {
+      const btn = event.target && event.target.closest
+        ? event.target.closest('#bot-insurance-deposit-btn')
+        : null;
+      if (btn) {
+        event.preventDefault();
         depositInsuranceFromUi();
       }
     });
