@@ -3067,6 +3067,135 @@ async function testBotTradingFlow() {
     checkEq(entryOrders, 1, 'partial live entry placed one buy');
   }
 
+  // Live entry: miss → retry with chase → fill on 3rd try
+  {
+    let entryOrders = 0;
+    const prices = [];
+    const retryEntryClient = {
+      hasCredentials: true,
+      async createOrder({ count, priceCents }) {
+        entryOrders += 1;
+        prices.push(priceCents);
+        return { order: { order_id: `entry-retry-${entryOrders}`, requested: count } };
+      },
+      async getOrder(orderId) {
+        const n = Number(String(orderId).split('-').pop());
+        if (n < 3) {
+          return {
+            order: {
+              order_id: orderId,
+              status: 'canceled',
+              fill_count_fp: '0.00',
+              yes_price: 50,
+            },
+          };
+        }
+        return {
+          order: {
+            order_id: orderId,
+            status: 'executed',
+            fill_count_fp: '5.00',
+            average_fill_price: '0.5200',
+            yes_price: 52,
+          },
+        };
+      },
+      async cancelOrder() {
+        return {};
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+      async getOpenMarkets() {
+        return [];
+      },
+      async getMarket() {
+        return { yes_ask: 50, yes_bid: 49, no_ask: 51, no_bid: 50, status: 'open' };
+      },
+    };
+    const retryBot = makeBot(retryEntryClient, {
+      mode: 'live',
+      liveAuthorized: true,
+      stakeDollars: 5,
+      minEntryCents: 1,
+      skimMode: 'off',
+    });
+    retryBot.config.mode = 'live';
+    retryBot.config.liveAuthorized = true;
+    retryBot.setRunning(true);
+    await retryBot._openPosition({
+      symbol: 'ETH',
+      ticker: 'KXETH15M-RETRY',
+      side: 'yes',
+      priceCents: 50,
+      floorStrike: 3000,
+      closeTime: Date.now() + 600_000,
+      engineProbability: 60,
+      engineConfidence: 70,
+    });
+    checkEq(retryBot.openTrades.length, 1, 'entry fill after retries records trade');
+    checkEq(entryOrders, 3, 'entry retried until 3rd fill');
+    checkEq(prices[0], 50, 'entry attempt 1 at original ask');
+    checkEq(prices[1], 51, 'entry attempt 2 chases +1¢');
+    checkEq(prices[2], 52, 'entry attempt 3 chases +2¢');
+  }
+
+  // Live entry: all 3 attempts miss → no trade, will retry next cycle message
+  {
+    let entryOrders = 0;
+    const missClient = {
+      hasCredentials: true,
+      async createOrder({ count }) {
+        entryOrders += 1;
+        return { order: { order_id: `entry-miss-${entryOrders}`, requested: count } };
+      },
+      async getOrder(orderId) {
+        return {
+          order: {
+            order_id: orderId,
+            status: 'canceled',
+            fill_count_fp: '0.00',
+            yes_price: 50,
+          },
+        };
+      },
+      async cancelOrder() {
+        return {};
+      },
+      async getBalance() {
+        return { balance: 100000, portfolio_value: 100000 };
+      },
+      async getOpenMarkets() {
+        return [];
+      },
+      async getMarket() {
+        return { yes_ask: 50, yes_bid: 49, status: 'open' };
+      },
+    };
+    const missBot = makeBot(missClient, {
+      mode: 'live',
+      liveAuthorized: true,
+      stakeDollars: 5,
+      minEntryCents: 1,
+      skimMode: 'off',
+    });
+    missBot.config.mode = 'live';
+    missBot.config.liveAuthorized = true;
+    await missBot._openPosition({
+      symbol: 'ETH',
+      ticker: 'KXETH15M-MISS',
+      side: 'yes',
+      priceCents: 50,
+      floorStrike: 3000,
+      closeTime: Date.now() + 600_000,
+      engineProbability: 60,
+      engineConfidence: 70,
+    });
+    checkEq(missBot.openTrades.length, 0, 'unfilled entry after retries leaves no trade');
+    checkEq(entryOrders, 3, 'unfilled entry attempted 3 buys');
+    check(/did not fill after 3 tries/i.test(missBot.lastError || ''), 'unfilled entry error mentions retries');
+  }
+
   // Late fill after poll timeout: polls empty → cancel → getOrder then shows fills
   {
     let polls = 0;

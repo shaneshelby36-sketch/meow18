@@ -2236,6 +2236,30 @@ class TradingBot {
     return null;
   }
 
+  /** Live entry ask for a side — used to re-quote between fill retries. */
+  async _refreshLiveEntryAskCents(ticker, side, fallbackCents) {
+    const fallback = Number(fallbackCents);
+    try {
+      const market = await this._getMarketBounded(ticker, 2000);
+      if (!market) return fallback;
+      if (side === 'yes') {
+        const ask = Number(market.yes_ask);
+        return Number.isFinite(ask) && ask >= 1 && ask <= 99 ? ask : fallback;
+      }
+      if (Number.isFinite(market.no_ask) && market.no_ask >= 1 && market.no_ask <= 99) {
+        return market.no_ask;
+      }
+      const yesBid = Number(market.yes_bid);
+      if (Number.isFinite(yesBid)) {
+        const noAsk = 100 - yesBid;
+        if (noAsk >= 1 && noAsk <= 99) return noAsk;
+      }
+    } catch (err) {
+      console.warn(`[bot] entry re-quote ${ticker} failed:`, err.message);
+    }
+    return fallback;
+  }
+
   async _getMarketBounded(ticker, timeoutMs = 4000) {
     let timer = null;
     try {
@@ -2668,74 +2692,146 @@ class TradingBot {
     };
 
     if (this.config.mode === 'live') {
-      try {
-        const order = await this.client.createOrder({
-          ticker,
-          side,
-          action: 'buy',
-          count: trade.contracts,
-          priceCents,
-        });
-        const orderId = this._extractOrderId(order);
-        if (!orderId) {
-          this.lastError = `Live entry on ${symbol} returned no order_id — not recording trade.`;
-          console.error('[bot]', this.lastError);
-          return;
-        }
-        const fill = await this._awaitOrderFill(orderId, {
-          minFill: trade.contracts,
-          attempts: 6,
-          delayMs: 350,
-          seedOrder: order,
-          heldSide: side,
-          action: 'buy',
-        });
-        // Accept any fill ≥1 even when the full size did not fill (after cancel).
-        // Rejecting partials would orphan real Kalshi inventory with no ledger row.
-        let filled = Math.max(0, Number(fill.filled) || 0);
-        // Last-chance: never abandon an entry while Kalshi may hold fills.
-        if (filled < 1) {
-          const lastChance = await this._recoverOrderFillsAfterCancel(orderId, {
-            priorOrder: fill.order,
-            attempts: 2,
-            delayMs: 400,
-          });
-          if (lastChance.filled > 0) {
-            filled = lastChance.filled;
-            fill.order = lastChance.order || fill.order;
-            fill.recovered = true;
-            console.warn(
-              `[bot] fill recovery: live entry ${symbol} order ${orderId} had ${filled} fills on final getOrder — recording trade`
-            );
+      const maxAttempts = 3;
+      let filled = 0;
+      let fill = null;
+      let orderId = null;
+      let workingPrice = priceCents;
+      let lastErr = null;
+
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (attempt > 0) {
+          await this._sleep(400);
+          const refreshed = await this._refreshLiveEntryAskCents(ticker, side, workingPrice);
+          // Chase the ask: pay up to +1¢ / +2¢ on later tries so a stale quote fills.
+          workingPrice = Math.min(99, Math.max(1, Math.round(refreshed) + attempt));
+          if (isSettle) {
+            const band = settleEntryBand(this.config);
+            if (!Number.isFinite(refreshed) || refreshed < band.min || refreshed > band.max) {
+              this.lastDecision =
+                `Live entry retry stopped: ${symbol} ask ${refreshed}¢ left settle band ${band.min}–${band.max}¢.`;
+              this._logActivity(this.lastDecision, {
+                kind: 'open',
+                symbol,
+                side,
+                strategy: trade.strategy,
+              });
+              break;
+            }
+            workingPrice = Math.min(band.max, Math.max(band.min, workingPrice));
+          } else {
+            const minEntry = Number(this.config.minEntryCents);
+            if (Number.isFinite(minEntry) && minEntry > 0 && workingPrice < minEntry) {
+              this.lastDecision =
+                `Live entry retry stopped: ${symbol} @ ${workingPrice}¢ below min entry ${minEntry}¢.`;
+              break;
+            }
           }
+          this.lastDecision =
+            `Live entry miss — retry ${attempt + 1}/${maxAttempts} ${symbol} ${String(side).toUpperCase()} @ ${workingPrice}¢…`;
+          this._logActivity(this.lastDecision, {
+            kind: 'open',
+            symbol,
+            side,
+            strategy: trade.strategy,
+          });
+          console.warn(`[bot] ${this.lastDecision}`);
         }
-        if (filled < 1) {
-          this.lastError =
-            `Live entry on ${symbol} did not fill (filled ${filled}/${trade.contracts}) — not recording trade.`;
-          console.error('[bot]', this.lastError);
-          return;
+
+        const attemptContracts = Math.max(1, Math.floor((stakeDollars * 100) / workingPrice));
+        const attemptCost = attemptContracts * workingPrice;
+        if (Number.isFinite(this.liveBalanceCents) && attemptCost > this.liveBalanceCents) {
+          this.lastDecision =
+            `Insufficient live balance for retry: need $${(attemptCost / 100).toFixed(2)}, have $${(this.liveBalanceCents / 100).toFixed(2)}.`;
+          break;
         }
-        if (fill.recovered) {
+        trade.contracts = attemptContracts;
+        trade.entryPriceCents = workingPrice;
+        trade.stakeDollars = +(attemptCost / 100).toFixed(2);
+
+        try {
+          const order = await this.client.createOrder({
+            ticker,
+            side,
+            action: 'buy',
+            count: trade.contracts,
+            priceCents: workingPrice,
+          });
+          orderId = this._extractOrderId(order);
+          if (!orderId) {
+            lastErr = new Error('createOrder returned no order_id');
+            console.error(`[bot] Live entry on ${symbol} returned no order_id (attempt ${attempt + 1}/${maxAttempts})`);
+            continue;
+          }
+          fill = await this._awaitOrderFill(orderId, {
+            minFill: trade.contracts,
+            attempts: 6,
+            delayMs: 350,
+            seedOrder: order,
+            heldSide: side,
+            action: 'buy',
+          });
+          filled = Math.max(0, Number(fill.filled) || 0);
+          if (filled < 1) {
+            const lastChance = await this._recoverOrderFillsAfterCancel(orderId, {
+              priorOrder: fill.order,
+              attempts: 2,
+              delayMs: 400,
+            });
+            if (lastChance.filled > 0) {
+              filled = lastChance.filled;
+              fill.order = lastChance.order || fill.order;
+              fill.recovered = true;
+              console.warn(
+                `[bot] fill recovery: live entry ${symbol} order ${orderId} had ${filled} fills on final getOrder — recording trade`
+              );
+            }
+          }
+          if (filled >= 1) break;
+          lastErr = new Error(`no fill (0/${trade.contracts})`);
           console.warn(
-            `[bot] entry fill recovery on ${symbol}: order ${orderId} filled ${filled}/${trade.contracts} after timeout/cancel — ledgered`
+            `[bot] Live entry on ${symbol} did not fill attempt ${attempt + 1}/${maxAttempts} @ ${workingPrice}¢`
+          );
+        } catch (err) {
+          lastErr = err;
+          console.error(
+            `[bot] Live entry attempt ${attempt + 1}/${maxAttempts} failed:`,
+            err.message
           );
         }
-        if (filled < trade.contracts) {
-          trade.contracts = filled;
-          trade.stakeDollars = +((trade.contracts * priceCents) / 100).toFixed(2);
-        }
-        const avg = this._orderAvgFillPriceCents(fill.order, side, 'buy', priceCents);
-        if (Number.isFinite(avg)) {
-          trade.entryPriceCents = avg;
-          trade.stakeDollars = +((trade.contracts * avg) / 100).toFixed(2);
-        }
-        trade.entryFeesCents = this._orderFeesCents(fill.order);
-        trade.liveOrderId = orderId;
-      } catch (err) {
-        this.lastError = `Failed to place live entry order: ${err.message}`;
-        console.error('[bot]', this.lastError);
-        return; // don't record a trade we couldn't actually place
       }
+
+      if (filled < 1) {
+        this.lastError =
+          `Live entry on ${symbol} did not fill after ${maxAttempts} tries` +
+          (lastErr ? ` (${lastErr.message})` : '') +
+          ' — will retry next cycle if still valid.';
+        this.lastDecision = this.lastError;
+        this._logActivity(this.lastDecision, {
+          kind: 'open',
+          symbol,
+          side,
+          strategy: trade.strategy,
+        });
+        console.error('[bot]', this.lastError);
+        return;
+      }
+      if (fill && fill.recovered) {
+        console.warn(
+          `[bot] entry fill recovery on ${symbol}: order ${orderId} filled ${filled}/${trade.contracts} after timeout/cancel — ledgered`
+        );
+      }
+      if (filled < trade.contracts) {
+        trade.contracts = filled;
+        trade.stakeDollars = +((trade.contracts * workingPrice) / 100).toFixed(2);
+      }
+      const avg = this._orderAvgFillPriceCents(fill && fill.order, side, 'buy', workingPrice);
+      if (Number.isFinite(avg)) {
+        trade.entryPriceCents = avg;
+        trade.stakeDollars = +((trade.contracts * avg) / 100).toFixed(2);
+      }
+      trade.entryFeesCents = this._orderFeesCents(fill && fill.order);
+      trade.liveOrderId = orderId;
     }
 
     this.ledger.trades.unshift(trade);
