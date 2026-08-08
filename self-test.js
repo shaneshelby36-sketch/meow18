@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -3125,7 +3125,7 @@ async function testBotTradingFlow() {
     checkEq(retryBot.openTrades.length, 0, 'unfilled entry leaves no trade');
     checkEq(entryOrders, 1, 'unfilled entry places one buy (no chase retries)');
     check(retryBot._hasRecentEntryMiss('ETH'), 'fill miss demotes ETH briefly');
-    check(/another crypto first/i.test(retryBot.lastError || ''), 'miss message mentions try another crypto');
+    check(/90s|liquid/i.test(retryBot.lastError || ''), 'miss message mentions skip/liquid');
   }
 
   // Live entry: all attempts miss → no trade (single attempt)
@@ -3874,11 +3874,12 @@ async function testBotTradingFlow() {
       peerOk.ok || !/same-side sit-out/i.test(peerOk.reason || ''),
       'settle same-side sit-out does not apply to other coins'
     );
-    checkEq(
+  checkEq(
       postStopSameSideCooldownMs({ strategyMode: 'settle' }),
       5 * 60 * 1000,
       'settle default same-side cooldown is 5m'
     );
+    check(liquidityPriority('BTC') > liquidityPriority('XRP'), 'BTC ranked more liquid than XRP');
   }
 }
 

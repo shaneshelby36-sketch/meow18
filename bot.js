@@ -80,6 +80,21 @@ function tradeableKalshiSymbols() {
   return Object.keys(SERIES_BY_SYMBOL).filter((s) => isKalshiTradeEnabled(s));
 }
 
+// Rough Kalshi 15m crypto liquidity preference (higher = usually tighter books).
+// Used to break ties / prefer fillable markets over thin XRP-style books.
+const LIQUIDITY_PRIORITY_BY_SYMBOL = {
+  BTC: 50,
+  ETH: 40,
+  SOL: 30,
+  BNB: 20,
+  XRP: 10,
+  DOGE: 5,
+};
+
+function liquidityPriority(symbol) {
+  return LIQUIDITY_PRIORITY_BY_SYMBOL[String(symbol || '').toUpperCase()] || 0;
+}
+
 /** Settle-mode entry band (default 85–95¢). Clamped to 1–99; swaps if inverted. */
 function settleEntryBand(config = {}) {
   let min = Number(config.settleEntryMinCents);
@@ -2855,7 +2870,7 @@ class TradingBot {
         this.lastError =
           `Live entry on ${symbol} did not fill` +
           (lastErr ? ` (${lastErr.message})` : '') +
-          ' — will try another crypto first, then retry.';
+          ' — skipping this coin ~90s; trying more liquid markets first.';
         this.lastDecision = this.lastError;
         this._logActivity(this.lastDecision, {
           kind: 'open',
@@ -2944,8 +2959,8 @@ class TradingBot {
     return true;
   }
 
-  /** After a live fill miss, demote this coin ~60s so AUTO tries others first. */
-  _noteEntryMiss(symbol, cooldownMs = 60_000) {
+  /** After a live fill miss, skip this coin ~90s (not just reorder — prevents XRP spam). */
+  _noteEntryMiss(symbol, cooldownMs = 90_000) {
     if (!symbol) return;
     if (!this._entryMissUntil) this._entryMissUntil = Object.create(null);
     this._entryMissUntil[String(symbol).toUpperCase()] = Date.now() + cooldownMs;
@@ -2965,6 +2980,17 @@ class TradingBot {
       return false;
     }
     return true;
+  }
+
+  _entryMissCooldownSymbols() {
+    if (!this._entryMissUntil) return [];
+    const now = Date.now();
+    const out = [];
+    for (const [sym, until] of Object.entries(this._entryMissUntil)) {
+      if (Number.isFinite(until) && until > now) out.push(sym);
+      else delete this._entryMissUntil[sym];
+    }
+    return out;
   }
 
   /**
@@ -3521,32 +3547,47 @@ class TradingBot {
       priceCents: pick.priceCents,
       closeTime,
       edge: 100 - pick.priceCents,
-      // Prefer higher asks in AUTO (closer to settlement certainty).
-      rankScore: pick.priceCents + (usedLateBand ? 0 : 100),
+      // Prefer higher asks in AUTO (closer to settlement certainty), then
+      // more liquid series (BTC/ETH over thin XRP books), then tighter spreads.
+      rankScore:
+        pick.priceCents +
+        (usedLateBand ? 0 : 100) +
+        liquidityPriority(symbol) +
+        Math.max(0, 15 - Math.max(0, yesAsk - yesBid)),
       strategy: 'settle',
       settleLateEntry: usedLateBand,
     };
   }
 
   async _rankSettleOpportunities(predictions, { preferOtherThan = null } = {}) {
+    const cooling = this._entryMissCooldownSymbols();
     const candidates = tradeableKalshiSymbols().filter(
-      (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
+      (sym) =>
+        predictions[sym] &&
+        !this._hasOpenOnSymbol(sym) &&
+        !this._hasRecentEntryMiss(sym)
     );
+    if (candidates.length === 0) {
+      if (cooling.length) {
+        this.lastDecision =
+          `Waiting: recent fill misses on ${cooling.join(', ')} — cooling ~90s before retry (prefer liquid books next).`;
+      }
+      return [];
+    }
     const evaluations = await Promise.all(
       candidates.map((sym) => this._evaluateSymbolForSettle(sym, predictions))
     );
     const valid = evaluations.filter(Boolean);
     if (valid.length === 0) return [];
     valid.sort((a, b) => {
-      const aMiss = this._hasRecentEntryMiss(a.symbol) ? 1 : 0;
-      const bMiss = this._hasRecentEntryMiss(b.symbol) ? 1 : 0;
-      if (aMiss !== bMiss) return aMiss - bMiss;
       if (preferOtherThan) {
         const aPen = a.symbol === preferOtherThan ? 1 : 0;
         const bPen = b.symbol === preferOtherThan ? 1 : 0;
         if (aPen !== bPen) return aPen - bPen;
       }
-      return b.rankScore - a.rankScore;
+      // Edge / price score first; liquidity breaks ties (prefer BTC/ETH fills).
+      if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
+      return liquidityPriority(b.symbol) - liquidityPriority(a.symbol);
     });
     return valid;
   }
@@ -3569,24 +3610,33 @@ class TradingBot {
    * are tried first; the stopped coin is only chosen if nothing else clears.
    */
   async _findBestOpportunity(predictions, { preferOtherThan = null } = {}) {
+    const cooling = this._entryMissCooldownSymbols();
     const candidates = tradeableKalshiSymbols().filter(
-      (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
+      (sym) =>
+        predictions[sym] &&
+        !this._hasOpenOnSymbol(sym) &&
+        !this._hasRecentEntryMiss(sym)
     );
+    if (candidates.length === 0) {
+      if (cooling.length) {
+        this.lastDecision =
+          `Waiting: recent fill misses on ${cooling.join(', ')} — cooling ~90s before retry.`;
+      }
+      return null;
+    }
     const evaluations = await Promise.all(
       candidates.map((sym) => this._evaluateSymbolForEdge(sym, predictions))
     );
     const valid = evaluations.filter(Boolean);
     if (valid.length === 0) return null;
     valid.sort((a, b) => {
-      const aMiss = this._hasRecentEntryMiss(a.symbol) ? 1 : 0;
-      const bMiss = this._hasRecentEntryMiss(b.symbol) ? 1 : 0;
-      if (aMiss !== bMiss) return aMiss - bMiss;
       if (preferOtherThan) {
         const aPen = a.symbol === preferOtherThan ? 1 : 0;
         const bPen = b.symbol === preferOtherThan ? 1 : 0;
         if (aPen !== bPen) return aPen - bPen;
       }
-      return b.rankScore - a.rankScore;
+      if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
+      return liquidityPriority(b.symbol) - liquidityPriority(a.symbol);
     });
     return valid[0];
   }
@@ -3726,6 +3776,8 @@ module.exports = {
   DISABLED_TRADE_SYMBOLS,
   isKalshiTradeEnabled,
   tradeableKalshiSymbols,
+  liquidityPriority,
+  LIQUIDITY_PRIORITY_BY_SYMBOL,
   settleEntryBand,
   settleLateEntryMinutes,
   settleLateEntryMinCents,
