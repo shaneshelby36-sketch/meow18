@@ -946,6 +946,27 @@ body[data-view-mode="bot"] .asset-picker {
   gap: 12px;
   margin-bottom: 14px;
 }
+.bot-strategy-tabs {
+  display: flex;
+  gap: 6px;
+  margin: 10px 0 12px;
+  flex-wrap: wrap;
+}
+.bot-strategy-tab {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  color: var(--text-dim);
+  padding: 8px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  font: inherit;
+}
+.bot-strategy-tab.active {
+  color: var(--text);
+  border-color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.06);
+}
 .bot-field-grid label, .backtest-controls label {
   display: flex;
   flex-direction: column;

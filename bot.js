@@ -80,6 +80,36 @@ function tradeableKalshiSymbols() {
   return Object.keys(SERIES_BY_SYMBOL).filter((s) => isKalshiTradeEnabled(s));
 }
 
+/** Settle-mode entry band (default 85–90¢). Clamped to 1–99; swaps if inverted. */
+function settleEntryBand(config = {}) {
+  let min = Number(config.settleEntryMinCents);
+  let max = Number(config.settleEntryMaxCents);
+  if (!Number.isFinite(min)) min = 85;
+  if (!Number.isFinite(max)) max = 90;
+  min = Math.max(1, Math.min(99, Math.round(min)));
+  max = Math.max(1, Math.min(99, Math.round(max)));
+  if (max < min) {
+    const tmp = min;
+    min = max;
+    max = tmp;
+  }
+  return { min, max };
+}
+
+function isSettleEntryPriceCents(priceCents, config = {}) {
+  const { min, max } = settleEntryBand(config);
+  const p = Number(priceCents);
+  return Number.isFinite(p) && p >= min && p <= max;
+}
+
+function isSettleStrategyMode(config = {}) {
+  return String(config.strategyMode || '').toLowerCase() === 'settle';
+}
+
+function isSettleTrade(trade) {
+  return trade && String(trade.strategy || '').toLowerCase() === 'settle';
+}
+
 // Settings that can be safely edited at runtime (via the API/dashboard)
 // without a restart. Deliberately excludes `mode` — switching paper/live
 // stays an env-var + restart decision, so a UI can never silently flip on
@@ -97,6 +127,11 @@ const EDITABLE_NUMERIC_FIELDS = [
   'peerCascadeMaxMinutes',
   'postStopMaxOneMinutes',
   'postStopSameSideCooldownMinutes',
+  'settleEntryMinCents',
+  'settleEntryMaxCents',
+  'settleStopLossCents',
+  'settleMinMinutesToOpen',
+  'settleMaxMinutesToOpen',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -620,6 +655,7 @@ function applyProfitBuckets({
 
 const EDITABLE_STRING_FIELDS = {
   symbol: (v) => (v === 'AUTO' || isKalshiTradeEnabled(v) ? v : null),
+  strategyMode: (v) => (['edge', 'settle'].includes(String(v || '').toLowerCase()) ? String(v).toLowerCase() : null),
   skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
 };
@@ -813,6 +849,8 @@ class TradingBot {
     this.client = kalshiClient;
     this.config = {
       symbol: 'BTC', // 'BTC' | 'XRP' — which asset the bot is currently trading
+      // 'edge' = prediction edge vs Kalshi; 'settle' = buy 85–90¢ and hold to settlement.
+      strategyMode: 'edge',
       edgeThresholdPct: 1, // minimum probability-point edge vs Kalshi to bother trading
       minConfidence: 55, // engine confidence (0-100) required to act
       stopLossCents: 23, // exit if held bid falls this many cents below entry
@@ -835,6 +873,12 @@ class TradingBot {
       // Same-coin same-side sit-out after stop_loss (from closedAt), even when
       // bounce + thesis would allow knife-catch. 0 = off. Default 2 minutes.
       postStopSameSideCooldownMinutes: 2,
+      // Settle strategy: buy ask in [min,max]¢ and hold to official settlement.
+      settleEntryMinCents: 85,
+      settleEntryMaxCents: 90,
+      settleStopLossCents: 8, // tighter than edge — max win to 100 is only ~10–15¢
+      settleMinMinutesToOpen: 0.5, // still need a little time; 0 = allow until last seconds
+      settleMaxMinutesToOpen: 8, // only late-ish windows (0 = no max)
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -2413,7 +2457,16 @@ class TradingBot {
       await this._closePosition(trade, stopFill, 'stop_loss', {
         liveSellPriceCents: heldSideBidCents,
       });
-    } else if (nearCertainHit) {
+      return;
+    }
+
+    // Settle strategy: only stop (above) or hold for official settlement —
+    // no TP / near-certain / signal / pre-close banks (those fight the thesis).
+    if (isSettleTrade(trade)) {
+      return;
+    }
+
+    if (nearCertainHit) {
       const fill =
         this.config.mode === 'paper'
           ? Math.min(99, Math.max(nearCertainExitCents, heldSideBidCents))
@@ -2495,7 +2548,9 @@ class TradingBot {
    */
   _stopLevelCents(trade) {
     const entry = Number(trade.entryPriceCents);
-    const drop = Number(this.config.stopLossCents);
+    const drop = isSettleTrade(trade)
+      ? Number(this.config.settleStopLossCents)
+      : Number(this.config.stopLossCents);
     if (!Number.isFinite(entry) || entry < 1 || !Number.isFinite(drop) || drop <= 0) return null;
     return Math.max(1, Math.round(entry - drop));
   }
@@ -2515,7 +2570,17 @@ class TradingBot {
     return Boolean(ticker) && this.openTrades.some((t) => t.ticker === ticker);
   }
 
-  async _openPosition({ symbol, ticker, side, priceCents, floorStrike, closeTime, engineProbability, engineConfidence }) {
+  async _openPosition({
+    symbol,
+    ticker,
+    side,
+    priceCents,
+    floorStrike,
+    closeTime,
+    engineProbability,
+    engineConfidence,
+    strategy = 'edge',
+  }) {
     // A paper trade must obey the same price rules as a live order. Without
     // this guard an empty Kalshi quote could be stored as `null` and then
     // appear in the dashboard as e.g. "BTC @ NO null".
@@ -2528,25 +2593,45 @@ class TradingBot {
       this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: market close time is missing or already ending.`;
       return;
     }
+    const isSettle = strategy === 'settle';
     const minutesLeft = (closeAt - Date.now()) / 60000;
-    const minMinutesToOpen = Number.isFinite(Number(this.config.minMinutesToOpen))
-      ? Number(this.config.minMinutesToOpen)
-      : 3;
+    const minMinutesToOpen = isSettle
+      ? Number.isFinite(Number(this.config.settleMinMinutesToOpen))
+        ? Number(this.config.settleMinMinutesToOpen)
+        : 0.5
+      : Number.isFinite(Number(this.config.minMinutesToOpen))
+        ? Number(this.config.minMinutesToOpen)
+        : 3;
     if (minMinutesToOpen > 0 && minutesLeft < minMinutesToOpen) {
       this.lastDecision =
         `Skipped ${symbol}: only ${minutesLeft.toFixed(1)} min left (min ${minMinutesToOpen} to open).`;
       return;
     }
+    if (isSettle) {
+      const maxMinutes = Number(this.config.settleMaxMinutesToOpen);
+      if (Number.isFinite(maxMinutes) && maxMinutes > 0 && minutesLeft > maxMinutes) {
+        this.lastDecision =
+          `Skipped ${symbol}: ${minutesLeft.toFixed(1)} min left (settle mode only opens with ≤ ${maxMinutes} min left).`;
+        return;
+      }
+      if (!isSettleEntryPriceCents(priceCents, this.config)) {
+        const band = settleEntryBand(this.config);
+        this.lastDecision =
+          `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: outside settle band ${band.min}–${band.max}¢.`;
+        return;
+      }
+    } else {
+      const minEntry = Number(this.config.minEntryCents);
+      if (Number.isFinite(minEntry) && minEntry > 0 && priceCents < minEntry) {
+        this.lastDecision =
+          `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: below min entry ${minEntry}¢ (longshot ban).`;
+        return;
+      }
+    }
     // Max positions is a concurrency cap across coins — stacking two opens
     // on the same symbol (or ticker) just doubles correlated exposure.
     if (this._hasOpenOnSymbol(symbol) || this._hasOpenOnTicker(ticker)) {
       this.lastDecision = `Skipped ${symbol}: already have an open position on this coin/market.`;
-      return;
-    }
-    const minEntry = Number(this.config.minEntryCents);
-    if (Number.isFinite(minEntry) && minEntry > 0 && priceCents < minEntry) {
-      this.lastDecision =
-        `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: below min entry ${minEntry}¢ (longshot ban).`;
       return;
     }
     // Each Kalshi contract costs `priceCents` cents and pays out $1 if it
@@ -2567,6 +2652,7 @@ class TradingBot {
     const trade = {
       id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
       mode: this.config.mode,
+      strategy: isSettle ? 'settle' : 'edge',
       symbol,
       ticker,
       side, // 'yes' | 'no'
@@ -2655,16 +2741,20 @@ class TradingBot {
     this.ledger.trades.unshift(trade);
     if (this.ledger.trades.length > 200) this.ledger.trades.length = 200;
     this._noteProtectionGate(false); // open implies gate no longer blocking
-    this.lastDecision = `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${trade.entryPriceCents}¢ (confidence ${engineConfidence}%).`;
+    this.lastDecision = isSettle
+      ? `Opened ${symbol} ${side.toUpperCase()} settle position at ${trade.entryPriceCents}¢ (hold to settlement).`
+      : `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${trade.entryPriceCents}¢ (confidence ${engineConfidence}%).`;
     this._logActivity(this.lastDecision, {
       kind: 'open',
       symbol,
       side,
+      strategy: trade.strategy,
       tradeId: trade.id,
     });
     upsertTradeLog({
       id: trade.id,
       mode: trade.mode,
+      strategy: trade.strategy,
       symbol: trade.symbol,
       ticker: trade.ticker,
       side: trade.side,
@@ -2737,10 +2827,19 @@ class TradingBot {
       preferOtherThan != null &&
       (this.config.symbol === 'AUTO' || preferOtherThan === this.config.symbol);
 
-    const opportunity =
-      this.config.symbol === 'AUTO' || scanAllAfterStop
-        ? await this._findBestOpportunity(predictions, { preferOtherThan })
-        : await this._evaluateSymbolForEdge(this.config.symbol, predictions);
+    const settleMode = isSettleStrategyMode(this.config);
+    let opportunity;
+    if (settleMode) {
+      opportunity =
+        this.config.symbol === 'AUTO' || scanAllAfterStop
+          ? await this._findBestSettleOpportunity(predictions, { preferOtherThan })
+          : await this._evaluateSymbolForSettle(this.config.symbol, predictions);
+    } else {
+      opportunity =
+        this.config.symbol === 'AUTO' || scanAllAfterStop
+          ? await this._findBestOpportunity(predictions, { preferOtherThan })
+          : await this._evaluateSymbolForEdge(this.config.symbol, predictions);
+    }
 
     if (!opportunity) return;
 
@@ -2759,6 +2858,7 @@ class TradingBot {
       closeTime: opportunity.closeTime,
       engineProbability: opportunity.side === 'yes' ? opportunity.window.probabilityUp : opportunity.window.probabilityDown,
       engineConfidence: opportunity.window.confidence,
+      strategy: settleMode ? 'settle' : 'edge',
     });
   }
 
@@ -3033,6 +3133,178 @@ class TradingBot {
   }
 
   /**
+   * Settle mode: buy a side already priced in the configured band (default
+   * 85–90¢) late in the window and hold for official settlement. Rank prefers
+   * cheaper asks inside the band (more room to 100¢). Soft thesis: engine
+   * window should not strongly disagree with the side.
+   */
+  async _evaluateSymbolForSettle(symbol, predictions) {
+    if (!isKalshiTradeEnabled(symbol)) {
+      this.lastDecision = `Waiting: ${symbol} is opted out of trading.`;
+      return null;
+    }
+    if (this._hasOpenOnSymbol(symbol)) {
+      this.lastDecision = `Waiting: already holding an open ${symbol} position (one open per coin).`;
+      return null;
+    }
+
+    const assetPrediction = predictions[symbol];
+    if (!assetPrediction || !assetPrediction.ready) {
+      this.lastDecision = `Waiting: ${symbol} prediction data is still seeding.`;
+      return null;
+    }
+
+    const seriesTicker = SERIES_BY_SYMBOL[symbol];
+    if (!seriesTicker) {
+      this.lastDecision = `Waiting: ${symbol} has no supported Kalshi market.`;
+      return null;
+    }
+
+    let market;
+    try {
+      const markets = await this.client.getOpenMarkets(seriesTicker, 5);
+      const nowMs = Date.now();
+      market = (markets || []).find((m) => {
+        const closeMs = m.close_time ? new Date(m.close_time).getTime() : NaN;
+        return Number.isFinite(closeMs) && closeMs > nowMs + 5000;
+      });
+    } catch (err) {
+      this.lastError = `Failed to fetch Kalshi market for ${seriesTicker}: ${err.message}`;
+      console.error('[bot]', this.lastError);
+      return null;
+    }
+    if (!market) {
+      this.lastDecision = `Waiting: no open Kalshi market found for ${symbol}.`;
+      return null;
+    }
+    if (this._hasOpenOnTicker(market.ticker)) {
+      this.lastDecision = `Waiting: already holding an open position on ${market.ticker}.`;
+      return null;
+    }
+
+    const now = Date.now();
+    const closeTime = new Date(market.close_time).getTime();
+    if (!Number.isFinite(closeTime) || closeTime <= now) {
+      this.lastDecision = `Waiting: the available ${symbol} market is already closed.`;
+      return null;
+    }
+
+    const minutesRemaining = Math.max(0.1, (closeTime - now) / 60000);
+    const minMinutes = Number.isFinite(Number(this.config.settleMinMinutesToOpen))
+      ? Number(this.config.settleMinMinutesToOpen)
+      : 0.5;
+    const maxMinutes = Number.isFinite(Number(this.config.settleMaxMinutesToOpen))
+      ? Number(this.config.settleMaxMinutesToOpen)
+      : 8;
+    if (minMinutes > 0 && minutesRemaining < minMinutes) {
+      this.lastDecision =
+        `Waiting: ${symbol} settle — only ${minutesRemaining.toFixed(1)} min left (need ≥ ${minMinutes}).`;
+      return null;
+    }
+    if (maxMinutes > 0 && minutesRemaining > maxMinutes) {
+      this.lastDecision =
+        `Waiting: ${symbol} settle — ${minutesRemaining.toFixed(1)} min left (only opens with ≤ ${maxMinutes} min left).`;
+      return null;
+    }
+
+    const window = this._pickWindow(assetPrediction.windows, minutesRemaining);
+    if (!window) {
+      this.lastDecision = `Waiting: ${symbol} has no usable prediction window for settle.`;
+      return null;
+    }
+
+    const yesBid = Number(market.yes_bid);
+    const yesAsk = Number(market.yes_ask);
+    if (!Number.isFinite(yesBid) || !Number.isFinite(yesAsk) || yesBid < 1 || yesAsk > 99 || yesBid > yesAsk) {
+      this.lastError = `Skipped ${symbol}: Kalshi has no usable two-sided quote yet.`;
+      return null;
+    }
+
+    const band = settleEntryBand(this.config);
+    const candidates = [];
+    if (isSettleEntryPriceCents(yesAsk, this.config)) {
+      candidates.push({ side: 'yes', priceCents: yesAsk });
+    }
+    const noAsk = 100 - yesBid;
+    if (isSettleEntryPriceCents(noAsk, this.config)) {
+      candidates.push({ side: 'no', priceCents: noAsk });
+    }
+    if (candidates.length === 0) {
+      this.lastDecision =
+        `Waiting: ${symbol} settle — YES ask ${yesAsk}¢ / NO ask ${noAsk}¢ outside ${band.min}–${band.max}¢.`;
+      return null;
+    }
+
+    // Prefer engine-agreed side when both qualify; else cheaper ask (more to 100).
+    const favorsYes = window.probabilityUp >= window.probabilityDown;
+    candidates.sort((a, b) => {
+      const aAgree = (a.side === 'yes') === favorsYes ? 0 : 1;
+      const bAgree = (b.side === 'yes') === favorsYes ? 0 : 1;
+      if (aAgree !== bAgree) return aAgree - bAgree;
+      return a.priceCents - b.priceCents;
+    });
+    const pick = candidates[0];
+
+    // Soft thesis: don't buy a side the engine currently leans against.
+    if (pick.side === 'yes' && window.probabilityUp < window.probabilityDown) {
+      this.lastDecision =
+        `Waiting: ${symbol} settle YES @ ${pick.priceCents}¢ but engine leans NO.`;
+      return null;
+    }
+    if (pick.side === 'no' && window.probabilityDown < window.probabilityUp) {
+      this.lastDecision =
+        `Waiting: ${symbol} settle NO @ ${pick.priceCents}¢ but engine leans YES.`;
+      return null;
+    }
+
+    const recoveryCheck = await this._stoppedCoinRecoveryGate(
+      symbol,
+      pick.side,
+      pick.priceCents,
+      window,
+      predictions
+    );
+    if (!recoveryCheck.ok) {
+      this.lastDecision = recoveryCheck.reason;
+      this._noteProtectionGate(recoveryCheck.reason);
+      return null;
+    }
+    this._noteProtectionGate(null);
+
+    return {
+      symbol,
+      market,
+      window,
+      side: pick.side,
+      priceCents: pick.priceCents,
+      closeTime,
+      edge: 100 - pick.priceCents,
+      rankScore: 100 - pick.priceCents,
+      strategy: 'settle',
+    };
+  }
+
+  async _findBestSettleOpportunity(predictions, { preferOtherThan = null } = {}) {
+    const candidates = tradeableKalshiSymbols().filter(
+      (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
+    );
+    const evaluations = await Promise.all(
+      candidates.map((sym) => this._evaluateSymbolForSettle(sym, predictions))
+    );
+    const valid = evaluations.filter(Boolean);
+    if (valid.length === 0) return null;
+    valid.sort((a, b) => {
+      if (preferOtherThan) {
+        const aPen = a.symbol === preferOtherThan ? 1 : 0;
+        const bPen = b.symbol === preferOtherThan ? 1 : 0;
+        if (aPen !== bPen) return aPen - bPen;
+      }
+      return b.rankScore - a.rankScore;
+    });
+    return valid[0];
+  }
+
+  /**
    * AUTO mode: scores every Kalshi-tradeable symbol the engine is currently
    * predicting, and returns only the single best-ranked opportunity that
    * clears both thresholds — so instead of being locked into trading one
@@ -3199,6 +3471,10 @@ module.exports = {
   DISABLED_TRADE_SYMBOLS,
   isKalshiTradeEnabled,
   tradeableKalshiSymbols,
+  settleEntryBand,
+  isSettleEntryPriceCents,
+  isSettleStrategyMode,
+  isSettleTrade,
   stopRecoveryCentsRequired,
   stopRecoveryMaxAgeMs,
   peerCascadeMaxAgeMs,

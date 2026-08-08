@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -979,6 +979,29 @@ async function testBotExits() {
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.exitReason, 'take_profit', 'take_profit');
     checkEq(trade.exitPriceCents, 65, 'paper TP fills at entry+rise (50+15)');
+  }
+
+  // Settle strategy: ignore TP / near-certain — hold until settle (or stop)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 92,
+        no_bid: 8,
+      }),
+      { stopLossCents: 40, takeProfitCents: 5, settleStopLossCents: 8, nearCertainExitCents: 90 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 87,
+      windowCloseTime: now + 10 * 60 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.status, 'open', 'settle trade stays open through TP/near-certain bids');
+    checkEq(trade.exitReason, undefined, 'settle trade has no early exit reason');
   }
 
   // Breakeven in final 5 without confidence hold
@@ -3669,6 +3692,37 @@ async function testBotTradingFlow() {
   check(isKalshiTradeEnabled('BTC'), 'BTC still tradeable');
   check(!tradeableKalshiSymbols().includes('DOGE'), 'AUTO tradeable set excludes DOGE');
   check(tradeableKalshiSymbols().includes('ETH'), 'AUTO tradeable set includes ETH');
+
+  section('settle strategy helpers');
+  checkEq(settleEntryBand({}).min, 85, 'settle band default min 85');
+  checkEq(settleEntryBand({}).max, 90, 'settle band default max 90');
+  check(isSettleEntryPriceCents(87), '87¢ inside settle band');
+  check(!isSettleEntryPriceCents(84), '84¢ outside settle band');
+  check(!isSettleEntryPriceCents(91), '91¢ outside settle band');
+  check(isSettleStrategyMode({ strategyMode: 'settle' }), 'settle mode flag');
+  check(!isSettleStrategyMode({ strategyMode: 'edge' }), 'edge mode flag');
+  check(isSettleTrade({ strategy: 'settle' }), 'settle trade tag');
+  {
+    const settleBot = new TradingBot({
+      kalshiClient: { hasCredentials: false },
+      config: {
+        mode: 'paper',
+        liveAuthorized: false,
+        stopLossCents: 23,
+        settleStopLossCents: 8,
+      },
+    });
+    checkEq(
+      settleBot._stopLevelCents({ strategy: 'settle', entryPriceCents: 87 }),
+      79,
+      'settle stop uses settleStopLossCents (87−8)'
+    );
+    checkEq(
+      settleBot._stopLevelCents({ strategy: 'edge', entryPriceCents: 55 }),
+      32,
+      'edge stop still uses stopLossCents'
+    );
+  }
 }
 
 // ───────────────────────────── UI countdown logic (mirrored) ─────────────────────────────

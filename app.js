@@ -748,7 +748,7 @@ async function refreshBotStatus() {
       return;
     }
     const mode = data.config.mode;
-    modeLine.textContent = `Mode: ${mode === 'live' ? 'LIVE (real orders)' : 'Paper (simulated)'} · Trading ${data.config.symbol}`;
+    modeLine.textContent = `Mode: ${mode === 'live' ? 'LIVE (real orders)' : 'Paper (simulated)'} · ${data.config.strategyMode === 'settle' ? 'Settle' : 'Edge'} · Trading ${data.config.symbol}`;
     updateModeButtons(mode, data.config.liveAuthorized);
 
     const chips = [];
@@ -852,7 +852,7 @@ function renderBotDashboard(data) {
   updateBotRuntimeDisplays();
 
   const mode = data.config.mode === 'live' ? 'LIVE' : 'PAPER';
-  state.textContent = `${mode} · ${data.config.symbol || '—'} · ${formatSkimLabel(data.config)} · ${data.lastDecision || ''}`;
+  state.textContent = `${mode} · ${data.config.strategyMode === 'settle' ? 'Settle' : 'Edge'} · ${data.config.symbol || '—'} · ${formatSkimLabel(data.config)} · ${data.lastDecision || ''}`;
   const capital = data.capital || {};
   const openCount = (data.openTrades || []).length;
   stats.innerHTML = [
@@ -928,11 +928,12 @@ function buildOpenPositionsHtml(openTrades) {
       const stake = Number.isFinite(t.stakeDollars) ? `$${Number(t.stakeDollars).toFixed(2)}` : '—';
       const contracts = Number.isFinite(t.contracts) ? t.contracts : '—';
       const conf = Number.isFinite(t.engineConfidence) ? `${t.engineConfidence}%` : '—';
+      const strategy = t.strategy === 'settle' ? 'Settle' : 'Edge';
       return `
         <div class="bot-position-row">
           <div class="bot-position-main">
             <strong>${t.symbol || '?'} ${side}</strong>
-            <span>${entry} · ${contracts} ct · ${stake}</span>
+            <span>${entry} · ${contracts} ct · ${stake} · ${strategy}</span>
           </div>
           <div class="bot-position-meta">
             <span>Opened ${formatTradeTime(t.openedAt)}</span>
@@ -1261,10 +1262,36 @@ const SLIDER_UNITS = {
   'bot-stoprecovery': (v) => (Number(v) <= 0 ? 'off' : `+${Math.round(v)}¢`),
   'bot-takeprofit': (v) => `+${Math.round(v)}¢`,
   'bot-minentries': (v) => `${Math.round(v)}¢`,
+  'bot-settle-min': (v) => `${Math.round(v)}¢`,
+  'bot-settle-max': (v) => `${Math.round(v)}¢`,
+  'bot-settle-stoploss': (v) => `−${Math.round(v)}¢`,
+  'bot-settle-maxmin': (v) => `${(+v).toFixed(1)} min`,
   'bot-stake': (v) => `$${Math.round(v)}`,
   'bot-maxpos': (v) => `${Math.round(v)}`,
   'bot-paper-balance': (v) => `$${Math.round(v)}`,
 };
+
+function setBotStrategyTab(mode) {
+  const strategy = mode === 'settle' ? 'settle' : 'edge';
+  const hidden = document.getElementById('bot-strategy-mode');
+  if (hidden) hidden.value = strategy;
+  document.querySelectorAll('.bot-strategy-tab').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.strategy === strategy);
+  });
+  const edgePanel = document.getElementById('bot-settings-edge');
+  const settlePanel = document.getElementById('bot-settings-settle');
+  if (edgePanel) edgePanel.hidden = strategy === 'settle';
+  if (settlePanel) settlePanel.hidden = strategy !== 'settle';
+}
+
+function wireBotStrategyTabs() {
+  document.querySelectorAll('.bot-strategy-tab').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      setBotStrategyTab(btn.dataset.strategy);
+      scheduleAutoSaveBotConfig();
+    });
+  });
+}
 
 function updateSliderDisplay(id) {
   const input = document.getElementById(id);
@@ -1319,7 +1346,21 @@ function formatSkimLabel(config) {
 }
 
 function wireSliderDisplays() {
-  ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-stoprecovery', 'bot-takeprofit', 'bot-minentries', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach((id) => {
+  [
+    'bot-edge',
+    'bot-confidence',
+    'bot-stoploss',
+    'bot-stoprecovery',
+    'bot-takeprofit',
+    'bot-minentries',
+    'bot-settle-min',
+    'bot-settle-max',
+    'bot-settle-stoploss',
+    'bot-settle-maxmin',
+    'bot-stake',
+    'bot-maxpos',
+    'bot-paper-balance',
+  ].forEach((id) => {
     const input = document.getElementById(id);
     if (input) input.addEventListener('input', () => updateSliderDisplay(id));
   });
@@ -1361,6 +1402,10 @@ function wireBotConfigAutoSave() {
     'bot-stoprecovery',
     'bot-takeprofit',
     'bot-minentries',
+    'bot-settle-min',
+    'bot-settle-max',
+    'bot-settle-stoploss',
+    'bot-settle-maxmin',
     'bot-stake',
     'bot-maxpos',
     'bot-paper-balance',
@@ -1384,6 +1429,7 @@ async function loadBotConfigIntoForm() {
     const data = await res.json();
     const c = data.config;
     document.getElementById('bot-symbol').value = c.symbol;
+    setBotStrategyTab(c.strategyMode || 'edge');
     const backtestSymbol = document.getElementById('backtest-symbol');
     if (backtestSymbol && [...backtestSymbol.options].some((o) => o.value === c.symbol)) {
       backtestSymbol.value = c.symbol;
@@ -1395,6 +1441,14 @@ async function loadBotConfigIntoForm() {
     if (stopRecEl) stopRecEl.value = c.stopRecoveryCents != null ? c.stopRecoveryCents : 6;
     document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 15;
     document.getElementById('bot-minentries').value = c.minEntryCents != null ? c.minEntryCents : 25;
+    const settleMin = document.getElementById('bot-settle-min');
+    if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 85;
+    const settleMax = document.getElementById('bot-settle-max');
+    if (settleMax) settleMax.value = c.settleEntryMaxCents != null ? c.settleEntryMaxCents : 90;
+    const settleStop = document.getElementById('bot-settle-stoploss');
+    if (settleStop) settleStop.value = c.settleStopLossCents != null ? c.settleStopLossCents : 8;
+    const settleMaxMin = document.getElementById('bot-settle-maxmin');
+    if (settleMaxMin) settleMaxMin.value = c.settleMaxMinutesToOpen != null ? c.settleMaxMinutesToOpen : 8;
     document.getElementById('bot-stake').value = c.stakeDollars;
     document.getElementById('bot-maxpos').value = c.maxOpenPositions;
     document.getElementById('bot-paper-balance').value = c.paperStartingBalanceDollars;
@@ -1407,7 +1461,21 @@ async function loadBotConfigIntoForm() {
     } else {
       skimAmt.value = c.skimFixedDollars;
     }
-    ['bot-edge', 'bot-confidence', 'bot-stoploss', 'bot-stoprecovery', 'bot-takeprofit', 'bot-minentries', 'bot-stake', 'bot-maxpos', 'bot-paper-balance'].forEach(updateSliderDisplay);
+    [
+      'bot-edge',
+      'bot-confidence',
+      'bot-stoploss',
+      'bot-stoprecovery',
+      'bot-takeprofit',
+      'bot-minentries',
+      'bot-settle-min',
+      'bot-settle-max',
+      'bot-settle-stoploss',
+      'bot-settle-maxmin',
+      'bot-stake',
+      'bot-maxpos',
+      'bot-paper-balance',
+    ].forEach(updateSliderDisplay);
     updateSkimSliderDisplay();
   } catch {
     // Bot likely disabled or engine unreachable — form just stays blank.
@@ -1423,12 +1491,17 @@ async function saveBotConfig(opts = {}) {
   const skimAmount = parseFloat(document.getElementById('bot-skim-amount').value);
   const payload = {
     symbol: document.getElementById('bot-symbol').value,
+    strategyMode: document.getElementById('bot-strategy-mode')?.value || 'edge',
     edgeThresholdPct: parseFloat(document.getElementById('bot-edge').value),
     minConfidence: parseFloat(document.getElementById('bot-confidence').value),
     stopLossCents: parseFloat(document.getElementById('bot-stoploss').value),
     stopRecoveryCents: parseFloat(document.getElementById('bot-stoprecovery').value),
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
+    settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '85'),
+    settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '90'),
+    settleStopLossCents: parseFloat(document.getElementById('bot-settle-stoploss')?.value || '8'),
+    settleMaxMinutesToOpen: parseFloat(document.getElementById('bot-settle-maxmin')?.value || '8'),
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),
@@ -1859,6 +1932,7 @@ function wireBotUI() {
   document.getElementById('kalshi-creds-save').addEventListener('click', saveKalshiCredentials);
   document.getElementById('mode-btn-paper').addEventListener('click', () => switchMode('paper'));
   document.getElementById('mode-btn-live').addEventListener('click', () => switchMode('live'));
+  wireBotStrategyTabs();
   wireBotConfigAutoSave();
   wireSliderDisplays();
 }
