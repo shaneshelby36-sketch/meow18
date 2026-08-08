@@ -393,7 +393,14 @@
               <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
               <span class="slider-value" id="bot-maxpos-value">—</span>
             </div>
-            <span class="field-hint">How many trades can be open at once. Default 2 across different coins. Stuck/settling trades should close on their own window — raising this to “wait it out” just stacks more risk.</span>
+            <span class="field-hint">How many trades can be open at once. Default 2 across different coins. With “second only if green” On, you only get a 2nd open when an existing hold is already green (bid ≥ entry).</span>
+          </label>
+          <label>Second open only if holding green
+            <select id="bot-second-green">
+              <option value="on">On (default)</option>
+              <option value="off">Off — fill up to max anytime</option>
+            </select>
+            <span class="field-hint">On: first trade alone is fine; another open only after you already have a green hold. Off: can stack up to max immediately.</span>
           </label>
 
           <label>Starting Bankroll

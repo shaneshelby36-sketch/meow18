@@ -1484,6 +1484,15 @@ async function loadBotConfigIntoForm() {
     }
     document.getElementById('bot-stake').value = c.stakeDollars;
     document.getElementById('bot-maxpos').value = c.maxOpenPositions;
+    const secondGreen = document.getElementById('bot-second-green');
+    if (secondGreen) {
+      const off =
+        c.secondOpenRequiresGreen === false ||
+        c.secondOpenRequiresGreen === 0 ||
+        c.secondOpenRequiresGreen === 'off' ||
+        c.secondOpenRequiresGreen === 'false';
+      secondGreen.value = off ? 'off' : 'on';
+    }
     document.getElementById('bot-paper-balance').value = c.paperStartingBalanceDollars;
     document.getElementById('bot-skim-mode').value = c.skimMode || 'insurance';
     const skimAmt = document.getElementById('bot-skim-amount');
@@ -1546,6 +1555,7 @@ async function saveBotConfig(opts = {}) {
     settleTieredExits: document.getElementById('bot-settle-tiered')?.value || 'on',
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
+    secondOpenRequiresGreen: document.getElementById('bot-second-green')?.value || 'on',
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),
     skimMode,
     ...(skimMode === 'insurance'

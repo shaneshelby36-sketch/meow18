@@ -813,6 +813,14 @@ const EDITABLE_STRING_FIELDS = {
     if (s === 'off' || s === 'false' || s === 'no') return 'off';
     return null;
   },
+  secondOpenRequiresGreen: (v) => {
+    if (v === true || v === 1) return 'on';
+    if (v === false || v === 0) return 'off';
+    const s = String(v || '').toLowerCase();
+    if (s === 'on' || s === 'true' || s === 'yes') return 'on';
+    if (s === 'off' || s === 'false' || s === 'no') return 'off';
+    return null;
+  },
   skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
 };
@@ -1051,6 +1059,8 @@ class TradingBot {
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
+      // With ≥1 open: only allow another if an existing hold is green (bid ≥ entry).
+      secondOpenRequiresGreen: 'on',
       skimMode: 'insurance', // 'insurance' | 'percent' | 'fixed' | 'off'
       skimPercent: 50, // used when skimMode === 'percent'
       skimFixedDollars: 5, // used when skimMode === 'fixed'
@@ -2435,6 +2445,43 @@ class TradingBot {
     return null;
   }
 
+  /** True when an open hold’s live bid is ≥ entry (flat/green). */
+  async _isOpenHoldingGreen(trade) {
+    if (!trade || trade.status !== 'open') return false;
+    const entry = Number(trade.entryPriceCents);
+    if (!Number.isFinite(entry)) return false;
+    try {
+      const market = await this._getMarketBounded(trade.ticker, 2000);
+      const bid = this._heldSideBidCents(trade, market);
+      return bid != null && Number.isFinite(bid) && bid >= entry;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Second (and further) opens only when at least one existing open is green.
+   * First open always allowed. Off via secondOpenRequiresGreen: 'off'.
+   */
+  async _canOpenAdditionalPosition() {
+    if (this.openTrades.length === 0) return { ok: true };
+    const flag = String(this.config.secondOpenRequiresGreen ?? 'on').toLowerCase();
+    if (flag === 'off' || flag === 'false' || flag === 'no' || flag === '0') {
+      return { ok: true };
+    }
+    for (const t of this.openTrades) {
+      if (await this._isOpenHoldingGreen(t)) {
+        return { ok: true, greenSymbol: t.symbol };
+      }
+    }
+    const held = this.openTrades.map((t) => t.symbol).join(', ');
+    return {
+      ok: false,
+      reason:
+        `Waiting: already holding ${held} — only open another when an existing position is green (bid ≥ entry).`,
+    };
+  }
+
   /** Live entry ask for a side — used to re-quote between fill retries. */
   async _refreshLiveEntryAskCents(ticker, side, fallbackCents) {
     const fallback = Number(fallbackCents);
@@ -3186,6 +3233,15 @@ class TradingBot {
     }
     if (this.openTrades.length >= this.config.maxOpenPositions) return;
     if (!predictions) return;
+
+    // One open is fine; a second only if something already held is green.
+    if (this.openTrades.length >= 1) {
+      const extra = await this._canOpenAdditionalPosition();
+      if (!extra.ok) {
+        this.lastDecision = extra.reason;
+        return;
+      }
+    }
 
     // After a stop, don't stack a second leg while the wound is still fresh —
     // briefly cap at 1 open (postStopMaxOneMinutes, default 1.5m), then

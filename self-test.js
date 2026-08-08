@@ -183,6 +183,8 @@ function makeBot(client, config = {}) {
     paperStartingBalanceDollars: config.paperStartingBalanceDollars ?? 100,
     stakingStrategy: config.stakingStrategy ?? 'fixed',
     symbol: config.symbol ?? 'ETH',
+    // Suite opens multi-slot positions without greening the first hold unless a case opts in.
+    secondOpenRequiresGreen: config.secondOpenRequiresGreen ?? 'off',
   });
   normalizeInsuranceThresholds(bot.config);
   bot.ledger = { trades: [], reserveCents: 0, insuranceCents: 0, insuranceReady: false, insuranceDepositedCents: 0, periodStartTime: Date.now() };
@@ -1093,6 +1095,49 @@ async function testBotExits() {
     });
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.status, 'open', 'settle ≥90¢ holds toward settlement');
+  }
+
+  // Second open only when an existing hold is green
+  {
+    const now = Date.now();
+    const redClient = mockClient({
+      status: 'open',
+      close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+      yes_bid: 84,
+      no_bid: 16,
+    });
+    const redBot = makeBot(redClient, {
+      maxOpenPositions: 2,
+      secondOpenRequiresGreen: 'on',
+    });
+    openTrade(redBot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 89,
+      windowCloseTime: now + 10 * 60 * 1000,
+    });
+    const blocked = await redBot._canOpenAdditionalPosition();
+    check(!blocked.ok, 'second open blocked while only hold is red');
+    check(/green/i.test(blocked.reason || ''), 'block reason mentions green');
+
+    const greenClient = mockClient({
+      status: 'open',
+      close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+      yes_bid: 92,
+      no_bid: 8,
+    });
+    const greenBot = makeBot(greenClient, {
+      maxOpenPositions: 2,
+      secondOpenRequiresGreen: 'on',
+    });
+    openTrade(greenBot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 89,
+      windowCloseTime: now + 10 * 60 * 1000,
+    });
+    const allowed = await greenBot._canOpenAdditionalPosition();
+    check(allowed.ok, 'second open allowed when hold is green');
   }
 
   // Breakeven in final 5 without confidence hold
