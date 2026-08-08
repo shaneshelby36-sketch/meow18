@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, settleExitPlan, settleRankAskScore, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, settleExitPlan, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -3908,11 +3908,14 @@ async function testBotTradingFlow() {
 
   section('settle strategy helpers');
   checkEq(settleEntryBand({}).min, 85, 'settle band default min 85');
-  checkEq(settleEntryBand({}).max, 95, 'settle band default max 95');
+  checkEq(settleEntryBand({}).max, 92, 'settle band default max 92');
+  checkEq(settleMinUpsideCents({}), 8, 'settle min upside defaults to stop (8¢)');
   check(isSettleEntryPriceCents(87), '87¢ inside settle band');
-  check(isSettleEntryPriceCents(93), '93¢ inside widened settle band');
+  check(isSettleEntryPriceCents(92), '92¢ at settle band max');
+  check(!isSettleEntryPriceCents(93), '93¢ outside tightened settle band');
   check(!isSettleEntryPriceCents(84), '84¢ outside settle band');
   check(!isSettleEntryPriceCents(96), '96¢ outside settle band');
+  check(!isSettleEntryPriceCents(95), '95¢ outside tightened settle band');
   check(!isSettleEntryPriceCents(72, {}, 10), '72¢ blocked with 10m left (late not open)');
   check(isSettleEntryPriceCents(72, {}, 3), '72¢ allowed with 3m left (late fallback)');
   checkEq(settleEffectiveEntryBand({}, 3).min, 70, 'late effective band floor 70');

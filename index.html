@@ -320,7 +320,7 @@
         </div>
 
         <div id="bot-settings-settle" class="bot-field-grid" hidden>
-          <p class="settings-hint">Buys YES or NO when the ask is in the band (default 85–95¢), with enough time left in the window. Soft filter: engine must not lean against the side. If nothing in-band and ≤3:30 left, may take the closest ask down to the late floor (default 70¢) — prefers higher prices, not the cheapest. With entry-tiered exits On, aims for an entry-based target (e.g. 91→96) and banks green near the deadline if it doesn’t get there; Off = stop + hold to settlement only.</p>
+          <p class="settings-hint">Buys YES or NO when the ask is in the band (default 85–92¢), with enough time left. Skips “rich” asks (≥94¢) and anything with less upside to 100¢ than the settle stop (default 8¢) — e.g. 95¢ only pays +5¢ but can stop −8¢. Soft filter: engine must not lean against the side. Late fallback can dip to ~70¢. Entry-tiered exits On = target/stale by entry; Off = stop + hold to settle.</p>
           <label>Settle entry min (¢)
             <div class="slider-row">
               <input id="bot-settle-min" type="range" min="70" max="95" step="1" />
@@ -333,7 +333,7 @@
               <input id="bot-settle-max" type="range" min="75" max="98" step="1" />
               <span class="slider-value" id="bot-settle-max-value">—</span>
             </div>
-            <span class="field-hint">Highest ask price allowed (default 95¢). Above this looks “stuck” even if it’s past 85¢.</span>
+            <span class="field-hint">Highest ask allowed (default 92¢). Also requires upside to 100 ≥ settle stop (8¢) and skips ≥94¢ so AUTO hunts other coins instead of staring at dead R:R tickets.</span>
           </label>
           <label>Settle stop-loss (¢ below entry)
             <div class="slider-row">

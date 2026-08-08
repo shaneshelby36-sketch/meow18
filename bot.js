@@ -118,12 +118,27 @@ function settleRankAskScore(priceCents, { richFloorCents = 94, usedLateBand = fa
   return askPart + bandBonus;
 }
 
-/** Settle-mode entry band (default 85–95¢). Clamped to 1–99; swaps if inverted. */
+/**
+ * Minimum cents of upside to settlement (100 − ask) required to open a settle
+ * trade. Default = settle stop (need at least as much reward as stop risk).
+ * 0 = off. Blocks 94–95¢ "almost certain" tickets with terrible R:R.
+ */
+function settleMinUpsideCents(config = {}) {
+  const explicit = Number(config.settleMinUpsideCents);
+  if (Number.isFinite(explicit) && explicit <= 0) return 0;
+  if (Number.isFinite(explicit) && explicit > 0) return Math.min(50, Math.round(explicit));
+  const stop = Number(config.settleStopLossCents);
+  if (Number.isFinite(stop) && stop > 0) return Math.min(50, Math.round(stop));
+  return 8;
+}
+
+/** Settle-mode entry band (default 85–92¢). Clamped to 1–99; swaps if inverted. */
 function settleEntryBand(config = {}) {
   let min = Number(config.settleEntryMinCents);
   let max = Number(config.settleEntryMaxCents);
   if (!Number.isFinite(min)) min = 85;
-  if (!Number.isFinite(max)) max = 95;
+  // Default 92: with an 8¢ stop you need ≥8¢ upside to 100 (ask ≤92).
+  if (!Number.isFinite(max)) max = 92;
   min = Math.max(1, Math.min(99, Math.round(min)));
   max = Math.max(1, Math.min(99, Math.round(max)));
   if (max < min) {
@@ -256,6 +271,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'settleLateEntryMinutes',
   'settleLateEntryMinCents',
   'settleRichAskFloorCents',
+  'settleMinUpsideCents',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -1018,8 +1034,10 @@ class TradingBot {
       // Settle strategy: buy ask in [min,max]¢; tiered target/stale exit by entry
       // (see settleExitPlan), else hold to official settlement.
       settleEntryMinCents: 85,
-      settleEntryMaxCents: 95, // allow mid-high asks; 91–95 used to look "stuck" at 90 max
+      settleEntryMaxCents: 92, // matches ≥8¢ upside vs default 8¢ stop
       settleStopLossCents: 8, // tighter than edge — max win to 100 is only ~5–15¢
+      // Reject asks with less upside to 100 than this (default = stop). 0 = off.
+      settleMinUpsideCents: 8,
       settleMinMinutesToOpen: 0.5, // still need a little time; 0 = allow until last seconds
       settleMaxMinutesToOpen: 12, // late-ish windows (was 8 — early 85¢ quotes looked stuck)
       // Settle same-side sit-out after stop (longer than Edge — prevents SOL-style loops).
@@ -3591,18 +3609,36 @@ class TradingBot {
       return out;
     };
 
-    let candidates = collect(primary.min, primary.max);
+    const minUpside = settleMinUpsideCents(this.config);
+    const richFloor = settleRichAskFloorCents(this.config);
+    const profitableEnough = (c) => {
+      const upside = 100 - c.priceCents;
+      if (minUpside > 0 && upside < minUpside) return false;
+      // Hard skip nearly-certain tickets — leave them; hunt other coins.
+      if (c.priceCents >= richFloor) return false;
+      return true;
+    };
+
+    let candidates = collect(primary.min, primary.max).filter(profitableEnough);
     let usedLateBand = false;
     if (candidates.length === 0) {
       const late = settleEffectiveEntryBand(this.config, minutesRemaining);
       if (late.late) {
-        candidates = collect(late.min, late.max);
+        candidates = collect(late.min, late.max).filter(profitableEnough);
         usedLateBand = candidates.length > 0;
       }
     }
     if (candidates.length === 0) {
       const lateMins = settleLateEntryMinutes(this.config);
       const lateFloor = settleLateEntryMinCents(this.config);
+      const inBandRaw = collect(primary.min, primary.max);
+      const richOnly =
+        inBandRaw.length > 0 && inBandRaw.every((c) => c.priceCents >= richFloor || (100 - c.priceCents) < minUpside);
+      if (richOnly) {
+        this.lastDecision =
+          `Waiting: ${symbol} settle — ask too rich (need ≤${richFloor - 1}¢ and ≥${minUpside}¢ upside to 100; trying other cryptos).`;
+        return null;
+      }
       const lateHint =
         lateMins > 0 && minutesRemaining > lateMins
           ? ` (late fallback ${lateFloor}–${primary.max}¢ only with ≤ ${lateMins} min left)`
@@ -3614,7 +3650,7 @@ class TradingBot {
       return null;
     }
 
-    // Prefer engine-agreed side; then highest ask (closest to primary / safest settle).
+    // Prefer engine-agreed side; then highest ask still under the rich floor.
     const favorsYes = window.probabilityUp >= window.probabilityDown;
     candidates.sort((a, b) => {
       const aAgree = (a.side === 'yes') === favorsYes ? 0 : 1;
@@ -3902,6 +3938,7 @@ module.exports = {
   settleExitPlan,
   settleRichAskFloorCents,
   settleRankAskScore,
+  settleMinUpsideCents,
   stopRecoveryCentsRequired,
   stopRecoveryMaxAgeMs,
   peerCascadeMaxAgeMs,
