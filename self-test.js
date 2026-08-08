@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, settleExitPlan, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -981,7 +981,7 @@ async function testBotExits() {
     checkEq(trade.exitPriceCents, 65, 'paper TP fills at entry+rise (50+15)');
   }
 
-  // Settle strategy: ignore TP / near-certain — hold until settle (or stop)
+  // Settle: under tier target with plenty of time — hold (ignore edge TP knobs)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -1000,8 +1000,99 @@ async function testBotExits() {
       windowCloseTime: now + 10 * 60 * 1000,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
-    checkEq(trade.status, 'open', 'settle trade stays open through TP/near-certain bids');
-    checkEq(trade.exitReason, undefined, 'settle trade has no early exit reason');
+    checkEq(trade.status, 'open', 'settle holds under tier target early in window');
+    checkEq(trade.exitReason, undefined, 'settle early hold has no exit reason');
+  }
+
+  // Settle: entry 91¢ → target 96¢ hit → take profit
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 96,
+        no_bid: 4,
+      }),
+      { settleStopLossCents: 8 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 91,
+      windowCloseTime: now + 10 * 60 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.exitReason, 'take_profit', 'settle take_profit when tier target hit');
+    checkEq(trade.status, 'closed', 'settle TP closes trade');
+    check(trade.exitPriceCents >= 96, 'settle TP fill at/above target');
+  }
+
+  // Settle: entry 91¢, green but under 96 with ≤2m left → settle_stale bank
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 90 * 1000).toISOString(),
+        yes_bid: 93,
+        no_bid: 7,
+      }),
+      { settleStopLossCents: 8 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 91,
+      windowCloseTime: now + 90 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.exitReason, 'settle_stale', 'settle stale banks green before close');
+    checkEq(trade.exitPriceCents, 93, 'settle stale sells at live bid');
+  }
+
+  // Settle: underwater past stale deadline — do not force sell (stop/settle only)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 90 * 1000).toISOString(),
+        yes_bid: 88,
+        no_bid: 12,
+      }),
+      { settleStopLossCents: 8 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 91,
+      windowCloseTime: now + 90 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.status, 'open', 'settle does not force stale sell while red');
+  }
+
+  // Settle hold tier (≥93): no TP chase even at 96¢
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 96,
+        no_bid: 4,
+      }),
+      { settleStopLossCents: 8 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 94,
+      windowCloseTime: now + 10 * 60 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.status, 'open', 'settle ≥93¢ holds toward settlement');
   }
 
   // Breakeven in final 5 without confidence hold
@@ -3880,6 +3971,38 @@ async function testBotTradingFlow() {
       'settle default same-side cooldown is 5m'
     );
     check(liquidityPriority('BTC') > liquidityPriority('XRP'), 'BTC ranked more liquid than XRP');
+    checkEq(settleExitPlan(91).targetCents, 96, 'entry 91¢ aims for 96¢');
+    checkEq(settleExitPlan(91).staleMinutesLeft, 2, 'entry 91¢ stale @ 2m left');
+    checkEq(settleExitPlan(87).targetCents, 94, 'entry 87¢ aims for 94¢');
+    checkEq(settleExitPlan(82).targetCents, 93, 'entry 82¢ aims for 93¢');
+    checkEq(settleExitPlan(72).targetCents, 91, 'late entry 72¢ aims for 91¢');
+    checkEq(settleExitPlan(94).targetCents, null, 'entry 94¢ holds to settle (no TP chase)');
+    checkEq(settleExitPlan(94).tier, 'hold', 'entry 94¢ is hold tier');
+    check(isSettleTieredExitsEnabled({}), 'tiered exits default on');
+    check(isSettleTieredExitsEnabled({ settleTieredExits: 'on' }), 'tiered exits on');
+    check(!isSettleTieredExitsEnabled({ settleTieredExits: 'off' }), 'tiered exits off');
+  }
+
+  // Settle toggle off: ignore entry-tiered TP even when target bid prints
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 96,
+        no_bid: 4,
+      }),
+      { settleStopLossCents: 8, settleTieredExits: 'off' }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 91,
+      windowCloseTime: now + 10 * 60 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.status, 'open', 'settle tiered off holds through target bid');
   }
 }
 

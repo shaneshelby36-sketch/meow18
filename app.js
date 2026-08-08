@@ -1471,6 +1471,15 @@ async function loadBotConfigIntoForm() {
     if (settleLateFloor) {
       settleLateFloor.value = c.settleLateEntryMinCents != null ? c.settleLateEntryMinCents : 70;
     }
+    const settleTiered = document.getElementById('bot-settle-tiered');
+    if (settleTiered) {
+      const tieredOff =
+        c.settleTieredExits === false ||
+        c.settleTieredExits === 0 ||
+        c.settleTieredExits === 'off' ||
+        c.settleTieredExits === 'false';
+      settleTiered.value = tieredOff ? 'off' : 'on';
+    }
     document.getElementById('bot-stake').value = c.stakeDollars;
     document.getElementById('bot-maxpos').value = c.maxOpenPositions;
     document.getElementById('bot-paper-balance').value = c.paperStartingBalanceDollars;
@@ -1532,6 +1541,7 @@ async function saveBotConfig(opts = {}) {
     ),
     settleLateEntryMinutes: parseFloat(document.getElementById('bot-settle-late-min')?.value || '3.5'),
     settleLateEntryMinCents: parseFloat(document.getElementById('bot-settle-late-floor')?.value || '70'),
+    settleTieredExits: document.getElementById('bot-settle-tiered')?.value || 'on',
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),

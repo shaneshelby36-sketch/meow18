@@ -168,6 +168,45 @@ function isSettleTrade(trade) {
   return trade && String(trade.strategy || '').toLowerCase() === 'settle';
 }
 
+/** Entry-tiered settle TP/stale exits (default on). Off → stop + hold to settlement only. */
+function isSettleTieredExitsEnabled(config = {}) {
+  const v = config.settleTieredExits;
+  if (v === false || v === 0 || v === '0') return false;
+  const s = String(v == null ? 'on' : v).toLowerCase();
+  return !(s === 'off' || s === 'false' || s === 'no');
+}
+
+/**
+ * Entry-tiered settle exits: target bid depends on fill price; if that target
+ * is not reached by `staleMinutesLeft` remaining, bank a green bid instead of
+ * sitting for settlement. Highest entries (≥93) hold for settle (tiny upside).
+ *
+ *   entry ≥93 → hold to settle (target null)
+ *   entry 90–92 → aim 96¢, stale @ 2.0m left
+ *   entry 85–89 → aim 94¢, stale @ 2.5m left
+ *   entry 80–84 → aim 93¢, stale @ 3.0m left
+ *   entry <80  → aim 91¢, stale @ 2.0m left (late band)
+ */
+function settleExitPlan(entryPriceCents) {
+  const entry = Math.round(Number(entryPriceCents));
+  if (!Number.isFinite(entry) || entry < 1) {
+    return { targetCents: null, staleMinutesLeft: null, tier: 'invalid' };
+  }
+  if (entry >= 93) {
+    return { targetCents: null, staleMinutesLeft: null, tier: 'hold', entry };
+  }
+  if (entry >= 90) {
+    return { targetCents: 96, staleMinutesLeft: 2, tier: 'high', entry };
+  }
+  if (entry >= 85) {
+    return { targetCents: 94, staleMinutesLeft: 2.5, tier: 'mid', entry };
+  }
+  if (entry >= 80) {
+    return { targetCents: 93, staleMinutesLeft: 3, tier: 'low', entry };
+  }
+  return { targetCents: 91, staleMinutesLeft: 2, tier: 'late', entry };
+}
+
 // Settings that can be safely edited at runtime (via the API/dashboard)
 // without a restart. Deliberately excludes `mode` — switching paper/live
 // stays an env-var + restart decision, so a UI can never silently flip on
@@ -727,6 +766,14 @@ function applyProfitBuckets({
 const EDITABLE_STRING_FIELDS = {
   symbol: (v) => (v === 'AUTO' || isKalshiTradeEnabled(v) ? v : null),
   strategyMode: (v) => (['edge', 'settle'].includes(String(v || '').toLowerCase()) ? String(v).toLowerCase() : null),
+  settleTieredExits: (v) => {
+    if (v === true || v === 1) return 'on';
+    if (v === false || v === 0) return 'off';
+    const s = String(v || '').toLowerCase();
+    if (s === 'on' || s === 'true' || s === 'yes') return 'on';
+    if (s === 'off' || s === 'false' || s === 'no') return 'off';
+    return null;
+  },
   skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
 };
@@ -944,7 +991,8 @@ class TradingBot {
       // Same-coin same-side sit-out after stop_loss (from closedAt), even when
       // bounce + thesis would allow knife-catch. 0 = off. Default 2 minutes.
       postStopSameSideCooldownMinutes: 2,
-      // Settle strategy: buy ask in [min,max]¢ and hold to official settlement.
+      // Settle strategy: buy ask in [min,max]¢; tiered target/stale exit by entry
+      // (see settleExitPlan), else hold to official settlement.
       settleEntryMinCents: 85,
       settleEntryMaxCents: 95, // allow mid-high asks; 91–95 used to look "stuck" at 90 max
       settleStopLossCents: 8, // tighter than edge — max win to 100 is only ~5–15¢
@@ -955,6 +1003,8 @@ class TradingBot {
       // Late fallback: if nothing in primary band and ≤ this many min left, allow down to late min.
       settleLateEntryMinutes: 3.5,
       settleLateEntryMinCents: 70,
+      // Entry-tiered TP/stale (settleExitPlan). 'off' = stop + hold to settlement only.
+      settleTieredExits: 'on',
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -1697,7 +1747,7 @@ class TradingBot {
       return chosen;
     };
 
-    const profitReasons = new Set(['take_profit', 'pre_close_bank', 'near_certain']);
+    const profitReasons = new Set(['take_profit', 'pre_close_bank', 'near_certain', 'settle_stale']);
     if (profitReasons.has(reason)) {
       const impliedLoss = entry - exit;
       if (impliedLoss > 15 && sellLimit >= entry) {
@@ -2590,9 +2640,44 @@ class TradingBot {
       return;
     }
 
-    // Settle strategy: only stop (above) or hold for official settlement —
-    // no TP / near-certain / signal / pre-close banks (those fight the thesis).
+    // Settle strategy: stop (above); optional entry-tiered TP/stale; else hold
+    // for official settlement — no edge signal-flip / breakeven exits.
     if (isSettleTrade(trade)) {
+      if (!isSettleTieredExitsEnabled(this.config)) return;
+      const plan = settleExitPlan(trade.entryPriceCents);
+      const bidOk =
+        heldSideBidCents != null &&
+        Number.isFinite(heldSideBidCents) &&
+        heldSideBidCents >= 1 &&
+        heldSideBidCents <= 99;
+      if (
+        bidOk &&
+        plan.targetCents != null &&
+        heldSideBidCents >= plan.targetCents &&
+        heldSideBidCents > trade.entryPriceCents
+      ) {
+        const fill =
+          this.config.mode === 'paper'
+            ? Math.min(99, Math.max(plan.targetCents, heldSideBidCents))
+            : heldSideBidCents;
+        await this._closePosition(trade, fill, 'take_profit', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+      if (
+        bidOk &&
+        plan.staleMinutesLeft != null &&
+        minutesRemaining <= plan.staleMinutesLeft &&
+        heldSideBidCents >= trade.entryPriceCents &&
+        (plan.targetCents == null || heldSideBidCents < plan.targetCents)
+      ) {
+        // Target not reached in time — bank green rather than wait on settle lag.
+        await this._closePosition(trade, heldSideBidCents, 'settle_stale', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
       return;
     }
 
@@ -3785,6 +3870,8 @@ module.exports = {
   isSettleEntryPriceCents,
   isSettleStrategyMode,
   isSettleTrade,
+  isSettleTieredExitsEnabled,
+  settleExitPlan,
   stopRecoveryCentsRequired,
   stopRecoveryMaxAgeMs,
   peerCascadeMaxAgeMs,

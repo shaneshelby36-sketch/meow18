@@ -3,7 +3,17 @@
 const { correlation } = require('./indicators');
 const { gatherIndicators, buildWindowPrediction, WINDOWS } = require('./prediction');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
-const { stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopSameSideCooldownMs, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets } = require('./bot');
+const {
+  stopRecoveryCentsRequired,
+  stopRecoveryMaxAgeMs,
+  peerCascadeMaxAgeMs,
+  postStopSameSideCooldownMs,
+  checkPostStopRecovery,
+  checkPostStopPeerCascade,
+  applyProfitBuckets,
+  settleExitPlan,
+  settleEntryBand,
+} = require('./bot');
 
 const LOOKBACK_MIN = 210;
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
@@ -65,7 +75,22 @@ function normalizeSettings(raw = {}) {
       : 100,
     // No historical Kalshi book — assume even-money (50¢) so edge is vs a coin flip.
     assumedEntryCents: Number.isFinite(Number(raw.assumedEntryCents)) ? Number(raw.assumedEntryCents) : 50,
+    strategyMode: String(raw.strategyMode || '').toLowerCase() === 'settle' ? 'settle' : 'edge',
+    settleStopLossCents: Number.isFinite(Number(raw.settleStopLossCents))
+      ? Number(raw.settleStopLossCents)
+      : 8,
+    settleMinMinutesToOpen: Number.isFinite(Number(raw.settleMinMinutesToOpen))
+      ? Number(raw.settleMinMinutesToOpen)
+      : 0.5,
+    settleMaxMinutesToOpen: Number.isFinite(Number(raw.settleMaxMinutesToOpen))
+      ? Number(raw.settleMaxMinutesToOpen)
+      : 12,
+    // When false, settle mode only stops or holds to 0/100 (no tier TP / stale).
+    settleTieredExits: raw.settleTieredExits !== false && raw.settleTieredExits !== 0,
   };
+  const settleBand = settleEntryBand(raw);
+  out.settleEntryMinCents = settleBand.min;
+  out.settleEntryMaxCents = settleBand.max;
   if (out.insuranceFloorDollars >= out.insuranceCapDollars) {
     out.insuranceFloorDollars = out.insuranceCapDollars >= 1 ? out.insuranceCapDollars - 1 : 0;
   }
@@ -114,6 +139,19 @@ function estimateMarkCents(side, entrySpot, currentSpot) {
   const pct = (currentSpot - entrySpot) / entrySpot;
   const signed = side === 'yes' ? pct : -pct;
   return clamp(Math.round(50 + (signed / 0.02) * 50), 1, 99);
+}
+
+/**
+ * Settle-style mark: start at the high entry (e.g. 90¢) and drift with spot.
+ * ~0.15% adverse move ≈ −8¢ — rough crypto-15m sensitivity, not a real book.
+ */
+function estimateSettleMarkCents(side, entrySpot, currentSpot, entryCents) {
+  const entry = clamp(Math.round(Number(entryCents) || 50), 1, 99);
+  if (!Number.isFinite(entrySpot) || !Number.isFinite(currentSpot) || entrySpot <= 0) return entry;
+  const pct = (currentSpot - entrySpot) / entrySpot;
+  const signed = side === 'yes' ? pct : -pct;
+  const delta = Math.round((signed / 0.0015) * 8);
+  return clamp(entry + delta, 1, 99);
 }
 
 function buildCandleIndex(candles) {
@@ -277,10 +315,16 @@ function backtestWithSettings(
     ? symbols
     : [focusSymbol && indexes[focusSymbol] ? focusSymbol : symbols.find((s) => s !== 'BTC') || symbols[0]].filter(Boolean);
 
+  const settleMode = settings.strategyMode === 'settle';
   const startingCents = Math.round(settings.paperStartingBalanceDollars * 100);
-  const entryCents = clamp(Math.round(settings.assumedEntryCents), 1, 99);
-  // Minimum cash to open at least one contract at the assumed entry.
-  const minTradeCostCents = Math.max(entryCents, Math.floor((settings.stakeDollars * 100) / entryCents) * entryCents);
+  const defaultEntryCents = settleMode
+    ? clamp(Math.round((settings.settleEntryMinCents + settings.settleEntryMaxCents) / 2), 1, 99)
+    : clamp(Math.round(settings.assumedEntryCents), 1, 99);
+  // Minimum cash to open at least one contract at a typical entry.
+  const minTradeCostCents = Math.max(
+    defaultEntryCents,
+    Math.floor((settings.stakeDollars * 100) / defaultEntryCents) * defaultEntryCents
+  );
 
   let reserveCents = 0;
   let insuranceCents = 0;
@@ -337,32 +381,72 @@ function backtestWithSettings(
 
       let exitPrice = null;
       let reason = null;
-      const mark = estimateMarkCents(trade.side, trade.entrySpot, spot);
+      const minsLeft = Math.max(0, (trade.closeTime - minute) / 60000);
 
-      const stopLevel = Math.max(1, trade.entryPriceCents - settings.stopLossCents);
-      const takeProfitLevel =
-        settings.takeProfitCents > 0
-          ? Math.min(99, trade.entryPriceCents + settings.takeProfitCents)
-          : null;
+      if (settleMode) {
+        const mark = estimateSettleMarkCents(
+          trade.side,
+          trade.entrySpot,
+          spot,
+          trade.entryPriceCents
+        );
+        const stopLevel = Math.max(1, trade.entryPriceCents - settings.settleStopLossCents);
+        const plan = settings.settleTieredExits
+          ? settleExitPlan(trade.entryPriceCents)
+          : { targetCents: null, staleMinutesLeft: null };
 
-      if (mark <= stopLevel) {
-        exitPrice = stopLevel;
-        reason = 'stop_loss';
-      } else if (
-        takeProfitLevel != null &&
-        mark >= takeProfitLevel &&
-        mark > trade.entryPriceCents
-      ) {
-        // Simplified backtest TP (no live confidence override path here —
-        // continuous search already filters entries by confidence).
-        exitPrice = takeProfitLevel;
-        reason = 'take_profit';
-      } else if (minute >= trade.closeTime || minute >= trade.settleMinute) {
-        const settleCandle = spotAt(tradeIndex, trade.settleMinute) || candle;
-        const settledUp = settleCandle.close >= trade.entrySpot;
-        const won = trade.side === 'yes' ? settledUp : !settledUp;
-        exitPrice = won ? 100 : 0;
-        reason = 'settled';
+        if (mark <= stopLevel) {
+          exitPrice = stopLevel;
+          reason = 'stop_loss';
+        } else if (
+          plan.targetCents != null &&
+          mark >= plan.targetCents &&
+          mark > trade.entryPriceCents
+        ) {
+          exitPrice = Math.min(99, Math.max(plan.targetCents, mark));
+          reason = 'take_profit';
+        } else if (
+          plan.staleMinutesLeft != null &&
+          minsLeft <= plan.staleMinutesLeft &&
+          mark >= trade.entryPriceCents &&
+          (plan.targetCents == null || mark < plan.targetCents)
+        ) {
+          exitPrice = mark;
+          reason = 'settle_stale';
+        } else if (minute >= trade.closeTime || minute >= trade.settleMinute) {
+          const settleCandle = spotAt(tradeIndex, trade.settleMinute) || candle;
+          const settledUp = settleCandle.close >= trade.entrySpot;
+          const won = trade.side === 'yes' ? settledUp : !settledUp;
+          exitPrice = won ? 100 : 0;
+          reason = 'settled';
+        }
+      } else {
+        const mark = estimateMarkCents(trade.side, trade.entrySpot, spot);
+        const stopLevel = Math.max(1, trade.entryPriceCents - settings.stopLossCents);
+        const takeProfitLevel =
+          settings.takeProfitCents > 0
+            ? Math.min(99, trade.entryPriceCents + settings.takeProfitCents)
+            : null;
+
+        if (mark <= stopLevel) {
+          exitPrice = stopLevel;
+          reason = 'stop_loss';
+        } else if (
+          takeProfitLevel != null &&
+          mark >= takeProfitLevel &&
+          mark > trade.entryPriceCents
+        ) {
+          // Simplified backtest TP (no live confidence override path here —
+          // continuous search already filters entries by confidence).
+          exitPrice = takeProfitLevel;
+          reason = 'take_profit';
+        } else if (minute >= trade.closeTime || minute >= trade.settleMinute) {
+          const settleCandle = spotAt(tradeIndex, trade.settleMinute) || candle;
+          const settledUp = settleCandle.close >= trade.entrySpot;
+          const won = trade.side === 'yes' ? settledUp : !settledUp;
+          exitPrice = won ? 100 : 0;
+          reason = 'settled';
+        }
       }
 
       if (exitPrice == null) continue;
@@ -431,7 +515,11 @@ function backtestWithSettings(
       if (minutesIntoBucket > 1.01) continue;
     }
     // Need enough time left for the trade to mean anything.
-    if (minutesRemaining < 2.5) continue;
+    const minMinsOpen = settleMode
+      ? Math.max(0.5, settings.settleMinMinutesToOpen)
+      : 2.5;
+    if (minutesRemaining < minMinsOpen) continue;
+    if (settleMode && minutesRemaining > settings.settleMaxMinutesToOpen) continue;
     if (timeline[timeline.length - 1] - minute < 3 * MINUTE_MS) continue;
 
     const alreadyInBucket = openTrades.some((t) => t.bucketStart === bucketStart)
@@ -526,18 +614,39 @@ function backtestWithSettings(
         continue;
       }
 
-      const edge = prediction.probabilityUp - entryCents;
-      if (Math.abs(edge) < settings.edgeThresholdPct) {
-        skipCounts.lowEdge += 1;
-        continue;
+      let side;
+      let edge;
+      let entryPriceCents;
+      if (settleMode) {
+        // Proxy for Kalshi ask in band: engine favored-side % must land in settle band.
+        const favUp = prediction.probabilityUp >= prediction.probabilityDown;
+        const favoredProb = favUp ? prediction.probabilityUp : prediction.probabilityDown;
+        if (
+          favoredProb < settings.settleEntryMinCents ||
+          favoredProb > settings.settleEntryMaxCents
+        ) {
+          skipCounts.lowEdge += 1;
+          continue;
+        }
+        side = favUp ? 'yes' : 'no';
+        entryPriceCents = clamp(Math.round(favoredProb), settings.settleEntryMinCents, settings.settleEntryMaxCents);
+        edge = 100 - entryPriceCents;
+      } else {
+        const edgeVsBook = prediction.probabilityUp - defaultEntryCents;
+        if (Math.abs(edgeVsBook) < settings.edgeThresholdPct) {
+          skipCounts.lowEdge += 1;
+          continue;
+        }
+        side = edgeVsBook > 0 ? 'yes' : 'no';
+        edge = Math.abs(edgeVsBook);
+        entryPriceCents = defaultEntryCents;
       }
-
-      const side = edge > 0 ? 'yes' : 'no';
 
       candidates.push({
         symbol,
         side,
-        edge: Math.abs(edge),
+        edge,
+        entryPriceCents,
         confidence: prediction.confidence,
         probabilityUp: prediction.probabilityUp,
         probabilityDown: prediction.probabilityDown,
@@ -572,7 +681,7 @@ function backtestWithSettings(
         continue;
       }
 
-      let recoveryPrice = entryCents;
+      let recoveryPrice = c.entryPriceCents || defaultEntryCents;
       let recoveryWindow = predictionBySymbol[c.symbol]
         ? predictionBySymbol[c.symbol].windows.w5
         : null;
@@ -580,7 +689,14 @@ function backtestWithSettings(
         const stopIndex = indexes[lastStopAny.symbol];
         const stopCandle = stopIndex ? spotAt(stopIndex, minute) : null;
         if (stopCandle && Number.isFinite(lastStopAny.entrySpot)) {
-          recoveryPrice = estimateMarkCents(lastStopAny.side, lastStopAny.entrySpot, stopCandle.close);
+          recoveryPrice = settleMode
+            ? estimateSettleMarkCents(
+                lastStopAny.side,
+                lastStopAny.entrySpot,
+                stopCandle.close,
+                lastStopAny.entryPriceCents
+              )
+            : estimateMarkCents(lastStopAny.side, lastStopAny.entrySpot, stopCandle.close);
         }
         const stoppedSnap = predictionBySymbol[lastStopAny.symbol];
         if (stoppedSnap && stoppedSnap.windows && stoppedSnap.windows.w5) {
@@ -625,6 +741,11 @@ function backtestWithSettings(
 
     const lastClosed = closedTrades.length ? closedTrades[closedTrades.length - 1] : null;
     const stakeDollars = computeNextStake(settings, lastClosed);
+    const entryCents = clamp(
+      Math.round(best.entryPriceCents || defaultEntryCents),
+      1,
+      99
+    );
     const contracts = Math.max(1, Math.floor((stakeDollars * 100) / entryCents));
     const entryCostCents = entryCents * contracts;
 
@@ -654,6 +775,7 @@ function backtestWithSettings(
       window: best.window,
       rankScore: best.rankScore,
       openedAt: minute,
+      strategy: settleMode ? 'settle' : 'edge',
     });
     tradesBySymbol[best.symbol] = (tradesBySymbol[best.symbol] || 0) + 1;
   }
@@ -699,6 +821,8 @@ function backtestWithSettings(
   const netPnl = totalEquity - startingCents;
   const stopLossExits = closedTrades.filter((t) => t.exitReason === 'stop_loss').length;
   const takeProfitExits = closedTrades.filter((t) => t.exitReason === 'take_profit').length;
+  const settleStaleExits = closedTrades.filter((t) => t.exitReason === 'settle_stale').length;
+  const settledExits = closedTrades.filter((t) => t.exitReason === 'settled' || t.exitReason === 'end_of_data').length;
   const breakevenExits = closedTrades.filter((t) => t.exitReason === 'breakeven').length;
   const avgConfidenceTaken = closedTrades.length
     ? +(closedTrades.reduce((s, t) => s + t.engineConfidence, 0) / closedTrades.length).toFixed(1)
@@ -749,6 +873,8 @@ function backtestWithSettings(
     winRatePct: closedTrades.length ? +((wins / closedTrades.length) * 100).toFixed(1) : null,
     stopLossExits,
     takeProfitExits,
+    settleStaleExits,
+    settledExits,
     breakevenExits,
     avgConfidenceTaken,
     avgConfidenceScanned,
@@ -787,7 +913,9 @@ function backtestWithSettings(
         ? 'AUTO mode: continuously scanned all listed cryptos and traded only the best opportunity that cleared your confidence + edge settings (same ranking idea as live AUTO). '
         : 'Continuously searched for setups during each 15-minute window (not only at the open). ') +
       'Simulated continuous running time (full 24h days of minute data), not just market open hours. Longevity = how long Available Cash could still fund another stake before going dry. ' +
-      'Kalshi quotes are assumed even-money (50¢ entry) because historical Kalshi order books are not available — real fill prices and edges will differ. Order-book signals are also excluded.',
+      (settleMode
+        ? 'SETTLE mode: entry ≈ engine favored % inside the settle band; marks drift from that entry with spot (no historical Kalshi books). Tiered TP/stale exits match live settleExitPlan when enabled. '
+        : 'Kalshi quotes are assumed even-money (50¢ entry) because historical Kalshi order books are not available — real fill prices and edges will differ. Order-book signals are also excluded.'),
   };
 }
 
@@ -898,5 +1026,6 @@ module.exports = {
   backtestWithSettings,
   huntBestSettings,
   normalizeSettings,
+  estimateSettleMarkCents,
   LOOKBACK_MIN,
 };
