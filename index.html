@@ -318,7 +318,7 @@
         </div>
 
         <div id="bot-settings-settle" class="bot-field-grid" hidden>
-          <p class="settings-hint">Buys YES or NO when the ask is in the band (default 85–95¢), with enough time left in the window, and holds to official settlement (stop only — no TP / pre-close bank). Soft filter: engine must not lean against the side. If Decision says “min left”, the ask is fine but the clock is still too early.</p>
+          <p class="settings-hint">Buys YES or NO when the ask is in the band (default 85–95¢), with enough time left in the window, and holds to official settlement (stop only — no TP / pre-close bank). Soft filter: engine must not lean against the side. If nothing in-band and ≤3:30 left, may take the closest ask down to the late floor (default 70¢) — prefers higher prices, not the cheapest.</p>
           <label>Settle entry min (¢)
             <div class="slider-row">
               <input id="bot-settle-min" type="range" min="70" max="95" step="1" />
@@ -346,6 +346,27 @@
               <span class="slider-value" id="bot-settle-maxmin-value">—</span>
             </div>
             <span class="field-hint">Won’t open too early in the window (default 12). If the Decision line mentions “min left”, raise this slider.</span>
+          </label>
+          <label>Settle same-side sit-out after stop (min)
+            <div class="slider-row">
+              <input id="bot-settle-cooldown" type="range" min="0" max="15" step="0.5" />
+              <span class="slider-value" id="bot-settle-cooldown-value">—</span>
+            </div>
+            <span class="field-hint">After a settle stop, block that coin+side for this many minutes (default 5). Stops knife-catch loops like SOL reopen-every-few-seconds. 0 = off (not recommended).</span>
+          </label>
+          <label>Late fallback: only with ≤ this many min left
+            <div class="slider-row">
+              <input id="bot-settle-late-min" type="range" min="0" max="8" step="0.5" />
+              <span class="slider-value" id="bot-settle-late-min-value">—</span>
+            </div>
+            <span class="field-hint">If nothing in the primary band, allow a lower ask only this late (default 3.5). 0 = never expand.</span>
+          </label>
+          <label>Late fallback floor (¢)
+            <div class="slider-row">
+              <input id="bot-settle-late-floor" type="range" min="60" max="85" step="1" />
+              <span class="slider-value" id="bot-settle-late-floor-value">—</span>
+            </div>
+            <span class="field-hint">Lowest ask allowed in the late window (default 70). Still prefers the highest available ask (e.g. 82 over 70).</span>
           </label>
         </div>
 

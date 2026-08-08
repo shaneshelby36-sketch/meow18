@@ -96,10 +96,53 @@ function settleEntryBand(config = {}) {
   return { min, max };
 }
 
-function isSettleEntryPriceCents(priceCents, config = {}) {
-  const { min, max } = settleEntryBand(config);
+/** Minutes left at/under which settle may dip below the primary min (0 = off). Default 3.5. */
+function settleLateEntryMinutes(config = {}) {
+  const m = Number(config.settleLateEntryMinutes);
+  if (Number.isFinite(m) && m <= 0) return 0;
+  if (Number.isFinite(m) && m > 0) return m;
+  return 3.5;
+}
+
+/** Floor ask when late fallback is active (default 70¢). Never above primary min. */
+function settleLateEntryMinCents(config = {}) {
+  const band = settleEntryBand(config);
+  let n = Number(config.settleLateEntryMinCents);
+  if (!Number.isFinite(n)) n = 70;
+  n = Math.max(1, Math.min(99, Math.round(n)));
+  return Math.min(n, band.min);
+}
+
+/**
+ * Effective settle band for this moment. Late fallback expands the floor only when
+ * minutesRemaining ≤ settleLateEntryMinutes and no primary-band print is required
+ * by the caller — here we just report the expanded range when the clock qualifies.
+ */
+function settleEffectiveEntryBand(config = {}, minutesRemaining = Infinity) {
+  const band = settleEntryBand(config);
+  const lateMins = settleLateEntryMinutes(config);
+  const lateFloor = settleLateEntryMinCents(config);
+  const mins = Number(minutesRemaining);
+  const late =
+    lateMins > 0 &&
+    Number.isFinite(mins) &&
+    mins <= lateMins &&
+    lateFloor < band.min;
+  return {
+    min: late ? lateFloor : band.min,
+    max: band.max,
+    primaryMin: band.min,
+    late,
+  };
+}
+
+function isSettleEntryPriceCents(priceCents, config = {}, minutesRemaining = null) {
+  const band =
+    minutesRemaining == null
+      ? settleEntryBand(config)
+      : settleEffectiveEntryBand(config, minutesRemaining);
   const p = Number(priceCents);
-  return Number.isFinite(p) && p >= min && p <= max;
+  return Number.isFinite(p) && p >= band.min && p <= band.max;
 }
 
 function isSettleStrategyMode(config = {}) {
@@ -127,11 +170,14 @@ const EDITABLE_NUMERIC_FIELDS = [
   'peerCascadeMaxMinutes',
   'postStopMaxOneMinutes',
   'postStopSameSideCooldownMinutes',
+  'settlePostStopSameSideCooldownMinutes',
   'settleEntryMinCents',
   'settleEntryMaxCents',
   'settleStopLossCents',
   'settleMinMinutesToOpen',
   'settleMaxMinutesToOpen',
+  'settleLateEntryMinutes',
+  'settleLateEntryMinCents',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -376,6 +422,8 @@ const POST_STOP_MAX_ONE_DEFAULT_MINUTES = 1.5;
 
 /** Default minutes for same-coin same-side sit-out after a stop (knife-catch delay). */
 const POST_STOP_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES = 2;
+/** Settle default is longer — late-bank knife-catch strings are especially toxic. */
+const SETTLE_POST_STOP_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES = 5;
 
 /**
  * How long after a stop the bot caps concurrent opens at 1 (even if
@@ -391,9 +439,17 @@ function postStopMaxOneAgeMs(config = {}) {
 
 /**
  * Same-coin same-side sit-out after stop_loss (from closedAt). Blocks knife-catch
- * re-entry even when bounce + thesis would allow. `0` disables; unset → 2 minutes.
+ * re-entry even when bounce + thesis would allow. `0` disables.
+ * Settle mode: settlePostStopSameSideCooldownMinutes (default 5m) so a dump
+ * cannot reopen the same side every few seconds. Edge: postStopSameSideCooldownMinutes (default 2m).
  */
 function postStopSameSideCooldownMs(config = {}) {
+  if (isSettleStrategyMode(config)) {
+    const settleMins = Number(config.settlePostStopSameSideCooldownMinutes);
+    if (Number.isFinite(settleMins) && settleMins <= 0) return 0;
+    if (Number.isFinite(settleMins) && settleMins > 0) return Math.round(settleMins * 60 * 1000);
+    return Math.round(SETTLE_POST_STOP_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES * 60 * 1000);
+  }
   const mins = Number(config.postStopSameSideCooldownMinutes);
   if (Number.isFinite(mins) && mins <= 0) return 0;
   if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 60 * 1000);
@@ -879,6 +935,11 @@ class TradingBot {
       settleStopLossCents: 8, // tighter than edge — max win to 100 is only ~5–15¢
       settleMinMinutesToOpen: 0.5, // still need a little time; 0 = allow until last seconds
       settleMaxMinutesToOpen: 12, // late-ish windows (was 8 — early 85¢ quotes looked stuck)
+      // Settle same-side sit-out after stop (longer than Edge — prevents SOL-style loops).
+      settlePostStopSameSideCooldownMinutes: 5,
+      // Late fallback: if nothing in primary band and ≤ this many min left, allow down to late min.
+      settleLateEntryMinutes: 3.5,
+      settleLateEntryMinCents: 70,
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -926,6 +987,9 @@ class TradingBot {
     this.calibration = loadCalibration();
     this.lastError = null;
     this.lastDecision = 'Waiting for a prediction cycle.';
+    // Symbol → timestamp until which we demote after a live entry fill miss
+    // (try other cryptos first, then allow retry).
+    this._entryMissUntil = Object.create(null);
     const runState = loadRunState();
     this.isRunning = runState.isRunning !== false;
     this.runningSince = this.isRunning ? (Number(runState.runningSince) || Date.now()) : null;
@@ -1978,10 +2042,10 @@ class TradingBot {
           }
           try {
             const order = await this.client.createOrder({
-              ticker: trade.ticker,
-              side: trade.side,
-              action: 'sell',
-              count: trade.contracts,
+          ticker: trade.ticker,
+          side: trade.side,
+          action: 'sell',
+          count: trade.contracts,
               priceCents: sellPrice,
             });
             const orderId = this._extractOrderId(order);
@@ -2054,7 +2118,7 @@ class TradingBot {
             trade.exitFeesCents = this._orderFeesCents(fill.order);
             soldOk = true;
             break;
-          } catch (err) {
+      } catch (err) {
             lastErr = err;
             console.error(
               `[bot] live exit attempt ${attempt + 1}/${maxAttempts} (${reason}) on ${trade.ticker}: ${err.message}`
@@ -2065,7 +2129,7 @@ class TradingBot {
         if (!soldOk) {
           const msg = (lastErr && lastErr.message) || 'sell failed';
           this.lastError = `Failed live exit (${reason}) on ${trade.ticker}: ${msg}. Position left OPEN.`;
-          console.error('[bot]', this.lastError);
+        console.error('[bot]', this.lastError);
           if (reason === 'stop_loss') {
             trade.pendingForceExit = 'stop_loss';
             this.lastDecision = 'Stop-loss sell failed — will retry next cycle.';
@@ -2154,7 +2218,7 @@ class TradingBot {
         insuranceOverflowCents: trade.insuranceOverflowCents || 0,
         insuranceReleasedCents: trade.insuranceReleasedCents || 0,
       });
-      this._persist();
+    this._persist();
       return true;
     } finally {
       if (trade.status === 'open') trade._closing = false;
@@ -2637,12 +2701,12 @@ class TradingBot {
     // appear in the dashboard as e.g. "BTC @ NO null".
     if (!Number.isFinite(priceCents) || priceCents < 1 || priceCents > 99) {
       this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: no valid Kalshi quote is available.`;
-      return;
+      return false;
     }
     const closeAt = Number(closeTime);
     if (!Number.isFinite(closeAt) || closeAt <= Date.now() + 5000) {
       this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: market close time is missing or already ending.`;
-      return;
+      return false;
     }
     const isSettle = strategy === 'settle';
     const minutesLeft = (closeAt - Date.now()) / 60000;
@@ -2656,34 +2720,36 @@ class TradingBot {
     if (minMinutesToOpen > 0 && minutesLeft < minMinutesToOpen) {
       this.lastDecision =
         `Skipped ${symbol}: only ${minutesLeft.toFixed(1)} min left (min ${minMinutesToOpen} to open).`;
-      return;
+      return false;
     }
     if (isSettle) {
       const maxMinutes = Number(this.config.settleMaxMinutesToOpen);
       if (Number.isFinite(maxMinutes) && maxMinutes > 0 && minutesLeft > maxMinutes) {
         this.lastDecision =
           `Skipped ${symbol}: ${minutesLeft.toFixed(1)} min left (settle mode only opens with ≤ ${maxMinutes} min left).`;
-        return;
+        return false;
       }
-      if (!isSettleEntryPriceCents(priceCents, this.config)) {
-        const band = settleEntryBand(this.config);
+      if (!isSettleEntryPriceCents(priceCents, this.config, minutesLeft)) {
+        const band = settleEffectiveEntryBand(this.config, minutesLeft);
         this.lastDecision =
-          `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: outside settle band ${band.min}–${band.max}¢.`;
-        return;
+          `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: outside settle band ${band.min}–${band.max}¢` +
+          (band.late ? ' (late fallback)' : '') +
+          '.';
+        return false;
       }
     } else {
       const minEntry = Number(this.config.minEntryCents);
       if (Number.isFinite(minEntry) && minEntry > 0 && priceCents < minEntry) {
         this.lastDecision =
           `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: below min entry ${minEntry}¢ (longshot ban).`;
-        return;
+        return false;
       }
     }
     // Max positions is a concurrency cap across coins — stacking two opens
     // on the same symbol (or ticker) just doubles correlated exposure.
     if (this._hasOpenOnSymbol(symbol) || this._hasOpenOnTicker(ticker)) {
       this.lastDecision = `Skipped ${symbol}: already have an open position on this coin/market.`;
-      return;
+      return false;
     }
     // Each Kalshi contract costs `priceCents` cents and pays out $1 if it
     // wins, so buying (stakeDollars * 100 / priceCents) contracts risks
@@ -2694,11 +2760,11 @@ class TradingBot {
     const capital = this._capitalStatus();
     if (this.config.mode === 'paper' && entryCostCents > capital.paperAvailableCents) {
       this.lastDecision = `Insufficient paper funds: $${(capital.paperAvailableCents / 100).toFixed(2)} is spendable after the reserved skim.`;
-      return;
+      return false;
     }
     if (this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents) && entryCostCents > this.liveBalanceCents) {
       this.lastDecision = `Insufficient live balance: $${(this.liveBalanceCents / 100).toFixed(2)} is available on Kalshi.`;
-      return;
+      return false;
     }
     const trade = {
       id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
@@ -2719,83 +2785,37 @@ class TradingBot {
     };
 
     if (this.config.mode === 'live') {
-      const maxAttempts = 3;
+      // One attempt per coin. On miss, demote briefly and try another crypto first.
       let filled = 0;
       let fill = null;
       let orderId = null;
-      let workingPrice = priceCents;
+      const workingPrice = priceCents;
       let lastErr = null;
-      let stoppedForBand = false;
 
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        if (attempt > 0) {
-          await this._sleep(400);
-          const refreshed = await this._refreshLiveEntryAskCents(ticker, side, workingPrice);
-          // Chase the ask: pay up to +1¢ / +2¢ on later tries so a stale quote fills.
-          workingPrice = Math.min(99, Math.max(1, Math.round(refreshed) + attempt));
-          if (isSettle) {
-            const band = settleEntryBand(this.config);
-            // Allow a tiny chase above max (ask often ticks 95 while max is 94).
-            const chaseCeiling = Math.min(97, band.max + 2);
-            if (!Number.isFinite(refreshed) || refreshed < band.min || refreshed > chaseCeiling) {
-              stoppedForBand = true;
-              this.lastDecision =
-                `Live entry retry stopped: ${symbol} ask ${refreshed}¢ left settle band ${band.min}–${band.max}¢` +
-                (chaseCeiling > band.max ? ` (chase ≤${chaseCeiling}¢)` : '') +
-                '.';
-              this._logActivity(this.lastDecision, {
-                kind: 'open',
-                symbol,
-                side,
-                strategy: trade.strategy,
-              });
-              break;
-            }
-            workingPrice = Math.min(chaseCeiling, Math.max(band.min, workingPrice));
-          } else {
-            const minEntry = Number(this.config.minEntryCents);
-            if (Number.isFinite(minEntry) && minEntry > 0 && workingPrice < minEntry) {
-              this.lastDecision =
-                `Live entry retry stopped: ${symbol} @ ${workingPrice}¢ below min entry ${minEntry}¢.`;
-              break;
-            }
-          }
-          this.lastDecision =
-            `Live entry miss — retry ${attempt + 1}/${maxAttempts} ${symbol} ${String(side).toUpperCase()} @ ${workingPrice}¢…`;
-          this._logActivity(this.lastDecision, {
-            kind: 'open',
-            symbol,
-            side,
-            strategy: trade.strategy,
-          });
-          console.warn(`[bot] ${this.lastDecision}`);
-        }
+      const attemptContracts = Math.max(1, Math.floor((stakeDollars * 100) / workingPrice));
+      const attemptCost = attemptContracts * workingPrice;
+      if (Number.isFinite(this.liveBalanceCents) && attemptCost > this.liveBalanceCents) {
+        this.lastDecision =
+          `Insufficient live balance: need $${(attemptCost / 100).toFixed(2)}, have $${(this.liveBalanceCents / 100).toFixed(2)}.`;
+        return false;
+      }
+      trade.contracts = attemptContracts;
+      trade.entryPriceCents = workingPrice;
+      trade.stakeDollars = +(attemptCost / 100).toFixed(2);
 
-        const attemptContracts = Math.max(1, Math.floor((stakeDollars * 100) / workingPrice));
-        const attemptCost = attemptContracts * workingPrice;
-        if (Number.isFinite(this.liveBalanceCents) && attemptCost > this.liveBalanceCents) {
-          this.lastDecision =
-            `Insufficient live balance for retry: need $${(attemptCost / 100).toFixed(2)}, have $${(this.liveBalanceCents / 100).toFixed(2)}.`;
-          break;
-        }
-        trade.contracts = attemptContracts;
-        trade.entryPriceCents = workingPrice;
-        trade.stakeDollars = +(attemptCost / 100).toFixed(2);
-
-        try {
-          const order = await this.client.createOrder({
-            ticker,
-            side,
-            action: 'buy',
-            count: trade.contracts,
-            priceCents: workingPrice,
-          });
-          orderId = this._extractOrderId(order);
-          if (!orderId) {
-            lastErr = new Error('createOrder returned no order_id');
-            console.error(`[bot] Live entry on ${symbol} returned no order_id (attempt ${attempt + 1}/${maxAttempts})`);
-            continue;
-          }
+      try {
+        const order = await this.client.createOrder({
+          ticker,
+          side,
+          action: 'buy',
+          count: trade.contracts,
+          priceCents: workingPrice,
+        });
+        orderId = this._extractOrderId(order);
+        if (!orderId) {
+          lastErr = new Error('createOrder returned no order_id');
+          console.error(`[bot] Live entry on ${symbol} returned no order_id`);
+        } else {
           fill = await this._awaitOrderFill(orderId, {
             minFill: trade.contracts,
             attempts: 6,
@@ -2820,30 +2840,22 @@ class TradingBot {
               );
             }
           }
-          if (filled >= 1) break;
-          lastErr = new Error(`no fill (0/${trade.contracts})`);
-          console.warn(
-            `[bot] Live entry on ${symbol} did not fill attempt ${attempt + 1}/${maxAttempts} @ ${workingPrice}¢`
-          );
-        } catch (err) {
-          lastErr = err;
-          console.error(
-            `[bot] Live entry attempt ${attempt + 1}/${maxAttempts} failed:`,
-            err.message
-          );
+          if (filled < 1) {
+            lastErr = new Error(`no fill (0/${trade.contracts})`);
+            console.warn(`[bot] Live entry on ${symbol} did not fill @ ${workingPrice}¢`);
+          }
         }
+      } catch (err) {
+        lastErr = err;
+        console.error(`[bot] Live entry failed:`, err.message);
       }
 
       if (filled < 1) {
-        if (stoppedForBand) {
-          // Already logged the band reason — don't also spam "did not fill after 3 tries".
-          this.lastError = this.lastDecision;
-          return;
-        }
+        this._noteEntryMiss(symbol);
         this.lastError =
-          `Live entry on ${symbol} did not fill after ${maxAttempts} tries` +
+          `Live entry on ${symbol} did not fill` +
           (lastErr ? ` (${lastErr.message})` : '') +
-          ' — will retry next cycle if still valid.';
+          ' — will try another crypto first, then retry.';
         this.lastDecision = this.lastError;
         this._logActivity(this.lastDecision, {
           kind: 'open',
@@ -2852,7 +2864,7 @@ class TradingBot {
           strategy: trade.strategy,
         });
         console.error('[bot]', this.lastError);
-        return;
+        return false;
       }
       if (fill && fill.recovered) {
         console.warn(
@@ -2871,7 +2883,8 @@ class TradingBot {
       }
       // Settle: never book an entry far outside the band from a bad fill parse.
       if (isSettle && Number.isFinite(trade.entryPriceCents)) {
-        const band = settleEntryBand(this.config);
+        const minsLeftNow = (closeAt - Date.now()) / 60000;
+        const band = settleEffectiveEntryBand(this.config, minsLeftNow);
         const chaseCeiling = Math.min(97, band.max + 2);
         if (trade.entryPriceCents < band.min || trade.entryPriceCents > chaseCeiling) {
           console.warn(
@@ -2883,14 +2896,25 @@ class TradingBot {
       }
       trade.entryFeesCents = this._orderFeesCents(fill && fill.order);
       trade.liveOrderId = orderId;
+      this._clearEntryMiss(symbol);
     }
 
     this.ledger.trades.unshift(trade);
     if (this.ledger.trades.length > 200) this.ledger.trades.length = 200;
     this._noteProtectionGate(false); // open implies gate no longer blocking
-    this.lastDecision = isSettle
-      ? `Opened ${symbol} ${side.toUpperCase()} settle position at ${trade.entryPriceCents}¢ (hold to settlement).`
-      : `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${trade.entryPriceCents}¢ (confidence ${engineConfidence}%).`;
+    if (isSettle) {
+      const minsLeftNow = (closeAt - Date.now()) / 60000;
+      const eff = settleEffectiveEntryBand(this.config, minsLeftNow);
+      const primary = settleEntryBand(this.config);
+      const lateNote =
+        eff.late && trade.entryPriceCents < primary.min ? ' · late fallback' : '';
+      this.lastDecision =
+        `Opened ${symbol} ${side.toUpperCase()} settle position at ${trade.entryPriceCents}¢` +
+        ` (hold to settlement${lateNote}).`;
+    } else {
+      this.lastDecision =
+        `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${trade.entryPriceCents}¢ (confidence ${engineConfidence}%).`;
+    }
     this._logActivity(this.lastDecision, {
       kind: 'open',
       symbol,
@@ -2917,6 +2941,30 @@ class TradingBot {
       status: 'open',
     });
     this._persist();
+    return true;
+  }
+
+  /** After a live fill miss, demote this coin ~60s so AUTO tries others first. */
+  _noteEntryMiss(symbol, cooldownMs = 60_000) {
+    if (!symbol) return;
+    if (!this._entryMissUntil) this._entryMissUntil = Object.create(null);
+    this._entryMissUntil[String(symbol).toUpperCase()] = Date.now() + cooldownMs;
+  }
+
+  _clearEntryMiss(symbol) {
+    if (!this._entryMissUntil || !symbol) return;
+    delete this._entryMissUntil[String(symbol).toUpperCase()];
+  }
+
+  _hasRecentEntryMiss(symbol) {
+    if (!this._entryMissUntil || !symbol) return false;
+    const until = this._entryMissUntil[String(symbol).toUpperCase()];
+    if (!Number.isFinite(until)) return false;
+    if (Date.now() >= until) {
+      delete this._entryMissUntil[String(symbol).toUpperCase()];
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -2954,11 +3002,10 @@ class TradingBot {
     // After a stop, don't stack a second leg while the wound is still fresh —
     // briefly cap at 1 open (postStopMaxOneMinutes, default 1.5m), then
     // normal maxOpenPositions applies again. Other gates still apply.
-    // Settle mode skips this — late-bank wants to rejoin other coins after a stop.
     const preferOtherThan = this._lastStopLossSymbol();
     const settleMode = isSettleStrategyMode(this.config);
     const maxOneActive = isPostStopMaxOneActive(this._lastStopLossTrade(), this.config);
-    if (!settleMode && preferOtherThan && this.openTrades.length >= 1 && maxOneActive) {
+    if (preferOtherThan && this.openTrades.length >= 1 && maxOneActive) {
       const mins = Number(this.config.postStopMaxOneMinutes);
       const minsLabel = Number.isFinite(mins) && mins > 0 ? mins : POST_STOP_MAX_ONE_DEFAULT_MINUTES;
       this.lastDecision =
@@ -2978,16 +3025,38 @@ class TradingBot {
 
     let opportunity;
     if (settleMode) {
-      opportunity =
+      const ranked =
         this.config.symbol === 'AUTO' || scanAllAfterStop
-          ? await this._findBestSettleOpportunity(predictions, { preferOtherThan })
-          : await this._evaluateSymbolForSettle(this.config.symbol, predictions);
-    } else {
-      opportunity =
-        this.config.symbol === 'AUTO' || scanAllAfterStop
-          ? await this._findBestOpportunity(predictions, { preferOtherThan })
-          : await this._evaluateSymbolForEdge(this.config.symbol, predictions);
+          ? await this._rankSettleOpportunities(predictions, { preferOtherThan })
+          : [await this._evaluateSymbolForSettle(this.config.symbol, predictions)].filter(Boolean);
+      // Try best → next coin on fill miss (no same-coin chase spam).
+      for (const opp of ranked) {
+        if (preferOtherThan && opp.symbol !== preferOtherThan && ranked[0] === opp) {
+          this.lastDecision =
+            `Post-stop: chose ${opp.symbol} over recently stopped ${preferOtherThan} ` +
+            `(checking other cryptos first).`;
+        }
+        const opened = await this._openPosition({
+          symbol: opp.symbol,
+          ticker: opp.market.ticker,
+          side: opp.side,
+          priceCents: opp.priceCents,
+          floorStrike: opp.market.floor_strike,
+          closeTime: opp.closeTime,
+          engineProbability: opp.side === 'yes' ? opp.window.probabilityUp : opp.window.probabilityDown,
+          engineConfidence: opp.window.confidence,
+          strategy: 'settle',
+        });
+        if (opened) return;
+        if (this.openTrades.length >= this.config.maxOpenPositions) return;
+      }
+      return;
     }
+
+    opportunity =
+      this.config.symbol === 'AUTO' || scanAllAfterStop
+        ? await this._findBestOpportunity(predictions, { preferOtherThan })
+        : await this._evaluateSymbolForEdge(this.config.symbol, predictions);
 
     if (!opportunity) return;
 
@@ -3006,7 +3075,7 @@ class TradingBot {
       closeTime: opportunity.closeTime,
       engineProbability: opportunity.side === 'yes' ? opportunity.window.probabilityUp : opportunity.window.probabilityDown,
       engineConfidence: opportunity.window.confidence,
-      strategy: settleMode ? 'settle' : 'edge',
+      strategy: 'edge',
     });
   }
 
@@ -3032,11 +3101,8 @@ class TradingBot {
     const lastStop = this._lastStopLossTrade();
     if (!lastStop) return { ok: true };
 
-    // Settle mode: allow rejoin after stops. Edge knife-catch / peer-cascade /
-    // bounce gates fight late-bank (they blocked BNB/SOL while asks were still valid).
-    if (isSettleStrategyMode(this.config)) {
-      return { ok: true };
-    }
+    // Settle needs these too — without same-side sit-out the bot knife-catches
+    // the same 85–95¢ print after every stop (see SOL 12:57–12:59 loss string).
 
     const now = Date.now();
     const maxAgeMs = stopRecoveryMaxAgeMs(this.config);
@@ -3287,10 +3353,10 @@ class TradingBot {
   }
 
   /**
-   * Settle mode: buy a side already priced in the configured band (default
-   * 85–90¢) late in the window and hold for official settlement. Rank prefers
-   * cheaper asks inside the band (more room to 100¢). Soft thesis: engine
-   * window should not strongly disagree with the side.
+   * Settle mode: buy a side in the primary band (default 85–95¢). If nothing
+   * hits and ≤ settleLateEntryMinutes remain (default 3.5), expand the floor
+   * down to settleLateEntryMinCents (default 70) and take the closest ask to
+   * the primary band (highest price). Soft thesis still applies.
    */
   async _evaluateSymbolForSettle(symbol, predictions) {
     if (!isKalshiTradeEnabled(symbol)) {
@@ -3375,28 +3441,49 @@ class TradingBot {
       return null;
     }
 
-    const band = settleEntryBand(this.config);
-    const candidates = [];
-    if (isSettleEntryPriceCents(yesAsk, this.config)) {
-      candidates.push({ side: 'yes', priceCents: yesAsk });
-    }
+    const primary = settleEntryBand(this.config);
     const noAsk = 100 - yesBid;
-    if (isSettleEntryPriceCents(noAsk, this.config)) {
-      candidates.push({ side: 'no', priceCents: noAsk });
+    const collect = (minCents, maxCents) => {
+      const out = [];
+      if (yesAsk >= minCents && yesAsk <= maxCents) {
+        out.push({ side: 'yes', priceCents: yesAsk });
+      }
+      if (noAsk >= minCents && noAsk <= maxCents) {
+        out.push({ side: 'no', priceCents: noAsk });
+      }
+      return out;
+    };
+
+    let candidates = collect(primary.min, primary.max);
+    let usedLateBand = false;
+    if (candidates.length === 0) {
+      const late = settleEffectiveEntryBand(this.config, minutesRemaining);
+      if (late.late) {
+        candidates = collect(late.min, late.max);
+        usedLateBand = candidates.length > 0;
+      }
     }
     if (candidates.length === 0) {
+      const lateMins = settleLateEntryMinutes(this.config);
+      const lateFloor = settleLateEntryMinCents(this.config);
+      const lateHint =
+        lateMins > 0 && minutesRemaining > lateMins
+          ? ` (late fallback ${lateFloor}–${primary.max}¢ only with ≤ ${lateMins} min left)`
+          : '';
       this.lastDecision =
-        `Waiting: ${symbol} settle — YES ask ${yesAsk}¢ / NO ask ${noAsk}¢ outside ${band.min}–${band.max}¢.`;
+        `Waiting: ${symbol} settle — YES ask ${yesAsk}¢ / NO ask ${noAsk}¢ outside ${primary.min}–${primary.max}¢` +
+        lateHint +
+        '.';
       return null;
     }
 
-    // Prefer engine-agreed side when both qualify; else cheaper ask (more to 100).
+    // Prefer engine-agreed side; then highest ask (closest to primary / safest settle).
     const favorsYes = window.probabilityUp >= window.probabilityDown;
     candidates.sort((a, b) => {
       const aAgree = (a.side === 'yes') === favorsYes ? 0 : 1;
       const bAgree = (b.side === 'yes') === favorsYes ? 0 : 1;
       if (aAgree !== bAgree) return aAgree - bAgree;
-      return a.priceCents - b.priceCents;
+      return b.priceCents - a.priceCents;
     });
     const pick = candidates[0];
 
@@ -3434,12 +3521,14 @@ class TradingBot {
       priceCents: pick.priceCents,
       closeTime,
       edge: 100 - pick.priceCents,
-      rankScore: 100 - pick.priceCents,
+      // Prefer higher asks in AUTO (closer to settlement certainty).
+      rankScore: pick.priceCents + (usedLateBand ? 0 : 100),
       strategy: 'settle',
+      settleLateEntry: usedLateBand,
     };
   }
 
-  async _findBestSettleOpportunity(predictions, { preferOtherThan = null } = {}) {
+  async _rankSettleOpportunities(predictions, { preferOtherThan = null } = {}) {
     const candidates = tradeableKalshiSymbols().filter(
       (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
     );
@@ -3447,8 +3536,11 @@ class TradingBot {
       candidates.map((sym) => this._evaluateSymbolForSettle(sym, predictions))
     );
     const valid = evaluations.filter(Boolean);
-    if (valid.length === 0) return null;
+    if (valid.length === 0) return [];
     valid.sort((a, b) => {
+      const aMiss = this._hasRecentEntryMiss(a.symbol) ? 1 : 0;
+      const bMiss = this._hasRecentEntryMiss(b.symbol) ? 1 : 0;
+      if (aMiss !== bMiss) return aMiss - bMiss;
       if (preferOtherThan) {
         const aPen = a.symbol === preferOtherThan ? 1 : 0;
         const bPen = b.symbol === preferOtherThan ? 1 : 0;
@@ -3456,7 +3548,12 @@ class TradingBot {
       }
       return b.rankScore - a.rankScore;
     });
-    return valid[0];
+    return valid;
+  }
+
+  async _findBestSettleOpportunity(predictions, { preferOtherThan = null } = {}) {
+    const ranked = await this._rankSettleOpportunities(predictions, { preferOtherThan });
+    return ranked[0] || null;
   }
 
   /**
@@ -3481,6 +3578,9 @@ class TradingBot {
     const valid = evaluations.filter(Boolean);
     if (valid.length === 0) return null;
     valid.sort((a, b) => {
+      const aMiss = this._hasRecentEntryMiss(a.symbol) ? 1 : 0;
+      const bMiss = this._hasRecentEntryMiss(b.symbol) ? 1 : 0;
+      if (aMiss !== bMiss) return aMiss - bMiss;
       if (preferOtherThan) {
         const aPen = a.symbol === preferOtherThan ? 1 : 0;
         const bPen = b.symbol === preferOtherThan ? 1 : 0;
@@ -3627,6 +3727,9 @@ module.exports = {
   isKalshiTradeEnabled,
   tradeableKalshiSymbols,
   settleEntryBand,
+  settleLateEntryMinutes,
+  settleLateEntryMinCents,
+  settleEffectiveEntryBand,
   isSettleEntryPriceCents,
   isSettleStrategyMode,
   isSettleTrade,

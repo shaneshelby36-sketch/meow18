@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -3067,7 +3067,7 @@ async function testBotTradingFlow() {
     checkEq(entryOrders, 1, 'partial live entry placed one buy');
   }
 
-  // Live entry: miss → retry with chase → fill on 3rd try
+  // Live entry: one attempt — miss demotes coin; no same-second chase spam
   {
     let entryOrders = 0;
     const prices = [];
@@ -3079,24 +3079,12 @@ async function testBotTradingFlow() {
         return { order: { order_id: `entry-retry-${entryOrders}`, requested: count } };
       },
       async getOrder(orderId) {
-        const n = Number(String(orderId).split('-').pop());
-        if (n < 3) {
-          return {
-            order: {
-              order_id: orderId,
-              status: 'canceled',
-              fill_count_fp: '0.00',
-              yes_price: 50,
-            },
-          };
-        }
         return {
           order: {
             order_id: orderId,
-            status: 'executed',
-            fill_count_fp: '5.00',
-            average_fill_price: '0.5200',
-            yes_price: 52,
+            status: 'canceled',
+            fill_count_fp: '0.00',
+            yes_price: 50,
           },
         };
       },
@@ -3123,7 +3111,7 @@ async function testBotTradingFlow() {
     retryBot.config.mode = 'live';
     retryBot.config.liveAuthorized = true;
     retryBot.setRunning(true);
-    await retryBot._openPosition({
+    const opened = await retryBot._openPosition({
       symbol: 'ETH',
       ticker: 'KXETH15M-RETRY',
       side: 'yes',
@@ -3133,14 +3121,14 @@ async function testBotTradingFlow() {
       engineProbability: 60,
       engineConfidence: 70,
     });
-    checkEq(retryBot.openTrades.length, 1, 'entry fill after retries records trade');
-    checkEq(entryOrders, 3, 'entry retried until 3rd fill');
-    checkEq(prices[0], 50, 'entry attempt 1 at original ask');
-    checkEq(prices[1], 51, 'entry attempt 2 chases +1¢');
-    checkEq(prices[2], 52, 'entry attempt 3 chases +2¢');
+    checkEq(opened, false, 'unfilled entry returns false');
+    checkEq(retryBot.openTrades.length, 0, 'unfilled entry leaves no trade');
+    checkEq(entryOrders, 1, 'unfilled entry places one buy (no chase retries)');
+    check(retryBot._hasRecentEntryMiss('ETH'), 'fill miss demotes ETH briefly');
+    check(/another crypto first/i.test(retryBot.lastError || ''), 'miss message mentions try another crypto');
   }
 
-  // Live entry: all 3 attempts miss → no trade, will retry next cycle message
+  // Live entry: all attempts miss → no trade (single attempt)
   {
     let entryOrders = 0;
     const missClient = {
@@ -3191,9 +3179,9 @@ async function testBotTradingFlow() {
       engineProbability: 60,
       engineConfidence: 70,
     });
-    checkEq(missBot.openTrades.length, 0, 'unfilled entry after retries leaves no trade');
-    checkEq(entryOrders, 3, 'unfilled entry attempted 3 buys');
-    check(/did not fill after 3 tries/i.test(missBot.lastError || ''), 'unfilled entry error mentions retries');
+    checkEq(missBot.openTrades.length, 0, 'unfilled entry after miss leaves no trade');
+    checkEq(entryOrders, 1, 'unfilled entry attempted 1 buy');
+    check(/did not fill/i.test(missBot.lastError || ''), 'unfilled entry error mentions did not fill');
   }
 
   // Late fill after poll timeout: polls empty → cancel → getOrder then shows fills
@@ -3829,6 +3817,11 @@ async function testBotTradingFlow() {
   check(isSettleEntryPriceCents(93), '93¢ inside widened settle band');
   check(!isSettleEntryPriceCents(84), '84¢ outside settle band');
   check(!isSettleEntryPriceCents(96), '96¢ outside settle band');
+  check(!isSettleEntryPriceCents(72, {}, 10), '72¢ blocked with 10m left (late not open)');
+  check(isSettleEntryPriceCents(72, {}, 3), '72¢ allowed with 3m left (late fallback)');
+  checkEq(settleEffectiveEntryBand({}, 3).min, 70, 'late effective band floor 70');
+  checkEq(settleEffectiveEntryBand({}, 3).late, true, 'late flag on at 3m');
+  checkEq(settleEffectiveEntryBand({}, 5).late, false, 'late flag off at 5m');
   check(isSettleStrategyMode({ strategyMode: 'settle' }), 'settle mode flag');
   check(!isSettleStrategyMode({ strategyMode: 'edge' }), 'edge mode flag');
   check(isSettleTrade({ strategy: 'settle' }), 'settle trade tag');
@@ -3859,18 +3852,33 @@ async function testBotTradingFlow() {
       'settle entry fill far below limit uses limit (not 59¢ ghost)'
     );
     settleBot.config.strategyMode = 'settle';
+    settleBot.config.settlePostStopSameSideCooldownMinutes = 5;
+    const stopAt = Date.now() - 10_000;
     settleBot.ledger.trades = [
       {
         status: 'closed',
         exitReason: 'stop_loss',
         symbol: 'SOL',
         side: 'yes',
-        closedAt: Date.now() - 10_000,
+        closedAt: stopAt,
         exitPriceCents: 37,
+        windowCloseTime: stopAt + 10 * 60 * 1000,
       },
     ];
-    const settleGate = await settleBot._stoppedCoinRecoveryGate('BNB', 'yes', 90, null, {});
-    check(settleGate.ok, 'settle mode skips post-stop bounce/sit-out/cascade gates');
+    const sameSideBlocked = await settleBot._stoppedCoinRecoveryGate('SOL', 'yes', 90, null, {});
+    check(!sameSideBlocked.ok, 'settle mode blocks same-side re-entry during sit-out');
+    check(/same-side sit-out/i.test(sameSideBlocked.reason || ''), 'settle sit-out reason mentions cooldown');
+    const peerOk = await settleBot._stoppedCoinRecoveryGate('BNB', 'yes', 90, null, {});
+    // Peer may still hit bounce/cascade; at minimum same-side must not apply to BNB.
+    check(
+      peerOk.ok || !/same-side sit-out/i.test(peerOk.reason || ''),
+      'settle same-side sit-out does not apply to other coins'
+    );
+    checkEq(
+      postStopSameSideCooldownMs({ strategyMode: 'settle' }),
+      5 * 60 * 1000,
+      'settle default same-side cooldown is 5m'
+    );
   }
 }
 
