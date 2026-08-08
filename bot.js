@@ -1571,6 +1571,33 @@ class TradingBot {
   }
 
   /**
+   * Guard buy fill cents vs the limit we sent. A far-below-limit avg (e.g. 59¢
+   * after buying at 81¢+) is almost always a parse/complement glitch — keep the limit.
+   */
+  _sanityCheckEntryFillCents(fillCents, limitCents) {
+    const fill = Math.round(Number(fillCents));
+    const limit = Math.round(Number(limitCents));
+    if (!Number.isFinite(fill) || !Number.isFinite(limit) || limit < 1 || limit > 99) {
+      return fillCents;
+    }
+    if (fill >= 1 && fill <= 99 && Math.abs(fill - limit) <= 12) return fill;
+    const complement = Math.max(1, Math.min(99, 100 - fill));
+    if (Math.abs(complement - limit) < Math.abs(fill - limit)) {
+      console.warn(
+        `[bot] entry fill ${fill}¢ looks like complement mis-parse (limit ${limit}¢) — using ${complement}¢`
+      );
+      return complement;
+    }
+    if (Math.abs(fill - limit) > 12) {
+      console.warn(
+        `[bot] entry fill ${fill}¢ far from buy limit ${limit}¢ — using limit`
+      );
+      return limit;
+    }
+    return fill;
+  }
+
+  /**
    * Guard against average_fill_price complement mis-parse on exits.
    * Stop: exit >> entry while sellLimit <= entry → closer-to-limit interpretation.
    * TP / bank / near-certain: exit << entry while sellLimit >= entry → reject bad parse.
@@ -2698,6 +2725,7 @@ class TradingBot {
       let orderId = null;
       let workingPrice = priceCents;
       let lastErr = null;
+      let stoppedForBand = false;
 
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         if (attempt > 0) {
@@ -2707,9 +2735,14 @@ class TradingBot {
           workingPrice = Math.min(99, Math.max(1, Math.round(refreshed) + attempt));
           if (isSettle) {
             const band = settleEntryBand(this.config);
-            if (!Number.isFinite(refreshed) || refreshed < band.min || refreshed > band.max) {
+            // Allow a tiny chase above max (ask often ticks 95 while max is 94).
+            const chaseCeiling = Math.min(97, band.max + 2);
+            if (!Number.isFinite(refreshed) || refreshed < band.min || refreshed > chaseCeiling) {
+              stoppedForBand = true;
               this.lastDecision =
-                `Live entry retry stopped: ${symbol} ask ${refreshed}¢ left settle band ${band.min}–${band.max}¢.`;
+                `Live entry retry stopped: ${symbol} ask ${refreshed}¢ left settle band ${band.min}–${band.max}¢` +
+                (chaseCeiling > band.max ? ` (chase ≤${chaseCeiling}¢)` : '') +
+                '.';
               this._logActivity(this.lastDecision, {
                 kind: 'open',
                 symbol,
@@ -2718,7 +2751,7 @@ class TradingBot {
               });
               break;
             }
-            workingPrice = Math.min(band.max, Math.max(band.min, workingPrice));
+            workingPrice = Math.min(chaseCeiling, Math.max(band.min, workingPrice));
           } else {
             const minEntry = Number(this.config.minEntryCents);
             if (Number.isFinite(minEntry) && minEntry > 0 && workingPrice < minEntry) {
@@ -2802,6 +2835,11 @@ class TradingBot {
       }
 
       if (filled < 1) {
+        if (stoppedForBand) {
+          // Already logged the band reason — don't also spam "did not fill after 3 tries".
+          this.lastError = this.lastDecision;
+          return;
+        }
         this.lastError =
           `Live entry on ${symbol} did not fill after ${maxAttempts} tries` +
           (lastErr ? ` (${lastErr.message})` : '') +
@@ -2825,10 +2863,23 @@ class TradingBot {
         trade.contracts = filled;
         trade.stakeDollars = +((trade.contracts * workingPrice) / 100).toFixed(2);
       }
-      const avg = this._orderAvgFillPriceCents(fill && fill.order, side, 'buy', workingPrice);
+      let avg = this._orderAvgFillPriceCents(fill && fill.order, side, 'buy', workingPrice);
       if (Number.isFinite(avg)) {
+        avg = this._sanityCheckEntryFillCents(avg, workingPrice);
         trade.entryPriceCents = avg;
         trade.stakeDollars = +((trade.contracts * avg) / 100).toFixed(2);
+      }
+      // Settle: never book an entry far outside the band from a bad fill parse.
+      if (isSettle && Number.isFinite(trade.entryPriceCents)) {
+        const band = settleEntryBand(this.config);
+        const chaseCeiling = Math.min(97, band.max + 2);
+        if (trade.entryPriceCents < band.min || trade.entryPriceCents > chaseCeiling) {
+          console.warn(
+            `[bot] settle entry fill ${trade.entryPriceCents}¢ outside band — booking limit ${workingPrice}¢`
+          );
+          trade.entryPriceCents = workingPrice;
+          trade.stakeDollars = +((trade.contracts * workingPrice) / 100).toFixed(2);
+        }
       }
       trade.entryFeesCents = this._orderFeesCents(fill && fill.order);
       trade.liveOrderId = orderId;
@@ -2903,9 +2954,11 @@ class TradingBot {
     // After a stop, don't stack a second leg while the wound is still fresh —
     // briefly cap at 1 open (postStopMaxOneMinutes, default 1.5m), then
     // normal maxOpenPositions applies again. Other gates still apply.
+    // Settle mode skips this — late-bank wants to rejoin other coins after a stop.
     const preferOtherThan = this._lastStopLossSymbol();
+    const settleMode = isSettleStrategyMode(this.config);
     const maxOneActive = isPostStopMaxOneActive(this._lastStopLossTrade(), this.config);
-    if (preferOtherThan && this.openTrades.length >= 1 && maxOneActive) {
+    if (!settleMode && preferOtherThan && this.openTrades.length >= 1 && maxOneActive) {
       const mins = Number(this.config.postStopMaxOneMinutes);
       const minsLabel = Number.isFinite(mins) && mins > 0 ? mins : POST_STOP_MAX_ONE_DEFAULT_MINUTES;
       this.lastDecision =
@@ -2923,7 +2976,6 @@ class TradingBot {
       preferOtherThan != null &&
       (this.config.symbol === 'AUTO' || preferOtherThan === this.config.symbol);
 
-    const settleMode = isSettleStrategyMode(this.config);
     let opportunity;
     if (settleMode) {
       opportunity =
@@ -2979,6 +3031,12 @@ class TradingBot {
   async _stoppedCoinRecoveryGate(candidateSymbol, candidateSide, candidatePriceCents, candidateWindow, predictions) {
     const lastStop = this._lastStopLossTrade();
     if (!lastStop) return { ok: true };
+
+    // Settle mode: allow rejoin after stops. Edge knife-catch / peer-cascade /
+    // bounce gates fight late-bank (they blocked BNB/SOL while asks were still valid).
+    if (isSettleStrategyMode(this.config)) {
+      return { ok: true };
+    }
 
     const now = Date.now();
     const maxAgeMs = stopRecoveryMaxAgeMs(this.config);

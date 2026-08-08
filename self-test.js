@@ -3838,6 +3838,7 @@ async function testBotTradingFlow() {
       config: {
         mode: 'paper',
         liveAuthorized: false,
+        strategyMode: 'settle',
         stopLossCents: 23,
         settleStopLossCents: 8,
       },
@@ -3852,6 +3853,24 @@ async function testBotTradingFlow() {
       32,
       'edge stop still uses stopLossCents'
     );
+    checkEq(
+      settleBot._sanityCheckEntryFillCents(59, 81),
+      81,
+      'settle entry fill far below limit uses limit (not 59¢ ghost)'
+    );
+    settleBot.config.strategyMode = 'settle';
+    settleBot.ledger.trades = [
+      {
+        status: 'closed',
+        exitReason: 'stop_loss',
+        symbol: 'SOL',
+        side: 'yes',
+        closedAt: Date.now() - 10_000,
+        exitPriceCents: 37,
+      },
+    ];
+    const settleGate = await settleBot._stoppedCoinRecoveryGate('BNB', 'yes', 90, null, {});
+    check(settleGate.ok, 'settle mode skips post-stop bounce/sit-out/cascade gates');
   }
 }
 
