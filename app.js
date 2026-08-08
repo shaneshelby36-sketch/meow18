@@ -20,6 +20,8 @@ const ASSET_LABELS = {
   ETH: 'Ethereum',
   SOL: 'Solana',
   BNB: 'BNB',
+  NEAR: 'NEAR',
+  HYPE: 'HYPE',
   DOGE: 'Dogecoin',
   ZEC: 'Zcash',
 };

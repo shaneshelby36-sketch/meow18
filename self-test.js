@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, settleExitPlan, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, settleExitPlan, settleRankAskScore, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -3900,6 +3900,11 @@ async function testBotTradingFlow() {
   check(isKalshiTradeEnabled('BTC'), 'BTC still tradeable');
   check(!tradeableKalshiSymbols().includes('DOGE'), 'AUTO tradeable set excludes DOGE');
   check(tradeableKalshiSymbols().includes('ETH'), 'AUTO tradeable set includes ETH');
+  check(tradeableKalshiSymbols().includes('NEAR'), 'AUTO tradeable set includes NEAR');
+  check(tradeableKalshiSymbols().includes('HYPE'), 'AUTO tradeable set includes HYPE');
+  check(tradeableKalshiSymbols().includes('BNB'), 'AUTO tradeable set includes BNB');
+  checkEq(SERIES_BY_SYMBOL.NEAR, 'KXNEAR15M', 'NEAR Kalshi series');
+  checkEq(SERIES_BY_SYMBOL.HYPE, 'KXHYPE15M', 'HYPE Kalshi series');
 
   section('settle strategy helpers');
   checkEq(settleEntryBand({}).min, 85, 'settle band default min 85');
@@ -3971,6 +3976,14 @@ async function testBotTradingFlow() {
       'settle default same-side cooldown is 5m'
     );
     check(liquidityPriority('BTC') > liquidityPriority('XRP'), 'BTC ranked more liquid than XRP');
+    check(
+      settleRankAskScore(90) > settleRankAskScore(95),
+      'settle AUTO prefers 90¢ ask over 95¢ (rich demotion)'
+    );
+    check(
+      settleRankAskScore(92) > settleRankAskScore(88),
+      'among sub-94 asks, higher still ranks better'
+    );
     checkEq(settleExitPlan(91).targetCents, 96, 'entry 91¢ aims for 96¢');
     checkEq(settleExitPlan(91).staleMinutesLeft, 2, 'entry 91¢ stale @ 2m left');
     checkEq(settleExitPlan(87).targetCents, 94, 'entry 87¢ aims for 94¢');

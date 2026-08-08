@@ -121,7 +121,7 @@ if (KALSHI_ENABLED) {
 }
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
-const PRODUCTS = (process.env.PRODUCTS || 'BTC-USD,XRP-USD,ETH-USD,SOL-USD,DOGE-USD,BNB-USD,ZEC-USD').split(',').map((s) => s.trim());
+const PRODUCTS = (process.env.PRODUCTS || 'BTC-USD,XRP-USD,ETH-USD,SOL-USD,DOGE-USD,BNB-USD,NEAR-USD,HYPE-USD,ZEC-USD').split(',').map((s) => s.trim());
 const COMPUTE_INTERVAL_MS = parseInt(process.env.COMPUTE_INTERVAL_MS || '5000', 10);
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 
@@ -132,6 +132,8 @@ const SYMBOL_OF = {
   'SOL-USD': 'SOL',
   'DOGE-USD': 'DOGE',
   'BNB-USD': 'BNB',
+  'NEAR-USD': 'NEAR',
+  'HYPE-USD': 'HYPE',
   'ZEC-USD': 'ZEC',
 };
 
@@ -518,7 +520,17 @@ app.get("/", (req, res) => {
     res.status(result.ok ? 200 : 400).json(result);
   });
 
-  const SYMBOL_TO_PRODUCT = { BTC: 'BTC-USD', XRP: 'XRP-USD', ETH: 'ETH-USD', SOL: 'SOL-USD', DOGE: 'DOGE-USD', BNB: 'BNB-USD', ZEC: 'ZEC-USD' };
+  const SYMBOL_TO_PRODUCT = {
+    BTC: 'BTC-USD',
+    XRP: 'XRP-USD',
+    ETH: 'ETH-USD',
+    SOL: 'SOL-USD',
+    DOGE: 'DOGE-USD',
+    BNB: 'BNB-USD',
+    NEAR: 'NEAR-USD',
+    HYPE: 'HYPE-USD',
+    ZEC: 'ZEC-USD',
+  };
   // Same set the live AUTO bot can trade on Kalshi (ZEC: no 15m market; DOGE opted out).
   const AUTO_BACKTEST_SYMBOLS = tradeableKalshiSymbols();
   const MAX_BACKTEST_HOURS = 168; // 7 full days of continuous minute data

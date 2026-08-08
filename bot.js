@@ -51,7 +51,7 @@ function saveCalibration(calibration) {
 }
 
 // Kalshi's rolling 15-minute crypto series tickers. Confirmed live as of this
-// writing: BTC, ETH, SOL, XRP, DOGE, and BNB. ZEC is deliberately NOT
+// writing: BTC, ETH, SOL, XRP, DOGE, BNB, NEAR, HYPE. ZEC is deliberately NOT
 // included here — Kalshi does not currently have a 15-minute market for it
 // (confirmed via Kalshi's own market listings), so the bot can track ZEC's
 // price/predictions via Coinbase but cannot place Kalshi trades on it.
@@ -66,6 +66,8 @@ const SERIES_BY_SYMBOL = {
   XRP: 'KXXRP15M',
   DOGE: 'KXDOGE15M',
   BNB: 'KXBNB15M',
+  NEAR: 'KXNEAR15M',
+  HYPE: 'KXHYPE15M',
 };
 
 // Opted out of new entries (AUTO + single-symbol). Series stay mapped so any
@@ -87,12 +89,33 @@ const LIQUIDITY_PRIORITY_BY_SYMBOL = {
   ETH: 40,
   SOL: 30,
   BNB: 20,
+  NEAR: 15,
+  HYPE: 12,
   XRP: 10,
   DOGE: 5,
 };
 
 function liquidityPriority(symbol) {
   return LIQUIDITY_PRIORITY_BY_SYMBOL[String(symbol || '').toUpperCase()] || 0;
+}
+
+/**
+ * Settle AUTO: asks at/above this are demoted so mid-band names (e.g. 85–93¢)
+ * get tried before nearly-certain 94¢+ tickets on the usual majors.
+ */
+function settleRichAskFloorCents(config = {}) {
+  const n = Number(config.settleRichAskFloorCents);
+  if (Number.isFinite(n) && n >= 50 && n <= 99) return Math.round(n);
+  return 94;
+}
+
+/** Ask component of settle rankScore (higher = better). Rich asks get −200. */
+function settleRankAskScore(priceCents, { richFloorCents = 94, usedLateBand = false } = {}) {
+  const p = Math.round(Number(priceCents));
+  if (!Number.isFinite(p)) return -999;
+  const bandBonus = usedLateBand ? 0 : 100;
+  const askPart = p >= richFloorCents ? p - 200 : p;
+  return askPart + bandBonus;
 }
 
 /** Settle-mode entry band (default 85–95¢). Clamped to 1–99; swaps if inverted. */
@@ -232,6 +255,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'settleMaxMinutesToOpen',
   'settleLateEntryMinutes',
   'settleLateEntryMinCents',
+  'settleRichAskFloorCents',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -1005,6 +1029,8 @@ class TradingBot {
       settleLateEntryMinCents: 70,
       // Entry-tiered TP/stale (settleExitPlan). 'off' = stop + hold to settlement only.
       settleTieredExits: 'on',
+      // AUTO settle: prefer asks below this before 94¢+ “almost certain” tickets.
+      settleRichAskFloorCents: 94,
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -3632,11 +3658,13 @@ class TradingBot {
       priceCents: pick.priceCents,
       closeTime,
       edge: 100 - pick.priceCents,
-      // Prefer higher asks in AUTO (closer to settlement certainty), then
-      // more liquid series (BTC/ETH over thin XRP books), then tighter spreads.
+      // Mid-band asks first (under rich floor, default 94¢); among those prefer
+      // higher ask + liquidity + tighter spread. 94¢+ only after nothing sweeter.
       rankScore:
-        pick.priceCents +
-        (usedLateBand ? 0 : 100) +
+        settleRankAskScore(pick.priceCents, {
+          richFloorCents: settleRichAskFloorCents(this.config),
+          usedLateBand,
+        }) +
         liquidityPriority(symbol) +
         Math.max(0, 15 - Math.max(0, yesAsk - yesBid)),
       strategy: 'settle',
@@ -3872,6 +3900,8 @@ module.exports = {
   isSettleTrade,
   isSettleTieredExitsEnabled,
   settleExitPlan,
+  settleRichAskFloorCents,
+  settleRankAskScore,
   stopRecoveryCentsRequired,
   stopRecoveryMaxAgeMs,
   peerCascadeMaxAgeMs,
