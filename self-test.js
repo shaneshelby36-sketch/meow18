@@ -1004,7 +1004,7 @@ async function testBotExits() {
     checkEq(trade.exitReason, undefined, 'settle early hold has no exit reason');
   }
 
-  // Settle: entry 91¢ → target 96¢ hit → take profit
+  // Settle: entry 87¢ → target 96¢ hit → take profit
   {
     const now = Date.now();
     const bot = makeBot(
@@ -1019,7 +1019,7 @@ async function testBotExits() {
     const trade = openTrade(bot, {
       strategy: 'settle',
       side: 'yes',
-      entryPriceCents: 91,
+      entryPriceCents: 87,
       windowCloseTime: now + 10 * 60 * 1000,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
@@ -1028,7 +1028,7 @@ async function testBotExits() {
     check(trade.exitPriceCents >= 96, 'settle TP fill at/above target');
   }
 
-  // Settle: entry 91¢, green but under 96 with ≤2m left → settle_stale bank
+  // Settle: entry 87¢, green but under 96 with ≤2m left → settle_stale bank
   {
     const now = Date.now();
     const bot = makeBot(
@@ -1043,7 +1043,7 @@ async function testBotExits() {
     const trade = openTrade(bot, {
       strategy: 'settle',
       side: 'yes',
-      entryPriceCents: 91,
+      entryPriceCents: 87,
       windowCloseTime: now + 90 * 1000,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
@@ -1058,22 +1058,22 @@ async function testBotExits() {
       mockClient({
         status: 'open',
         close_time: new Date(now + 90 * 1000).toISOString(),
-        yes_bid: 88,
-        no_bid: 12,
+        yes_bid: 84,
+        no_bid: 16,
       }),
       { settleStopLossCents: 8 }
     );
     const trade = openTrade(bot, {
       strategy: 'settle',
       side: 'yes',
-      entryPriceCents: 91,
+      entryPriceCents: 87,
       windowCloseTime: now + 90 * 1000,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.status, 'open', 'settle does not force stale sell while red');
   }
 
-  // Settle hold tier (≥93): no TP chase even at 96¢
+  // Settle hold tier (≥90): no TP chase even at 96¢
   {
     const now = Date.now();
     const bot = makeBot(
@@ -1088,11 +1088,11 @@ async function testBotExits() {
     const trade = openTrade(bot, {
       strategy: 'settle',
       side: 'yes',
-      entryPriceCents: 94,
+      entryPriceCents: 91,
       windowCloseTime: now + 10 * 60 * 1000,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
-    checkEq(trade.status, 'open', 'settle ≥93¢ holds toward settlement');
+    checkEq(trade.status, 'open', 'settle ≥90¢ holds toward settlement');
   }
 
   // Breakeven in final 5 without confidence hold
@@ -3991,13 +3991,14 @@ async function testBotTradingFlow() {
       settleRankAskScore(92) > settleRankAskScore(88),
       'among sub-94 asks, higher still ranks better'
     );
-    checkEq(settleExitPlan(91).targetCents, 96, 'entry 91¢ aims for 96¢');
-    checkEq(settleExitPlan(91).staleMinutesLeft, 2, 'entry 91¢ stale @ 2m left');
-    checkEq(settleExitPlan(87).targetCents, 94, 'entry 87¢ aims for 94¢');
-    checkEq(settleExitPlan(82).targetCents, 93, 'entry 82¢ aims for 93¢');
-    checkEq(settleExitPlan(72).targetCents, 91, 'late entry 72¢ aims for 91¢');
+    checkEq(settleExitPlan(91).targetCents, null, 'entry 91¢ holds to settle');
+    checkEq(settleExitPlan(91).tier, 'hold', 'entry 91¢ is hold tier');
+    checkEq(settleExitPlan(87).targetCents, 96, 'entry 87¢ aims for 96¢');
+    checkEq(settleExitPlan(87).staleMinutesLeft, 2, 'entry 87¢ stale @ 2m left');
+    checkEq(settleExitPlan(82).targetCents, 94, 'entry 82¢ aims for 94¢');
+    checkEq(settleExitPlan(72).targetCents, 93, 'late entry 72¢ aims for 93¢');
     checkEq(settleExitPlan(94).targetCents, null, 'entry 94¢ holds to settle (no TP chase)');
-    checkEq(settleExitPlan(94).tier, 'hold', 'entry 94¢ is hold tier');
+    checkEq(settleExitPlan(90).tier, 'hold', 'entry 90¢ is hold tier');
     check(isSettleTieredExitsEnabled({}), 'tiered exits default on');
     check(isSettleTieredExitsEnabled({ settleTieredExits: 'on' }), 'tiered exits on');
     check(!isSettleTieredExitsEnabled({ settleTieredExits: 'off' }), 'tiered exits off');

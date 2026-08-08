@@ -217,32 +217,31 @@ function isSettleTieredExitsEnabled(config = {}) {
 /**
  * Entry-tiered settle exits: target bid depends on fill price; if that target
  * is not reached by `staleMinutesLeft` remaining, bank a green bid instead of
- * sitting for settlement. Highest entries (≥93) hold for settle (tiny upside).
+ * sitting for settlement.
  *
- *   entry ≥93 → hold to settle (target null)
- *   entry 90–92 → aim 96¢, stale @ 2.0m left
- *   entry 85–89 → aim 94¢, stale @ 2.5m left
- *   entry 80–84 → aim 93¢, stale @ 3.0m left
- *   entry <80  → aim 91¢, stale @ 2.0m left (late band)
+ * Shifted one tier toward hold: once in the 90s, finish is usually settlement
+ * (stop still catches real dumps). Prior chart slid down one band:
+ *
+ *   entry ≥90 → hold to settle (target null)
+ *   entry 85–89 → aim 96¢, stale @ 2.0m left
+ *   entry 80–84 → aim 94¢, stale @ 2.5m left
+ *   entry <80  → aim 93¢, stale @ 3.0m left (late band)
  */
 function settleExitPlan(entryPriceCents) {
   const entry = Math.round(Number(entryPriceCents));
   if (!Number.isFinite(entry) || entry < 1) {
     return { targetCents: null, staleMinutesLeft: null, tier: 'invalid' };
   }
-  if (entry >= 93) {
+  if (entry >= 90) {
     return { targetCents: null, staleMinutesLeft: null, tier: 'hold', entry };
   }
-  if (entry >= 90) {
+  if (entry >= 85) {
     return { targetCents: 96, staleMinutesLeft: 2, tier: 'high', entry };
   }
-  if (entry >= 85) {
+  if (entry >= 80) {
     return { targetCents: 94, staleMinutesLeft: 2.5, tier: 'mid', entry };
   }
-  if (entry >= 80) {
-    return { targetCents: 93, staleMinutesLeft: 3, tier: 'low', entry };
-  }
-  return { targetCents: 91, staleMinutesLeft: 2, tier: 'late', entry };
+  return { targetCents: 93, staleMinutesLeft: 3, tier: 'late', entry };
 }
 
 // Settings that can be safely edited at runtime (via the API/dashboard)
