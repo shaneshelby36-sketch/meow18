@@ -3695,10 +3695,11 @@ async function testBotTradingFlow() {
 
   section('settle strategy helpers');
   checkEq(settleEntryBand({}).min, 85, 'settle band default min 85');
-  checkEq(settleEntryBand({}).max, 90, 'settle band default max 90');
+  checkEq(settleEntryBand({}).max, 95, 'settle band default max 95');
   check(isSettleEntryPriceCents(87), '87¢ inside settle band');
+  check(isSettleEntryPriceCents(93), '93¢ inside widened settle band');
   check(!isSettleEntryPriceCents(84), '84¢ outside settle band');
-  check(!isSettleEntryPriceCents(91), '91¢ outside settle band');
+  check(!isSettleEntryPriceCents(96), '96¢ outside settle band');
   check(isSettleStrategyMode({ strategyMode: 'settle' }), 'settle mode flag');
   check(!isSettleStrategyMode({ strategyMode: 'edge' }), 'edge mode flag');
   check(isSettleTrade({ strategy: 'settle' }), 'settle trade tag');

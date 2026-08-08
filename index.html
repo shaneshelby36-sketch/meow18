@@ -249,7 +249,7 @@
         <p class="settings-hint">These apply immediately — no restart needed. Trading mode (paper/live) is set on the server for safety and can't be changed here.</p>
         <div class="bot-strategy-tabs" role="tablist" aria-label="Strategy">
           <button type="button" class="bot-strategy-tab active" data-strategy="edge" id="bot-tab-edge">Edge</button>
-          <button type="button" class="bot-strategy-tab" data-strategy="settle" id="bot-tab-settle">Settle (85–90¢)</button>
+          <button type="button" class="bot-strategy-tab" data-strategy="settle" id="bot-tab-settle">Settle (85–95¢)</button>
         </div>
         <input type="hidden" id="bot-strategy-mode" value="edge" />
 
@@ -318,7 +318,7 @@
         </div>
 
         <div id="bot-settings-settle" class="bot-field-grid" hidden>
-          <p class="settings-hint">Buys YES or NO when the ask is in the band, late in the window, and holds to official settlement (stop only — no TP / pre-close bank). Soft filter: engine must not lean against the side.</p>
+          <p class="settings-hint">Buys YES or NO when the ask is in the band (default 85–95¢), with enough time left in the window, and holds to official settlement (stop only — no TP / pre-close bank). Soft filter: engine must not lean against the side. If Decision says “min left”, the ask is fine but the clock is still too early.</p>
           <label>Settle entry min (¢)
             <div class="slider-row">
               <input id="bot-settle-min" type="range" min="70" max="95" step="1" />
@@ -331,7 +331,7 @@
               <input id="bot-settle-max" type="range" min="75" max="98" step="1" />
               <span class="slider-value" id="bot-settle-max-value">—</span>
             </div>
-            <span class="field-hint">Highest ask price allowed (default 90¢). Max win to settlement is 100 − entry.</span>
+            <span class="field-hint">Highest ask price allowed (default 95¢). Above this looks “stuck” even if it’s past 85¢.</span>
           </label>
           <label>Settle stop-loss (¢ below entry)
             <div class="slider-row">
@@ -345,7 +345,7 @@
               <input id="bot-settle-maxmin" type="range" min="1" max="14" step="0.5" />
               <span class="slider-value" id="bot-settle-maxmin-value">—</span>
             </div>
-            <span class="field-hint">Late-window only (default 8). 85¢ with 14 minutes left can still dump.</span>
+            <span class="field-hint">Won’t open too early in the window (default 12). If the Decision line mentions “min left”, raise this slider.</span>
           </label>
         </div>
 

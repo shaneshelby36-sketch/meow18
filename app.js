@@ -1444,11 +1444,11 @@ async function loadBotConfigIntoForm() {
     const settleMin = document.getElementById('bot-settle-min');
     if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 85;
     const settleMax = document.getElementById('bot-settle-max');
-    if (settleMax) settleMax.value = c.settleEntryMaxCents != null ? c.settleEntryMaxCents : 90;
+    if (settleMax) settleMax.value = c.settleEntryMaxCents != null ? c.settleEntryMaxCents : 95;
     const settleStop = document.getElementById('bot-settle-stoploss');
     if (settleStop) settleStop.value = c.settleStopLossCents != null ? c.settleStopLossCents : 8;
     const settleMaxMin = document.getElementById('bot-settle-maxmin');
-    if (settleMaxMin) settleMaxMin.value = c.settleMaxMinutesToOpen != null ? c.settleMaxMinutesToOpen : 8;
+    if (settleMaxMin) settleMaxMin.value = c.settleMaxMinutesToOpen != null ? c.settleMaxMinutesToOpen : 12;
     document.getElementById('bot-stake').value = c.stakeDollars;
     document.getElementById('bot-maxpos').value = c.maxOpenPositions;
     document.getElementById('bot-paper-balance').value = c.paperStartingBalanceDollars;
@@ -1499,9 +1499,9 @@ async function saveBotConfig(opts = {}) {
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '85'),
-    settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '90'),
+    settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '95'),
     settleStopLossCents: parseFloat(document.getElementById('bot-settle-stoploss')?.value || '8'),
-    settleMaxMinutesToOpen: parseFloat(document.getElementById('bot-settle-maxmin')?.value || '8'),
+    settleMaxMinutesToOpen: parseFloat(document.getElementById('bot-settle-maxmin')?.value || '12'),
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),

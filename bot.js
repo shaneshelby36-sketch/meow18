@@ -80,12 +80,12 @@ function tradeableKalshiSymbols() {
   return Object.keys(SERIES_BY_SYMBOL).filter((s) => isKalshiTradeEnabled(s));
 }
 
-/** Settle-mode entry band (default 85–90¢). Clamped to 1–99; swaps if inverted. */
+/** Settle-mode entry band (default 85–95¢). Clamped to 1–99; swaps if inverted. */
 function settleEntryBand(config = {}) {
   let min = Number(config.settleEntryMinCents);
   let max = Number(config.settleEntryMaxCents);
   if (!Number.isFinite(min)) min = 85;
-  if (!Number.isFinite(max)) max = 90;
+  if (!Number.isFinite(max)) max = 95;
   min = Math.max(1, Math.min(99, Math.round(min)));
   max = Math.max(1, Math.min(99, Math.round(max)));
   if (max < min) {
@@ -875,10 +875,10 @@ class TradingBot {
       postStopSameSideCooldownMinutes: 2,
       // Settle strategy: buy ask in [min,max]¢ and hold to official settlement.
       settleEntryMinCents: 85,
-      settleEntryMaxCents: 90,
-      settleStopLossCents: 8, // tighter than edge — max win to 100 is only ~10–15¢
+      settleEntryMaxCents: 95, // allow mid-high asks; 91–95 used to look "stuck" at 90 max
+      settleStopLossCents: 8, // tighter than edge — max win to 100 is only ~5–15¢
       settleMinMinutesToOpen: 0.5, // still need a little time; 0 = allow until last seconds
-      settleMaxMinutesToOpen: 8, // only late-ish windows (0 = no max)
+      settleMaxMinutesToOpen: 12, // late-ish windows (was 8 — early 85¢ quotes looked stuck)
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
@@ -3195,7 +3195,7 @@ class TradingBot {
       : 0.5;
     const maxMinutes = Number.isFinite(Number(this.config.settleMaxMinutesToOpen))
       ? Number(this.config.settleMaxMinutesToOpen)
-      : 8;
+      : 12;
     if (minMinutes > 0 && minutesRemaining < minMinutes) {
       this.lastDecision =
         `Waiting: ${symbol} settle — only ${minutesRemaining.toFixed(1)} min left (need ≥ ${minMinutes}).`;
@@ -3203,7 +3203,8 @@ class TradingBot {
     }
     if (maxMinutes > 0 && minutesRemaining > maxMinutes) {
       this.lastDecision =
-        `Waiting: ${symbol} settle — ${minutesRemaining.toFixed(1)} min left (only opens with ≤ ${maxMinutes} min left).`;
+        `Waiting: ${symbol} settle — price may qualify, but ${minutesRemaining.toFixed(1)} min left ` +
+        `(only opens with ≤ ${maxMinutes} min left).`;
       return null;
     }
 
