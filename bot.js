@@ -2881,6 +2881,15 @@ class TradingBot {
           '.';
         return false;
       }
+      const richFloor = settleRichAskFloorCents(this.config);
+      const minUpside = settleMinUpsideCents(this.config);
+      const upside = 100 - priceCents;
+      if (priceCents >= richFloor || (minUpside > 0 && upside < minUpside)) {
+        this.lastDecision =
+          `Skipped ${symbol} settle @ ${priceCents}¢: not enough upside` +
+          ` (need <${richFloor}¢ and ≥${minUpside}¢ to 100) — trying other cryptos.`;
+        return false;
+      }
     } else {
       const minEntry = Number(this.config.minEntryCents);
       if (Number.isFinite(minEntry) && minEntry > 0 && priceCents < minEntry) {
@@ -2995,11 +3004,12 @@ class TradingBot {
       }
 
       if (filled < 1) {
-        this._noteEntryMiss(symbol);
+        const miss = this._noteEntryMiss(symbol);
+        const coolMin = Math.max(1, Math.round((miss.cooldownMs || 120_000) / 60000));
         this.lastError =
           `Live entry on ${symbol} did not fill` +
           (lastErr ? ` (${lastErr.message})` : '') +
-          ' — skipping this coin ~90s; trying more liquid markets first.';
+          ` — skipping this coin ~${coolMin}m (miss #${miss.streak}); focusing on other cryptos.`;
         this.lastDecision = this.lastError;
         this._logActivity(this.lastDecision, {
           kind: 'open',
@@ -3010,6 +3020,7 @@ class TradingBot {
         console.error('[bot]', this.lastError);
         return false;
       }
+      this._clearEntryMiss(symbol);
       if (fill && fill.recovered) {
         console.warn(
           `[bot] entry fill recovery on ${symbol}: order ${orderId} filled ${filled}/${trade.contracts} after timeout/cancel — ledgered`
@@ -3088,16 +3099,39 @@ class TradingBot {
     return true;
   }
 
-  /** After a live fill miss, skip this coin ~90s (not just reorder — prevents XRP spam). */
-  _noteEntryMiss(symbol, cooldownMs = 90_000) {
+  /**
+   * After a live fill miss, hard-skip this coin on an escalating ladder so we
+   * stop pinging the same thin book and focus on other cryptos:
+   * 2m → 5m → 10m → 15m (cap).
+   */
+  _noteEntryMiss(symbol, cooldownMs = null) {
     if (!symbol) return;
+    const sym = String(symbol).toUpperCase();
+    if (!this._entryMissStreak) this._entryMissStreak = Object.create(null);
     if (!this._entryMissUntil) this._entryMissUntil = Object.create(null);
-    this._entryMissUntil[String(symbol).toUpperCase()] = Date.now() + cooldownMs;
+    const streak = (this._entryMissStreak[sym] || 0) + 1;
+    this._entryMissStreak[sym] = streak;
+    const ladder = [120_000, 300_000, 600_000, 900_000];
+    const ms =
+      Number.isFinite(cooldownMs) && cooldownMs > 0
+        ? cooldownMs
+        : ladder[Math.min(streak - 1, ladder.length - 1)];
+    this._entryMissUntil[sym] = Date.now() + ms;
+    return { streak, cooldownMs: ms };
   }
 
   _clearEntryMiss(symbol) {
-    if (!this._entryMissUntil || !symbol) return;
-    delete this._entryMissUntil[String(symbol).toUpperCase()];
+    if (!symbol) return;
+    const sym = String(symbol).toUpperCase();
+    if (this._entryMissUntil) delete this._entryMissUntil[sym];
+    if (this._entryMissStreak) delete this._entryMissStreak[sym];
+  }
+
+  _entryMissCooldownMs(symbol) {
+    if (!this._entryMissUntil || !symbol) return 0;
+    const until = this._entryMissUntil[String(symbol).toUpperCase()];
+    if (!Number.isFinite(until)) return 0;
+    return Math.max(0, until - Date.now());
   }
 
   _hasRecentEntryMiss(symbol) {
@@ -3513,25 +3547,28 @@ class TradingBot {
    * down to settleLateEntryMinCents (default 70) and take the closest ask to
    * the primary band (highest price). Soft thesis still applies.
    */
-  async _evaluateSymbolForSettle(symbol, predictions) {
+  async _evaluateSymbolForSettle(symbol, predictions, { quiet = false } = {}) {
+    const say = (msg) => {
+      if (!quiet) this.lastDecision = msg;
+    };
     if (!isKalshiTradeEnabled(symbol)) {
-      this.lastDecision = `Waiting: ${symbol} is opted out of trading.`;
+      say(`Waiting: ${symbol} is opted out of trading.`);
       return null;
     }
     if (this._hasOpenOnSymbol(symbol)) {
-      this.lastDecision = `Waiting: already holding an open ${symbol} position (one open per coin).`;
+      say(`Waiting: already holding an open ${symbol} position (one open per coin).`);
       return null;
     }
 
     const assetPrediction = predictions[symbol];
     if (!assetPrediction || !assetPrediction.ready) {
-      this.lastDecision = `Waiting: ${symbol} prediction data is still seeding.`;
+      say(`Waiting: ${symbol} prediction data is still seeding.`);
       return null;
     }
 
     const seriesTicker = SERIES_BY_SYMBOL[symbol];
     if (!seriesTicker) {
-      this.lastDecision = `Waiting: ${symbol} has no supported Kalshi market.`;
+      say(`Waiting: ${symbol} has no supported Kalshi market.`);
       return null;
     }
 
@@ -3549,18 +3586,18 @@ class TradingBot {
       return null;
     }
     if (!market) {
-      this.lastDecision = `Waiting: no open Kalshi market found for ${symbol}.`;
+      say(`Waiting: no open Kalshi market found for ${symbol}.`);
       return null;
     }
     if (this._hasOpenOnTicker(market.ticker)) {
-      this.lastDecision = `Waiting: already holding an open position on ${market.ticker}.`;
+      say(`Waiting: already holding an open position on ${market.ticker}.`);
       return null;
     }
 
     const now = Date.now();
     const closeTime = new Date(market.close_time).getTime();
     if (!Number.isFinite(closeTime) || closeTime <= now) {
-      this.lastDecision = `Waiting: the available ${symbol} market is already closed.`;
+      say(`Waiting: the available ${symbol} market is already closed.`);
       return null;
     }
 
@@ -3572,20 +3609,20 @@ class TradingBot {
       ? Number(this.config.settleMaxMinutesToOpen)
       : 12;
     if (minMinutes > 0 && minutesRemaining < minMinutes) {
-      this.lastDecision =
-        `Waiting: ${symbol} settle — only ${minutesRemaining.toFixed(1)} min left (need ≥ ${minMinutes}).`;
+      say(`Waiting: ${symbol} settle — only ${minutesRemaining.toFixed(1)} min left (need ≥ ${minMinutes}).`);
       return null;
     }
     if (maxMinutes > 0 && minutesRemaining > maxMinutes) {
-      this.lastDecision =
+      say(
         `Waiting: ${symbol} settle — price may qualify, but ${minutesRemaining.toFixed(1)} min left ` +
-        `(only opens with ≤ ${maxMinutes} min left).`;
+          `(only opens with ≤ ${maxMinutes} min left).`
+      );
       return null;
     }
 
     const window = this._pickWindow(assetPrediction.windows, minutesRemaining);
     if (!window) {
-      this.lastDecision = `Waiting: ${symbol} has no usable prediction window for settle.`;
+      say(`Waiting: ${symbol} has no usable prediction window for settle.`);
       return null;
     }
 
@@ -3635,18 +3672,20 @@ class TradingBot {
       const richOnly =
         inBandRaw.length > 0 && inBandRaw.every((c) => c.priceCents >= richFloor || (100 - c.priceCents) < minUpside);
       if (richOnly) {
-        this.lastDecision =
-          `Waiting: ${symbol} settle — ask too rich (need ≤${richFloor - 1}¢ and ≥${minUpside}¢ upside to 100; trying other cryptos).`;
+        say(
+          `Waiting: ${symbol} settle — ask too rich (need ≤${richFloor - 1}¢ and ≥${minUpside}¢ upside to 100; trying other cryptos).`
+        );
         return null;
       }
       const lateHint =
         lateMins > 0 && minutesRemaining > lateMins
           ? ` (late fallback ${lateFloor}–${primary.max}¢ only with ≤ ${lateMins} min left)`
           : '';
-      this.lastDecision =
+      say(
         `Waiting: ${symbol} settle — YES ask ${yesAsk}¢ / NO ask ${noAsk}¢ outside ${primary.min}–${primary.max}¢` +
-        lateHint +
-        '.';
+          lateHint +
+          '.'
+      );
       return null;
     }
 
@@ -3662,13 +3701,11 @@ class TradingBot {
 
     // Soft thesis: don't buy a side the engine currently leans against.
     if (pick.side === 'yes' && window.probabilityUp < window.probabilityDown) {
-      this.lastDecision =
-        `Waiting: ${symbol} settle YES @ ${pick.priceCents}¢ but engine leans NO.`;
+      say(`Waiting: ${symbol} settle YES @ ${pick.priceCents}¢ but engine leans NO.`);
       return null;
     }
     if (pick.side === 'no' && window.probabilityDown < window.probabilityUp) {
-      this.lastDecision =
-        `Waiting: ${symbol} settle NO @ ${pick.priceCents}¢ but engine leans YES.`;
+      say(`Waiting: ${symbol} settle NO @ ${pick.priceCents}¢ but engine leans YES.`);
       return null;
     }
 
@@ -3680,7 +3717,7 @@ class TradingBot {
       predictions
     );
     if (!recoveryCheck.ok) {
-      this.lastDecision = recoveryCheck.reason;
+      if (!quiet) this.lastDecision = recoveryCheck.reason;
       this._noteProtectionGate(recoveryCheck.reason);
       return null;
     }
@@ -3719,22 +3756,30 @@ class TradingBot {
     if (candidates.length === 0) {
       if (cooling.length) {
         this.lastDecision =
-          `Waiting: recent fill misses on ${cooling.join(', ')} — cooling ~90s before retry (prefer liquid books next).`;
+          `Waiting: fill-miss cool-down on ${cooling.join(', ')} — not pinging those; waiting for other mid-band books.`;
       }
       return [];
     }
     const evaluations = await Promise.all(
-      candidates.map((sym) => this._evaluateSymbolForSettle(sym, predictions))
+      candidates.map((sym) => this._evaluateSymbolForSettle(sym, predictions, { quiet: true }))
     );
     const valid = evaluations.filter(Boolean);
-    if (valid.length === 0) return [];
+    if (valid.length === 0) {
+      this.lastDecision = cooling.length
+        ? `Waiting: no mid-band settle setup on free coins (cooling: ${cooling.join(', ')}). Skips ≥${settleRichAskFloorCents(this.config)}¢ / thin upside.`
+        : `Waiting: no mid-band settle setup right now (skips ≥${settleRichAskFloorCents(this.config)}¢ and upside < stop). Watching other cryptos.`;
+      return [];
+    }
     valid.sort((a, b) => {
       if (preferOtherThan) {
         const aPen = a.symbol === preferOtherThan ? 1 : 0;
         const bPen = b.symbol === preferOtherThan ? 1 : 0;
         if (aPen !== bPen) return aPen - bPen;
       }
-      // Edge / price score first; liquidity breaks ties (prefer BTC/ETH fills).
+      // Prefer coins with fewer recent fill-miss streaks, then ask score / liquidity.
+      const aMiss = (this._entryMissStreak && this._entryMissStreak[a.symbol]) || 0;
+      const bMiss = (this._entryMissStreak && this._entryMissStreak[b.symbol]) || 0;
+      if (aMiss !== bMiss) return aMiss - bMiss;
       if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
       return liquidityPriority(b.symbol) - liquidityPriority(a.symbol);
     });

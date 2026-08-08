@@ -3216,7 +3216,11 @@ async function testBotTradingFlow() {
     checkEq(retryBot.openTrades.length, 0, 'unfilled entry leaves no trade');
     checkEq(entryOrders, 1, 'unfilled entry places one buy (no chase retries)');
     check(retryBot._hasRecentEntryMiss('ETH'), 'fill miss demotes ETH briefly');
-    check(/90s|liquid/i.test(retryBot.lastError || ''), 'miss message mentions skip/liquid');
+    check(/skipping this coin|focusing on other/i.test(retryBot.lastError || ''), 'miss message mentions skip/focus');
+    check(/miss #1/i.test(retryBot.lastError || ''), 'first miss labeled #1');
+    const m1 = retryBot._noteEntryMiss('ETH');
+    check(m1.streak >= 2, 'second miss escalates streak');
+    check(m1.cooldownMs >= 300_000, 'second miss cools ≥5m');
   }
 
   // Live entry: all attempts miss → no trade (single attempt)
