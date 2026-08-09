@@ -1690,7 +1690,7 @@ class TradingBot {
     if (this.config.stakingStrategy !== 'halve-after-win') {
       return this.config.stakeDollars;
     }
-    const lastClosed = this.ledger.trades.find((t) => t.status === 'closed');
+    const lastClosed = this._mostRecentClosedTrade();
     if (!lastClosed) return this.config.stakeDollars; // no history yet — start at the base stake
     if (lastClosed.pnlCents > 0) {
       return Math.max(0.5, lastClosed.stakeDollars / 2); // halve after a win, never quite to zero
@@ -2518,6 +2518,10 @@ class TradingBot {
       trade.exitReason = reason;
       // New session / done with this coin's ticket — miss ladder starts fresh next window.
       this._clearEntryMiss(trade.symbol);
+      if (reason === 'stop_loss' && trade.symbol) {
+        if (!this._stoppedSymbolsThisCycle) this._stoppedSymbolsThisCycle = new Set();
+        this._stoppedSymbolsThisCycle.add(String(trade.symbol).toUpperCase());
+      }
       const entryFees = Math.max(0, Math.round(Number(trade.entryFeesCents) || 0));
       const exitFees = Math.max(0, Math.round(Number(trade.exitFeesCents) || 0));
       trade.feesCents = entryFees + exitFees;
@@ -3213,6 +3217,29 @@ class TradingBot {
       this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: no valid Kalshi quote is available.`;
       return false;
     }
+    const symKey = String(symbol || '').toUpperCase();
+    // Never reopen a coin that stopped earlier in this same cycle (same-second knife-catch).
+    if (this._stoppedSymbolsThisCycle && this._stoppedSymbolsThisCycle.has(symKey)) {
+      this.lastDecision =
+        `Skipped ${symbol}: stopped earlier this cycle — no same-turn reopen.`;
+      return false;
+    }
+    // Hard same-side sit-out after stop (belt-and-suspenders vs evaluate-time gate).
+    const lastStop = this._lastStopLossTrade();
+    if (lastStop) {
+      const sitOut = checkPostStopSameSideCooldown({
+        lastStopTrade: lastStop,
+        forCandidateSymbol: symbol,
+        forCandidateSide: side,
+        cooldownMs: postStopSameSideCooldownMs(this.config),
+        now: Date.now(),
+      });
+      if (!sitOut.ok) {
+        this.lastDecision = sitOut.reason;
+        this._noteProtectionGate(sitOut.reason, { fromSymbol: symbol });
+        return false;
+      }
+    }
     const closeAt = Number(closeTime);
     if (!Number.isFinite(closeAt) || closeAt <= Date.now() + 5000) {
       this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: market close time is missing or already ending.`;
@@ -3652,6 +3679,7 @@ class TradingBot {
    * symbols, so a switch never orphans an open trade.
    */
   async runCycle(predictions) {
+    this._stoppedSymbolsThisCycle = new Set();
     this._maybeRotateLedger(Date.now());
 
     if (this.config.mode === 'live' && this.client.hasCredentials && (!this.liveBalanceUpdatedAt || Date.now() - this.liveBalanceUpdatedAt > 15000)) {
@@ -3766,11 +3794,30 @@ class TradingBot {
     });
   }
 
-  /** Most recent closed trade if it was a stop-loss; else null. */
+  /**
+   * Most recent closed trade by closedAt (not array order).
+   * Ledger unshifts on open, so a newer coin that TP'd can sit in front of an
+   * older coin that just stopped — `.find(closed)` would miss the stop.
+   */
+  _mostRecentClosedTrade({ exitReasons = null } = {}) {
+    let best = null;
+    let bestAt = -Infinity;
+    for (const t of this.ledger.trades || []) {
+      if (!t || t.status !== 'closed') continue;
+      if (exitReasons && !exitReasons.includes(t.exitReason)) continue;
+      const at = Number(t.closedAt);
+      const score = Number.isFinite(at) ? at : -Infinity;
+      if (score >= bestAt) {
+        bestAt = score;
+        best = t;
+      }
+    }
+    return best;
+  }
+
+  /** Most recent stop_loss by closedAt; else null. */
   _lastStopLossTrade() {
-    const last = this.ledger.trades.find((t) => t.status === 'closed');
-    if (last && last.exitReason === 'stop_loss') return last;
-    return null;
+    return this._mostRecentClosedTrade({ exitReasons: ['stop_loss'] });
   }
 
   /** Most recent closed trade's symbol if it was a stop-loss; else null. */
@@ -4235,7 +4282,7 @@ class TradingBot {
       }
     }
 
-    const lastClosed = this.ledger.trades.find((t) => t.status === 'closed');
+    const lastClosed = this._mostRecentClosedTrade();
     const staleSitOut = checkSameSideExitCooldown({
       lastTrade: lastClosed,
       exitReasons: ['settle_stale', 'take_profit', 'settle_stuck'],

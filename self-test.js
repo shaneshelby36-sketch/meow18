@@ -4184,6 +4184,56 @@ async function testBotTradingFlow() {
       5 * 60 * 1000,
       'settle default same-side cooldown is 5m'
     );
+  }
+
+  // Bug: BNB TP in front of ledger hid HYPE stop → same-second HYPE reopen
+  {
+    const now = Date.now();
+    const hideBot = makeBot(mockClient({}), {
+      strategyMode: 'settle',
+      settlePostStopSameSideCooldownMinutes: 5,
+      maxOpenPositions: 2,
+    });
+    hideBot.config.strategyMode = 'settle';
+    hideBot.ledger.trades = [
+      {
+        status: 'closed',
+        exitReason: 'take_profit',
+        symbol: 'BNB',
+        side: 'yes',
+        closedAt: now - 10_000,
+      },
+      {
+        status: 'closed',
+        exitReason: 'stop_loss',
+        symbol: 'HYPE',
+        side: 'yes',
+        closedAt: now - 1_000,
+        windowCloseTime: now + 10 * 60 * 1000,
+      },
+    ];
+    checkEq(hideBot._lastStopLossTrade()?.symbol, 'HYPE', 'last stop uses closedAt not array order');
+    const gate = await hideBot._stoppedCoinRecoveryGate('HYPE', 'yes', 88, null, {});
+    check(!gate.ok, 'HYPE YES blocked after stop even when BNB TP is first in ledger');
+    check(/same-side sit-out/i.test(gate.reason || ''), 'hidden-stop still triggers same-side sit-out');
+
+    hideBot._stoppedSymbolsThisCycle = new Set(['HYPE']);
+    const sameTurn = await hideBot._openPosition({
+      symbol: 'HYPE',
+      ticker: 'KXHYPE15M-REOPEN',
+      side: 'yes',
+      priceCents: 88,
+      floorStrike: 40,
+      closeTime: now + 10 * 60 * 1000,
+      engineProbability: 60,
+      engineConfidence: 70,
+      strategy: 'settle',
+    });
+    checkEq(sameTurn, false, 'same-cycle stop blocks HYPE reopen');
+    check(/same-turn|earlier this cycle/i.test(hideBot.lastDecision || ''), 'same-turn skip message');
+  }
+
+  {
     check(liquidityPriority('BTC') > liquidityPriority('XRP'), 'BTC ranked more liquid than XRP');
     check(
       settleRankAskScore(90) > settleRankAskScore(95),
