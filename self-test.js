@@ -3018,6 +3018,24 @@ async function testBotTradingFlow() {
     checkEq(halfBot._stakeDollarsForEntry(65, { settle: false, symbol: 'NEAR' }), 10, 'edge mode ignores NEAR half-stake');
     halfBot.config.halfStakeNear = 'off';
     checkEq(halfBot._stakeDollarsForEntry(88, { settle: true, symbol: 'NEAR' }), 10, 'NEAR half-stake off');
+    checkEq(
+      halfBot._stakeDollarsForEntry(85, { settle: true, symbol: 'BNB', thirdSlot: true }),
+      5,
+      '3rd open half stake'
+    );
+    checkEq(
+      halfBot._stakeDollarsForEntry(88, { settle: true, symbol: 'NEAR', thirdSlot: true }),
+      5,
+      '3rd + NEAR still half (no double-halve)'
+    );
+    halfBot.openTrades = [
+      { symbol: 'BTC', settleTouched90: true },
+      { symbol: 'ETH', settleTouched90: false },
+    ];
+    halfBot.config.maxOpenPositions = 2;
+    checkEq(halfBot._effectiveMaxOpenPositions(), 3, 'touched 90 soft-caps to 3');
+    halfBot.openTrades = [{ symbol: 'BTC', settleTouched90: false }];
+    checkEq(halfBot._effectiveMaxOpenPositions(), 2, 'without touched 90 stay at maxOpen');
   }
 
   // Live: official Kalshi result books 0/100 with NO sell order
@@ -3341,6 +3359,10 @@ async function testBotTradingFlow() {
     check(retryBot._hasRecentEntryMiss('ETH'), 'fill miss demotes ETH briefly');
     check(/skipping this coin|focusing on other/i.test(retryBot.lastError || ''), 'miss message mentions skip/focus');
     check(/miss #1/i.test(retryBot.lastError || ''), 'first miss labeled #1');
+    check(/~1m/i.test(retryBot.lastError || ''), 'first miss cools ~1m');
+    const firstOnly = makeBot(mockClient({}), { mode: 'live', liveAuthorized: true });
+    const m0 = firstOnly._noteEntryMiss('SOL');
+    checkEq(m0.cooldownMs, 60_000, 'first miss cools 1m');
     const m1 = retryBot._noteEntryMiss('ETH');
     check(m1.streak >= 2, 'second miss escalates streak');
     check(m1.cooldownMs >= 300_000, 'second miss cools ≥5m');

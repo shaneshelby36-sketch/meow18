@@ -423,14 +423,14 @@
               <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
               <span class="slider-value" id="bot-maxpos-value">—</span>
             </div>
-            <span class="field-hint">How many trades can be open at once. Default 2 across different coins. With “second only if green” On, you only get a 2nd open when an existing hold is already green (bid ≥ entry).</span>
+            <span class="field-hint">How many trades can be open at once. Default 2 across different coins. Settle: while any hold has tagged 90¢, a temporary 3rd open is allowed at ½ stake. With “second only if green” On, you only get another open when an existing hold is green (or has tagged 90¢).</span>
           </label>
           <label>Second open only if holding green
             <select id="bot-second-green">
               <option value="on">On (default)</option>
               <option value="off">Off — fill up to max anytime</option>
             </select>
-            <span class="field-hint">On: first trade alone is fine; another open only after you already have a green hold. Off: can stack up to max immediately.</span>
+            <span class="field-hint">On: first trade alone is fine; another open only after you already have a green hold (or a settle hold that tagged 90¢). Off: can stack up to max immediately.</span>
           </label>
 
           <label>Starting Bankroll

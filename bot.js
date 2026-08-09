@@ -1658,19 +1658,40 @@ class TradingBot {
   }
 
   /**
-   * Stake for this settle entry. NEAR uses ½ stake when halfStakeNear is on
-   * (thinner / choppier). All other coins use full stake. Edge mode: always full.
+   * Stake for this settle entry.
+   * - NEAR: ½ normal when halfStakeNear is on
+   * - 3rd concurrent open (only allowed while a hold has tagged 90¢): ½ normal
+   * Both map to half of base — no double-halving.
+   * Edge mode: always full (unless caller forces settle sizing).
    */
-  _stakeDollarsForEntry(priceCents, { settle = false, symbol = null } = {}) {
+  _stakeDollarsForEntry(priceCents, { settle = false, symbol = null, thirdSlot = false } = {}) {
     const base = Number(this._computeNextStake());
     const safeBase = Number.isFinite(base) && base > 0 ? base : Number(this.config.stakeDollars) || 10;
     if (!settle) return safeBase;
     const nearHalf = String(this.config.halfStakeNear == null ? 'on' : this.config.halfStakeNear).toLowerCase();
     const nearHalfOn = !(nearHalf === 'off' || nearHalf === 'false' || nearHalf === '0' || nearHalf === 'no');
-    if (nearHalfOn && String(symbol || '').toUpperCase() === 'NEAR') {
+    const halfNear = nearHalfOn && String(symbol || '').toUpperCase() === 'NEAR';
+    if (thirdSlot || halfNear) {
       return Math.max(0.5, +(safeBase / 2).toFixed(2));
     }
     return safeBase;
+  }
+
+  _hasTouched90Open() {
+    return this.openTrades.some((t) => t && t.settleTouched90 === true);
+  }
+
+  /**
+   * Soft cap: while any open has tagged 90¢, allow up to 3 (even if maxOpen is 2).
+   * Otherwise respect maxOpenPositions.
+   */
+  _effectiveMaxOpenPositions() {
+    const base = Number(this.config.maxOpenPositions);
+    const cap = Number.isFinite(base) && base >= 1 ? Math.floor(base) : 2;
+    if (isSettleStrategyMode(this.config) && this._hasTouched90Open()) {
+      return Math.max(cap, 3);
+    }
+    return cap;
   }
 
   _computeSkim(pnlCents) {
@@ -2641,7 +2662,8 @@ class TradingBot {
   }
 
   /**
-   * Second (and further) opens only when at least one existing open is green.
+   * Second (and further) opens only when at least one existing open is green,
+   * or (settle) any open has tagged 90¢ — that latch unlocks a temporary 3rd slot.
    * First open always allowed. Off via secondOpenRequiresGreen: 'off'.
    */
   async _canOpenAdditionalPosition() {
@@ -2649,6 +2671,9 @@ class TradingBot {
     const flag = String(this.config.secondOpenRequiresGreen ?? 'on').toLowerCase();
     if (flag === 'off' || flag === 'false' || flag === 'no' || flag === '0') {
       return { ok: true };
+    }
+    if (isSettleStrategyMode(this.config) && this._hasTouched90Open()) {
+      return { ok: true, touched90: true };
     }
     for (const t of this.openTrades) {
       if (await this._isOpenHoldingGreen(t)) {
@@ -2926,8 +2951,7 @@ class TradingBot {
         heldSideBidCents <= 99;
 
       // Once bid tags 90¢, latch hold-to-settle for dips (stuck/stale off; stop still on).
-      const RIDE_SETTLE_CENTS = 90;
-      if (bidOk && heldSideBidCents >= RIDE_SETTLE_CENTS) {
+      if (bidOk && heldSideBidCents >= 90) {
         trade.settleTouched90 = true;
       }
       const skipEarlyExits = plan.tier === 'hold' || trade.settleTouched90 === true;
@@ -3141,6 +3165,8 @@ class TradingBot {
       return false;
     }
     const isSettle = strategy === 'settle';
+    // Bonus 3rd while a hold has tagged 90¢ — half stake (not stacked with NEAR ½).
+    const thirdSlot = isSettle && this.openTrades.length >= 2 && this._hasTouched90Open();
     const minutesLeft = (closeAt - Date.now()) / 60000;
     const minMinutesToOpen = isSettle
       ? Number.isFinite(Number(this.config.settleMinMinutesToOpen))
@@ -3195,7 +3221,11 @@ class TradingBot {
     // Each Kalshi contract costs `priceCents` cents and pays out $1 if it
     // wins, so buying (stakeDollars * 100 / priceCents) contracts risks
     // approximately stakeDollars. Always at least 1 contract.
-    const stakeDollars = this._stakeDollarsForEntry(priceCents, { settle: isSettle, symbol });
+    const stakeDollars = this._stakeDollarsForEntry(priceCents, {
+      settle: isSettle,
+      symbol,
+      thirdSlot,
+    });
     const contracts = Math.max(1, Math.floor((stakeDollars * 100) / priceCents));
     const entryCostCents = contracts * priceCents;
     const capital = this._capitalStatus();
@@ -3273,7 +3303,8 @@ class TradingBot {
       let attemptContracts = Math.max(
         1,
         Math.floor(
-          (this._stakeDollarsForEntry(workingPrice, { settle: isSettle, symbol }) * 100) / workingPrice
+          (this._stakeDollarsForEntry(workingPrice, { settle: isSettle, symbol, thirdSlot }) * 100) /
+            workingPrice
         )
       );
       const bookAskSize =
@@ -3353,7 +3384,7 @@ class TradingBot {
 
       if (filled < 1) {
         const miss = this._noteEntryMiss(symbol);
-        const coolMin = Math.max(1, Math.round((miss.cooldownMs || 120_000) / 60000));
+        const coolMin = Math.max(1, Math.round((miss.cooldownMs || 60_000) / 60000));
         this.lastError =
           `Live entry on ${symbol} did not fill` +
           (lastErr ? ` (${lastErr.message})` : '') +
@@ -3411,9 +3442,10 @@ class TradingBot {
       const primary = settleEntryBand(this.config);
       const lateNote =
         eff.late && trade.entryPriceCents < primary.min ? ' · late fallback' : '';
-      const halfNote =
-        this._stakeDollarsForEntry(trade.entryPriceCents, { settle: true, symbol }) <
-        Number(this._computeNextStake()) - 0.001
+      const halfNote = thirdSlot
+        ? ' · half stake (3rd)'
+        : this._stakeDollarsForEntry(trade.entryPriceCents, { settle: true, symbol }) <
+            Number(this._computeNextStake()) - 0.001
           ? ' · half stake'
           : '';
       this.lastDecision =
@@ -3456,7 +3488,7 @@ class TradingBot {
   /**
    * After a live fill miss, hard-skip this coin on an escalating ladder so we
    * stop pinging the same thin book and focus on other cryptos:
-   * 2m → 5m → 10m → 15m (cap).
+   * 1m → 5m → 10m → 15m (cap).
    */
   _noteEntryMiss(symbol, cooldownMs = null) {
     if (!symbol) return;
@@ -3465,7 +3497,7 @@ class TradingBot {
     if (!this._entryMissUntil) this._entryMissUntil = Object.create(null);
     const streak = (this._entryMissStreak[sym] || 0) + 1;
     this._entryMissStreak[sym] = streak;
-    const ladder = [120_000, 300_000, 600_000, 900_000];
+    const ladder = [60_000, 300_000, 600_000, 900_000];
     const ms =
       Number.isFinite(cooldownMs) && cooldownMs > 0
         ? cooldownMs
@@ -3539,10 +3571,11 @@ class TradingBot {
       this.lastDecision = 'Bot is stopped; it will continue monitoring any already-open positions but will not open new ones.';
       return;
     }
-    if (this.openTrades.length >= this.config.maxOpenPositions) return;
+    if (this.openTrades.length >= this._effectiveMaxOpenPositions()) return;
     if (!predictions) return;
 
     // One open is fine; a second only if something already held is green.
+    // A 3rd settle open is allowed while any hold has tagged 90¢ (half stake).
     if (this.openTrades.length >= 1) {
       const extra = await this._canOpenAdditionalPosition();
       if (!extra.ok) {
@@ -3600,7 +3633,7 @@ class TradingBot {
           strategy: 'settle',
         });
         if (opened) return;
-        if (this.openTrades.length >= this.config.maxOpenPositions) return;
+        if (this.openTrades.length >= this._effectiveMaxOpenPositions()) return;
       }
       return;
     }
@@ -4265,7 +4298,7 @@ class TradingBot {
     if (candidates.length === 0) {
       if (cooling.length) {
         this.lastDecision =
-          `Waiting: recent fill misses on ${cooling.join(', ')} — cooling ~90s before retry.`;
+          `Waiting: recent fill misses on ${cooling.join(', ')} — cooling ~1m before retry.`;
       }
       return null;
     }
