@@ -1156,6 +1156,7 @@ class TradingBot {
     this.liveBalanceUpdatedAt = null;
     // Last post-stop protection gate logged to activity (dedupe poll spam).
     this._lastProtectionGateKey = null;
+    this._lastProtectionGateSymbol = null;
     // Serialize manage/settle so watchdog + cycle can't double-sell the same leg.
     this._tradeLock = Promise.resolve();
     this._removeInvalidPaperTrades();
@@ -1363,31 +1364,61 @@ class TradingBot {
     }
   }
 
+  /** Gates that only block one coin/side — other coins must not "clear" them. */
+  _isSymbolScopedProtectionGate(key) {
+    return (
+      key === 'same-side-cooldown' ||
+      key === 'stop-recovery' ||
+      key === 'knife-catch'
+    );
+  }
+
   /**
    * Log protection gate use/clear once per transition (not every cycle).
    * Pass the Waiting reason when blocked; null to clear+announce; false to clear silently.
+   * For symbol-scoped gates, pass `{ fromSymbol }` so another coin's pass doesn't
+   * spam "cleared" every 5s while e.g. HYPE is still in same-side sit-out.
    */
-  _noteProtectionGate(reasonOrNull) {
+  _noteProtectionGate(reasonOrNull, { fromSymbol = null } = {}) {
     if (reasonOrNull === false) {
       this._lastProtectionGateKey = null;
+      this._lastProtectionGateSymbol = null;
       return;
     }
+    const sym = fromSymbol ? String(fromSymbol).toUpperCase() : null;
     const reason = reasonOrNull == null ? '' : String(reasonOrNull);
     if (this._isProtectionGateReason(reason)) {
       const key = this._protectionGateKey(reason);
-      if (key === this._lastProtectionGateKey) return;
+      if (
+        key === this._lastProtectionGateKey &&
+        (!this._isSymbolScopedProtectionGate(key) ||
+          sym == null ||
+          sym === this._lastProtectionGateSymbol)
+      ) {
+        return;
+      }
       this._lastProtectionGateKey = key;
+      this._lastProtectionGateSymbol = this._isSymbolScopedProtectionGate(key) ? sym : null;
       const label = this._protectionGateLabel(key);
       this._logActivity(`Protection used (${label}): ${reason}`, { kind: 'gate' });
       this._persist();
       return;
     }
-    if (this._lastProtectionGateKey) {
-      const label = this._protectionGateLabel(this._lastProtectionGateKey);
-      this._lastProtectionGateKey = null;
-      this._logActivity(`Protection cleared (${label}) — entries allowed again.`, { kind: 'gate' });
-      this._persist();
+    if (!this._lastProtectionGateKey) return;
+    // Symbol-scoped: only the blocked coin clearing (or a silent open) may announce clear.
+    if (
+      this._isSymbolScopedProtectionGate(this._lastProtectionGateKey) &&
+      this._lastProtectionGateSymbol &&
+      sym &&
+      sym !== this._lastProtectionGateSymbol
+    ) {
+      return;
     }
+    const label = this._protectionGateLabel(this._lastProtectionGateKey);
+    this._lastProtectionGateKey = null;
+    this._lastProtectionGateSymbol = null;
+    this._logActivity(`Protection cleared (${label}) — entries allowed again.`, { kind: 'gate' });
+    this._persist();
   }
 
   get openTrades() {
@@ -3678,10 +3709,10 @@ class TradingBot {
     );
     if (!recoveryCheck.ok) {
       this.lastDecision = recoveryCheck.reason;
-      this._noteProtectionGate(recoveryCheck.reason);
+      this._noteProtectionGate(recoveryCheck.reason, { fromSymbol: symbol });
       return null;
     }
-    this._noteProtectionGate(null);
+    this._noteProtectionGate(null, { fromSymbol: symbol });
 
     return {
       symbol,
@@ -3918,10 +3949,10 @@ class TradingBot {
     );
     if (!recoveryCheck.ok) {
       if (!quiet) this.lastDecision = recoveryCheck.reason;
-      this._noteProtectionGate(recoveryCheck.reason);
+      this._noteProtectionGate(recoveryCheck.reason, { fromSymbol: symbol });
       return null;
     }
-    this._noteProtectionGate(null);
+    this._noteProtectionGate(null, { fromSymbol: symbol });
 
     return {
       symbol,

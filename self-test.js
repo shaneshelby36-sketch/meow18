@@ -2425,6 +2425,33 @@ async function testBotTradingFlow() {
         'protection gate key is same-side-cooldown'
       );
 
+      // Symbol-scoped gates: other coins passing must not spam used/cleared.
+      {
+        const gateBot = makeBot(mockClient({}));
+        const hypeReason =
+          'Waiting: HYPE YES stopped (stop_loss) — same-side sit-out ~5m before re-entry.';
+        gateBot._noteProtectionGate(hypeReason, { fromSymbol: 'HYPE' });
+        const afterUsed = (gateBot.ledger.activityLog || []).filter((e) =>
+          /Protection used \(same-side-cooldown\)/i.test(e.message || '')
+        ).length;
+        gateBot._noteProtectionGate(null, { fromSymbol: 'BNB' });
+        gateBot._noteProtectionGate(null, { fromSymbol: 'NEAR' });
+        gateBot._noteProtectionGate(hypeReason, { fromSymbol: 'HYPE' });
+        const cleared = (gateBot.ledger.activityLog || []).filter((e) =>
+          /Protection cleared \(same-side-cooldown\)/i.test(e.message || '')
+        ).length;
+        const usedAgain = (gateBot.ledger.activityLog || []).filter((e) =>
+          /Protection used \(same-side-cooldown\)/i.test(e.message || '')
+        ).length;
+        checkEq(cleared, 0, 'other coins passing do not clear HYPE same-side gate');
+        checkEq(usedAgain, afterUsed, 'HYPE same-side does not re-log every cycle');
+        gateBot._noteProtectionGate(null, { fromSymbol: 'HYPE' });
+        const clearedByHype = (gateBot.ledger.activityLog || []).filter((e) =>
+          /Protection cleared \(same-side-cooldown\)/i.test(e.message || '')
+        ).length;
+        checkEq(clearedByHype, 1, 'HYPE itself clearing logs once when sit-out ends');
+      }
+
       const dogeNoOk = checkPostStopRecovery({
         ...bouncedFavorYes,
         forCandidateSide: 'no',
