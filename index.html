@@ -337,10 +337,10 @@
           </label>
           <label>Settle stop-loss (¢ below entry)
             <div class="slider-row">
-              <input id="bot-settle-stoploss" type="range" min="1" max="20" step="1" />
+              <input id="bot-settle-stoploss" type="range" min="1" max="30" step="1" />
               <span class="slider-value" id="bot-settle-stoploss-value">—</span>
             </div>
-            <span class="field-hint">Tighter than Edge mode — at 87¢ entry a 23¢ stop is terrible R:R. Default 8¢.</span>
+            <span class="field-hint">Default 20¢ — absorbs mid-band noise wicks. 8¢ was stopping real dumps and noise alike. Entry band / min upside stay separate (still skip ≥94¢ tickets).</span>
           </label>
           <label>Entry-tiered exits (TP / stale by entry)
             <select id="bot-settle-tiered">

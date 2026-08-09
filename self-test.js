@@ -3982,7 +3982,12 @@ async function testBotTradingFlow() {
   section('settle strategy helpers');
   checkEq(settleEntryBand({}).min, 85, 'settle band default min 85');
   checkEq(settleEntryBand({}).max, 92, 'settle band default max 92');
-  checkEq(settleMinUpsideCents({}), 8, 'settle min upside defaults to stop (8¢)');
+  checkEq(settleMinUpsideCents({}), 8, 'settle min upside defaults to 8¢');
+  checkEq(
+    settleMinUpsideCents({ settleStopLossCents: 20 }),
+    8,
+    'wide settle stop does not force min upside = 20'
+  );
   check(isSettleEntryPriceCents(87), '87¢ inside settle band');
   check(isSettleEntryPriceCents(92), '92¢ at settle band max');
   check(!isSettleEntryPriceCents(93), '93¢ outside tightened settle band');
@@ -4008,10 +4013,18 @@ async function testBotTradingFlow() {
         settleStopLossCents: 8,
       },
     });
+    // Saved overrides can win in constructor — pin the value under test.
+    settleBot.config.settleStopLossCents = 8;
     checkEq(
       settleBot._stopLevelCents({ strategy: 'settle', entryPriceCents: 87 }),
       79,
       'settle stop uses settleStopLossCents (87−8)'
+    );
+    settleBot.config.settleStopLossCents = 20;
+    checkEq(
+      settleBot._stopLevelCents({ strategy: 'settle', entryPriceCents: 87 }),
+      67,
+      'settle stop 20¢ → level 67'
     );
     checkEq(
       settleBot._stopLevelCents({ strategy: 'edge', entryPriceCents: 55 }),

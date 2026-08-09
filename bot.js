@@ -120,15 +120,13 @@ function settleRankAskScore(priceCents, { richFloorCents = 94, usedLateBand = fa
 
 /**
  * Minimum cents of upside to settlement (100 − ask) required to open a settle
- * trade. Default = settle stop (need at least as much reward as stop risk).
- * 0 = off. Blocks 94–95¢ "almost certain" tickets with terrible R:R.
+ * trade. Default 8¢ (independent of stop — a wide 20¢ noise stop must not
+ * force asks ≤80¢). 0 = off. Still blocks 94–95¢ dead R:R tickets via rich floor.
  */
 function settleMinUpsideCents(config = {}) {
   const explicit = Number(config.settleMinUpsideCents);
   if (Number.isFinite(explicit) && explicit <= 0) return 0;
   if (Number.isFinite(explicit) && explicit > 0) return Math.min(50, Math.round(explicit));
-  const stop = Number(config.settleStopLossCents);
-  if (Number.isFinite(stop) && stop > 0) return Math.min(50, Math.round(stop));
   return 8;
 }
 
@@ -1080,9 +1078,10 @@ class TradingBot {
       // Settle strategy: buy ask in [min,max]¢; tiered target/stale exit by entry
       // (see settleExitPlan), else hold to official settlement.
       settleEntryMinCents: 85,
-      settleEntryMaxCents: 92, // matches ≥8¢ upside vs default 8¢ stop
-      settleStopLossCents: 8, // tighter than edge — max win to 100 is only ~5–15¢
-      // Reject asks with less upside to 100 than this (default = stop). 0 = off.
+      settleEntryMaxCents: 92, // keep mid-band; min upside filter is separate (8¢)
+      // Wide vs 8¢: Kalshi mid-band often wicks 10–15¢ without thesis death.
+      settleStopLossCents: 20,
+      // Reject asks with less upside to 100 than this. Independent of stop. 0 = off.
       settleMinUpsideCents: 8,
       settleMinMinutesToOpen: 0.5, // still need a little time; 0 = allow until last seconds
       settleMaxMinutesToOpen: 12, // late-ish windows (was 8 — early 85¢ quotes looked stuck)

@@ -1457,7 +1457,7 @@ async function loadBotConfigIntoForm() {
     const settleMax = document.getElementById('bot-settle-max');
     if (settleMax) settleMax.value = c.settleEntryMaxCents != null ? c.settleEntryMaxCents : 92;
     const settleStop = document.getElementById('bot-settle-stoploss');
-    if (settleStop) settleStop.value = c.settleStopLossCents != null ? c.settleStopLossCents : 8;
+    if (settleStop) settleStop.value = c.settleStopLossCents != null ? c.settleStopLossCents : 20;
     const settleMaxMin = document.getElementById('bot-settle-maxmin');
     if (settleMaxMin) settleMaxMin.value = c.settleMaxMinutesToOpen != null ? c.settleMaxMinutesToOpen : 12;
     const settleCd = document.getElementById('bot-settle-cooldown');
@@ -1545,7 +1545,7 @@ async function saveBotConfig(opts = {}) {
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '85'),
     settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '92'),
-    settleStopLossCents: parseFloat(document.getElementById('bot-settle-stoploss')?.value || '8'),
+    settleStopLossCents: parseFloat(document.getElementById('bot-settle-stoploss')?.value || '20'),
     settleMaxMinutesToOpen: parseFloat(document.getElementById('bot-settle-maxmin')?.value || '12'),
     settlePostStopSameSideCooldownMinutes: parseFloat(
       document.getElementById('bot-settle-cooldown')?.value || '5'
