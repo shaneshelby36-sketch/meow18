@@ -21,6 +21,15 @@ function priceInCents(legacyCents, dollarValue) {
   return Number.isFinite(dollars) ? Math.round(dollars * 100) : null;
 }
 
+function sizeFromFp(legacy, fpValue) {
+  if (legacy != null && legacy !== '') {
+    const n = Number(legacy);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  const fp = Number.parseFloat(fpValue);
+  return Number.isFinite(fp) && fp >= 0 ? Math.floor(fp) : null;
+}
+
 function normalizeMarketPrices(market) {
   if (!market) return market;
   return {
@@ -30,6 +39,10 @@ function normalizeMarketPrices(market) {
     no_bid: priceInCents(market.no_bid, market.no_bid_dollars),
     no_ask: priceInCents(market.no_ask, market.no_ask_dollars),
     last_price: priceInCents(market.last_price, market.last_price_dollars),
+    yes_ask_size: sizeFromFp(market.yes_ask_size, market.yes_ask_size_fp),
+    no_ask_size: sizeFromFp(market.no_ask_size, market.no_ask_size_fp),
+    yes_bid_size: sizeFromFp(market.yes_bid_size, market.yes_bid_size_fp),
+    no_bid_size: sizeFromFp(market.no_bid_size, market.no_bid_size_fp),
   };
 }
 
@@ -49,7 +62,15 @@ function bookSideFromLegacy(side, action) {
  * Build Create Order V2 body (POST /portfolio/events/orders).
  * priceCents is the limit on the traded outcome (1–99), same as legacy yes_price/no_price.
  */
-function buildCreateOrderV2Body({ ticker, side, action, count, priceCents, clientOrderId }) {
+function buildCreateOrderV2Body({
+  ticker,
+  side,
+  action,
+  count,
+  priceCents,
+  clientOrderId,
+  timeInForce = 'good_till_canceled',
+}) {
   const rounded = Math.round(Number(priceCents));
   if (!Number.isFinite(rounded) || rounded < 1 || rounded > 99) {
     throw new Error(`Invalid Kalshi limit price: ${priceCents}`);
@@ -58,12 +79,14 @@ function buildCreateOrderV2Body({ ticker, side, action, count, priceCents, clien
   if (!Number.isFinite(contracts) || contracts < 1) {
     throw new Error(`Invalid Kalshi order count: ${count}`);
   }
+  const tif = String(timeInForce || 'good_till_canceled').toLowerCase();
+  const allowedTif = new Set(['good_till_canceled', 'immediate_or_cancel', 'fill_or_kill']);
   return {
     ticker,
     side: bookSideFromLegacy(side, action),
     count: `${contracts}.00`,
     price: (rounded / 100).toFixed(4),
-    time_in_force: 'good_till_canceled',
+    time_in_force: allowedTif.has(tif) ? tif : 'good_till_canceled',
     self_trade_prevention_type: 'taker_at_cross',
     client_order_id: clientOrderId || crypto.randomUUID(),
   };
@@ -98,8 +121,16 @@ function normalizeCreateOrderResponse(data) {
         ? { ...fromArray, order_id: orderId }
         : { ...(data || {}), order_id: orderId };
   // Preserve V2 immediate-fill fields on the nested order for seed polling.
-  if (nested.fill_count == null && data && data.fill_count != null) {
-    nested.fill_count = data.fill_count;
+  // Create Order V2 uses `fill_count`; keep `fills_count` alias for callers/tests.
+  if (nested.fills_count == null) {
+    const fc =
+      (data && data.fills_count != null ? data.fills_count : null) ??
+      (data && data.fill_count != null ? data.fill_count : null) ??
+      nested.fill_count;
+    if (fc != null) nested.fills_count = fc;
+  }
+  if (nested.fill_count == null && nested.fills_count != null) {
+    nested.fill_count = nested.fills_count;
   }
   if (nested.fill_count_fp == null && data && data.fill_count_fp != null) {
     nested.fill_count_fp = data.fill_count_fp;
@@ -252,7 +283,7 @@ class KalshiClient {
    * Uses Create Order V2 (POST /portfolio/events/orders). Returns a shape
    * compatible with legacy callers: `{ order: { order_id, ... } }`.
    */
-  async createOrder({ ticker, side, action, count, priceCents, clientOrderId }) {
+  async createOrder({ ticker, side, action, count, priceCents, clientOrderId, timeInForce }) {
     const body = buildCreateOrderV2Body({
       ticker,
       side,
@@ -260,6 +291,7 @@ class KalshiClient {
       count,
       priceCents,
       clientOrderId,
+      timeInForce,
     });
     const data = await this._request('POST', '/portfolio/events/orders', { body });
     return normalizeCreateOrderResponse(data);

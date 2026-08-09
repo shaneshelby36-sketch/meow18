@@ -2522,15 +2522,17 @@ class TradingBot {
     };
   }
 
-  /** Live entry ask for a side — used to re-quote between fill retries. */
-  async _refreshLiveEntryAskCents(ticker, side, fallbackCents) {
-    const fallback = Number(fallbackCents);
+  /**
+   * Live entry ask for a side — used to re-quote before IOC.
+   * Returns null when the book can't be read so callers don't +1¢ a stale plan price.
+   */
+  async _refreshLiveEntryAskCents(ticker, side) {
     try {
       const market = await this._getMarketBounded(ticker, 2000);
-      if (!market) return fallback;
+      if (!market) return null;
       if (side === 'yes') {
         const ask = Number(market.yes_ask);
-        return Number.isFinite(ask) && ask >= 1 && ask <= 99 ? ask : fallback;
+        return Number.isFinite(ask) && ask >= 1 && ask <= 99 ? ask : null;
       }
       if (Number.isFinite(market.no_ask) && market.no_ask >= 1 && market.no_ask <= 99) {
         return market.no_ask;
@@ -2543,7 +2545,7 @@ class TradingBot {
     } catch (err) {
       console.warn(`[bot] entry re-quote ${ticker} failed:`, err.message);
     }
-    return fallback;
+    return null;
   }
 
   async _getMarketBounded(ticker, timeoutMs = 4000) {
@@ -3029,14 +3031,65 @@ class TradingBot {
     };
 
     if (this.config.mode === 'live') {
-      // One attempt per coin. On miss, demote briefly and try another crypto first.
+      // One attempt per coin. Refresh ask, pay up to +1¢ to cross, IOC, size to book.
       let filled = 0;
       let fill = null;
       let orderId = null;
-      const workingPrice = priceCents;
+      let workingPrice = priceCents;
       let lastErr = null;
 
-      const attemptContracts = Math.max(1, Math.floor((stakeDollars * 100) / workingPrice));
+      // Re-quote so we don't GTC a ghost ask that already walked.
+      let liveMarket = null;
+      try {
+        liveMarket = await this._getMarketBounded(ticker, 2000);
+      } catch {
+        liveMarket = null;
+      }
+      const freshAsk = await this._refreshLiveEntryAskCents(ticker, side);
+      if (Number.isFinite(freshAsk)) {
+        const band = isSettle ? settleEffectiveEntryBand(this.config, minutesLeft) : null;
+        const richFloor = isSettle ? settleRichAskFloorCents(this.config) : 100;
+        const ceiling = isSettle
+          ? Math.min(99, richFloor - 1, Math.max(band?.max ?? priceCents, priceCents) + 1)
+          : Math.min(99, priceCents + 2);
+        // Cross by at most +1¢ above the live ask / planned price.
+        workingPrice = Math.min(ceiling, Math.max(priceCents, freshAsk, Math.min(99, freshAsk + 1)));
+        workingPrice = Math.max(1, Math.min(99, Math.round(workingPrice)));
+        if (isSettle) {
+          const upside = 100 - workingPrice;
+          const minUpside = settleMinUpsideCents(this.config);
+          if (
+            workingPrice >= richFloor ||
+            (minUpside > 0 && upside < minUpside) ||
+            !isSettleEntryPriceCents(workingPrice, this.config, minutesLeft)
+          ) {
+            // Can't cross without leaving the band — skip rather than rest a dead bid.
+            this._noteEntryMiss(symbol);
+            this.lastError =
+              `Skipped ${symbol} live entry: live ask ${freshAsk}¢ can't cross inside settle band ` +
+              `(would need ${workingPrice}¢). Focusing on other cryptos.`;
+            this.lastDecision = this.lastError;
+            this._logActivity(this.lastDecision, { kind: 'open', symbol, side, strategy: trade.strategy });
+            return false;
+          }
+        }
+      }
+
+      let attemptContracts = Math.max(1, Math.floor((stakeDollars * 100) / workingPrice));
+      const bookAskSize =
+        liveMarket &&
+        (side === 'yes'
+          ? Number(liveMarket.yes_ask_size)
+          : Number(liveMarket.no_ask_size) ||
+            (Number.isFinite(Number(liveMarket.yes_bid_size))
+              ? Number(liveMarket.yes_bid_size)
+              : NaN));
+      if (Number.isFinite(bookAskSize) && bookAskSize >= 1 && bookAskSize < attemptContracts) {
+        console.warn(
+          `[bot] sizing ${symbol} entry down ${attemptContracts}→${bookAskSize} to visible ask size`
+        );
+        attemptContracts = Math.max(1, Math.floor(bookAskSize));
+      }
       const attemptCost = attemptContracts * workingPrice;
       if (Number.isFinite(this.liveBalanceCents) && attemptCost > this.liveBalanceCents) {
         this.lastDecision =
@@ -3054,6 +3107,8 @@ class TradingBot {
           action: 'buy',
           count: trade.contracts,
           priceCents: workingPrice,
+          // IOC: take what's there now; don't rest a GTC that we cancel empty ~2s later.
+          timeInForce: 'immediate_or_cancel',
         });
         orderId = this._extractOrderId(order);
         if (!orderId) {
@@ -3061,9 +3116,9 @@ class TradingBot {
           console.error(`[bot] Live entry on ${symbol} returned no order_id`);
         } else {
           fill = await this._awaitOrderFill(orderId, {
-            minFill: trade.contracts,
-            attempts: 6,
-            delayMs: 350,
+            minFill: 1, // accept partials — full-size FOC was a common 0/N miss
+            attempts: 4,
+            delayMs: 200,
             seedOrder: order,
             heldSide: side,
             action: 'buy',
@@ -3073,7 +3128,7 @@ class TradingBot {
             const lastChance = await this._recoverOrderFillsAfterCancel(orderId, {
               priorOrder: fill.order,
               attempts: 2,
-              delayMs: 400,
+              delayMs: 300,
             });
             if (lastChance.filled > 0) {
               filled = lastChance.filled;
@@ -3086,7 +3141,9 @@ class TradingBot {
           }
           if (filled < 1) {
             lastErr = new Error(`no fill (0/${trade.contracts})`);
-            console.warn(`[bot] Live entry on ${symbol} did not fill @ ${workingPrice}¢`);
+            console.warn(
+              `[bot] Live entry on ${symbol} did not fill @ ${workingPrice}¢ (IOC; fresh ask was ${freshAsk}¢)`
+            );
           }
         }
       } catch (err) {

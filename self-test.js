@@ -508,6 +508,15 @@ function testKalshiClient() {
   checkEq(v2Body.time_in_force, 'good_till_canceled', 'V2 body TIF');
   checkEq(v2Body.self_trade_prevention_type, 'taker_at_cross', 'V2 body STP');
   checkEq(v2Body.client_order_id, 'cid-test', 'V2 body client_order_id');
+  const iocBody = buildCreateOrderV2Body({
+    ticker: 'KXBTC15M-TEST',
+    side: 'yes',
+    action: 'buy',
+    count: 5,
+    priceCents: 87,
+    timeInForce: 'immediate_or_cancel',
+  });
+  checkEq(iocBody.time_in_force, 'immediate_or_cancel', 'V2 body supports IOC for live entry');
   let badPrice = false;
   try {
     buildCreateOrderV2Body({
