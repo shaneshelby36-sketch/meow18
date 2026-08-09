@@ -310,9 +310,9 @@ const SETTLE_EXIT_TIERS = [
 ];
 
 /**
- * After bid tags 90¢, if at least this many minutes remain until close, skip
+ * After bid tags 90¢, if this many minutes or fewer remain until close, skip
  * TP / stuck / stale and hold to settlement. Stop-loss still applies.
- * Inside the final 3:30, tier exits can bank again.
+ * With more than 3:30 left after tagging 90, tier exits can still bank.
  */
 const SETTLE_TOUCHED90_HOLD_MINUTES = 3.5;
 
@@ -2998,15 +2998,15 @@ class TradingBot {
         heldSideBidCents >= 1 &&
         heldSideBidCents <= 99;
 
-      // Once bid tags 90¢ with ≥3:30 left → hold to settle (ignore TP/stuck/stale).
-      // Stop-loss above still applies. Inside the final 3:30, tier exits may bank.
+      // Once bid tags 90¢ and ≤3:30 left → hold to settle (ignore TP/stuck/stale).
+      // Stop-loss above still applies. With >3:30 left after tagging 90, tier exits may bank.
       if (bidOk && heldSideBidCents >= 90) {
         trade.settleTouched90 = true;
       }
       const holdToSettleAfter90 =
         trade.settleTouched90 === true &&
         Number.isFinite(minutesRemaining) &&
-        minutesRemaining >= SETTLE_TOUCHED90_HOLD_MINUTES;
+        minutesRemaining <= SETTLE_TOUCHED90_HOLD_MINUTES;
       const skipEarlyExits = plan.tier === 'hold' || holdToSettleAfter90;
 
       // Tier TP when not in the post-90 hold window (and not a ≥90 hold-tier entry).
@@ -3027,7 +3027,7 @@ class TradingBot {
         return;
       }
 
-      // ≥90 hold tier, or tagged 90 with ≥3:30 left: no stuck/stale — ride settlement.
+      // ≥90 hold tier, or tagged 90 with ≤3:30 left: no stuck/stale — ride settlement.
       if (skipEarlyExits) return;
 
       // Track "parked at/under entry" for stuck exits (hold tier skips these).

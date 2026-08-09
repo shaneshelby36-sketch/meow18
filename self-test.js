@@ -4314,7 +4314,7 @@ async function testBotTradingFlow() {
     checkEq(trade.exitPriceCents, 83, 'settle stuck sells at live bid');
   }
 
-  // Settle: touched 90¢ then dipped — with ≥3:30 left, hold (no stuck / stale)
+  // Settle: touched 90¢ then dipped — with >3:30 left, not forced to hold (stale clock not due yet)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -4335,11 +4335,11 @@ async function testBotTradingFlow() {
       settleTouched90: true,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
-    checkEq(trade.status, 'open', 'after tagging 90¢ with ≥3:30 left, dip holds (no stale)');
-    checkEq(trade.exitReason, undefined, 'touched-90 hold has no early exit when time remains');
+    checkEq(trade.status, 'open', 'touched-90 with >3:30 left does not force hold-to-settle yet');
+    checkEq(trade.exitReason, undefined, 'no early exit when >3:30 and stale clock not due');
   }
 
-  // Settle: touched 90 but inside final 3:30 — stale can bank green under target
+  // Settle: touched 90 and ≤3:30 left — hold (no stuck / stale), stop still on
   {
     const now = Date.now();
     const bot = makeBot(
@@ -4360,10 +4360,11 @@ async function testBotTradingFlow() {
       settleTouched90: true,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
-    checkEq(trade.exitReason, 'settle_stale', 'touched-90 inside final 3:30 can still stale-bank');
+    checkEq(trade.status, 'open', 'after tagging 90¢ with ≤3:30 left, dip holds (no stale)');
+    checkEq(trade.exitReason, undefined, 'touched-90 hold has no early exit in final 3:30');
   }
 
-  // Settle: after tagging 90 with ≥3:30 left, hold to settle (ignore TP) — stop still on
+  // Settle: after tagging 90 with >3:30 left, tier TP can still bank
   {
     const now = Date.now();
     const bot = makeBot(
@@ -4384,11 +4385,10 @@ async function testBotTradingFlow() {
       settleTouched90: true,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
-    checkEq(trade.status, 'open', 'touched-90 with ≥3:30 left holds through tier TP');
-    checkEq(trade.exitReason, undefined, 'no TP while holding to settle after 90');
+    checkEq(trade.exitReason, 'take_profit', 'touched-90 with >3:30 left banks tier TP');
   }
 
-  // Settle: after tagging 90 but inside final 3:30, tier TP can bank again
+  // Settle: after tagging 90 with ≤3:30 left, hold to settle (ignore TP) — stop still on
   {
     const now = Date.now();
     const bot = makeBot(
@@ -4409,7 +4409,8 @@ async function testBotTradingFlow() {
       settleTouched90: true,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
-    checkEq(trade.exitReason, 'take_profit', 'touched-90 inside final 3:30 banks tier TP');
+    checkEq(trade.status, 'open', 'touched-90 with ≤3:30 left holds through tier TP');
+    checkEq(trade.exitReason, undefined, 'no TP while holding to settle in final 3:30 after 90');
   }
 
   // Settle: stop still fires after tagging 90 with time left
@@ -4418,7 +4419,7 @@ async function testBotTradingFlow() {
     const bot = makeBot(
       mockClient({
         status: 'open',
-        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        close_time: new Date(now + 2 * 60 * 1000).toISOString(),
         yes_bid: 60,
         no_bid: 40,
       }),
@@ -4428,7 +4429,7 @@ async function testBotTradingFlow() {
       strategy: 'settle',
       side: 'yes',
       entryPriceCents: 87,
-      windowCloseTime: now + 10 * 60 * 1000,
+      windowCloseTime: now + 2 * 60 * 1000,
       openedAt: now,
       settleTouched90: true,
     });
@@ -4436,7 +4437,7 @@ async function testBotTradingFlow() {
     checkEq(trade.exitReason, 'stop_loss', 'stop still applies after touched-90 hold');
   }
 
-  // Late low-aim: bank 88 before 90; once 90 prints with time left, wait for settle
+  // Late low-aim: bank 88 before 90; once 90 prints with ≤3:30 left, wait for settle
   {
     const now = Date.now();
     const bankBot = makeBot(
@@ -4461,7 +4462,7 @@ async function testBotTradingFlow() {
     const waitBot = makeBot(
       mockClient({
         status: 'open',
-        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        close_time: new Date(now + 2 * 60 * 1000).toISOString(),
         yes_bid: 90,
         no_bid: 10,
       }),
@@ -4471,13 +4472,13 @@ async function testBotTradingFlow() {
       strategy: 'settle',
       side: 'yes',
       entryPriceCents: 72,
-      windowCloseTime: now + 10 * 60 * 1000,
+      windowCloseTime: now + 2 * 60 * 1000,
       openedAt: now,
     });
     await waitBot._manageOpenTrade(waitTrade, predictions(3000));
-    checkEq(waitTrade.status, 'open', 'late 72¢ at 90¢ stays open (wait for settle)');
+    checkEq(waitTrade.status, 'open', 'late 72¢ at 90¢ with ≤3:30 left stays open (wait for settle)');
     checkEq(waitTrade.settleTouched90, true, 'late 72¢ latches touched-90 at 90¢');
-    checkEq(waitTrade.exitReason, undefined, 'late 72¢ does not bank low TP after 90');
+    checkEq(waitTrade.exitReason, undefined, 'late 72¢ does not bank low TP in final 3:30 after 90');
   }
 
   // Settle Kalshi-only: no Coinbase ready still opens when ask is in band
