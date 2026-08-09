@@ -1468,7 +1468,7 @@ function wireBotConfigAutoSave() {
     'bot-settle-tiered',
     'bot-half-stake-near',
     'bot-second-green',
-    'bot-trade-hype',
+    'bot-trade-near',
     'bot-trade-doge',
     'bot-symbol',
     'bot-strategy-mode',
@@ -1536,14 +1536,14 @@ async function loadBotConfigIntoForm() {
         c.halfStakeNear === 'false';
       halfStakeNear.value = nearOff ? 'off' : 'on';
     }
-    const tradeHype = document.getElementById('bot-trade-hype');
-    if (tradeHype) {
+    const tradeNear = document.getElementById('bot-trade-near');
+    if (tradeNear) {
       const on =
-        c.tradeHype === true ||
-        c.tradeHype === 1 ||
-        c.tradeHype === 'on' ||
-        c.tradeHype === 'true';
-      tradeHype.value = on ? 'on' : 'off';
+        c.tradeNear === true ||
+        c.tradeNear === 1 ||
+        c.tradeNear === 'on' ||
+        c.tradeNear === 'true';
+      tradeNear.value = on ? 'on' : 'off';
     }
     const tradeDoge = document.getElementById('bot-trade-doge');
     if (tradeDoge) {
@@ -1636,7 +1636,7 @@ async function saveBotConfig(opts = {}) {
     settleLateEntryMinCents: parseFloat(document.getElementById('bot-settle-late-floor')?.value || '70'),
     settleStuckHoldMinutes: parseFloat(document.getElementById('bot-settle-stuck')?.value || '3'),
     halfStakeNear: document.getElementById('bot-half-stake-near')?.value || 'on',
-    tradeHype: document.getElementById('bot-trade-hype')?.value || 'off',
+    tradeNear: document.getElementById('bot-trade-near')?.value || 'off',
     tradeDoge: document.getElementById('bot-trade-doge')?.value || 'off',
     settleTieredExits: document.getElementById('bot-settle-tiered')?.value || 'on',
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),

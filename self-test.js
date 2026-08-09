@@ -4046,25 +4046,27 @@ async function testBotTradingFlow() {
   check(Object.keys(SERIES_BY_SYMBOL).includes('BTC'), 'BTC series mapped');
   check(Object.keys(SERIES_BY_SYMBOL).includes('DOGE'), 'DOGE series kept for exit management');
   check(Object.keys(SERIES_BY_SYMBOL).includes('HYPE'), 'HYPE series kept for exit management');
+  check(Object.keys(SERIES_BY_SYMBOL).includes('NEAR'), 'NEAR series kept for exit management');
   check(!isKalshiTradeEnabled('DOGE'), 'DOGE opted out by default');
-  check(!isKalshiTradeEnabled('HYPE'), 'HYPE opted out by default');
+  check(!isKalshiTradeEnabled('NEAR'), 'NEAR opted out by default');
+  check(isKalshiTradeEnabled('HYPE'), 'HYPE tradeable by default');
   check(isKalshiTradeEnabled('BTC'), 'BTC still tradeable');
   check(!tradeableKalshiSymbols().includes('DOGE'), 'AUTO tradeable set excludes DOGE by default');
-  check(!tradeableKalshiSymbols().includes('HYPE'), 'AUTO tradeable set excludes HYPE by default');
+  check(!tradeableKalshiSymbols().includes('NEAR'), 'AUTO tradeable set excludes NEAR by default');
+  check(tradeableKalshiSymbols().includes('HYPE'), 'AUTO tradeable set includes HYPE');
   check(tradeableKalshiSymbols().includes('ETH'), 'AUTO tradeable set includes ETH');
-  check(tradeableKalshiSymbols().includes('NEAR'), 'AUTO tradeable set includes NEAR');
   check(tradeableKalshiSymbols().includes('BNB'), 'AUTO tradeable set includes BNB');
   check(
-    isKalshiTradeEnabled('HYPE', { tradeHype: 'on' }),
-    'HYPE tradeable when tradeHype on'
+    isKalshiTradeEnabled('NEAR', { tradeNear: 'on' }),
+    'NEAR tradeable when tradeNear on'
   );
   check(
     isKalshiTradeEnabled('DOGE', { tradeDoge: 'on' }),
     'DOGE tradeable when tradeDoge on'
   );
   check(
-    tradeableKalshiSymbols({ tradeHype: 'on' }).includes('HYPE'),
-    'AUTO includes HYPE when enabled'
+    tradeableKalshiSymbols({ tradeNear: 'on' }).includes('NEAR'),
+    'AUTO includes NEAR when enabled'
   );
   checkEq(SERIES_BY_SYMBOL.NEAR, 'KXNEAR15M', 'NEAR Kalshi series');
   checkEq(SERIES_BY_SYMBOL.HYPE, 'KXHYPE15M', 'HYPE Kalshi series');
@@ -4392,7 +4394,6 @@ async function testBotTradingFlow() {
     };
     const kalshiOnlyBot = makeBot(mockClient(hypeMarket), {
       symbol: 'HYPE',
-      tradeHype: 'on',
       strategyMode: 'settle',
       settleEntryMinCents: 80,
       settleEntryMaxCents: 92,
@@ -4403,7 +4404,6 @@ async function testBotTradingFlow() {
       minEntryCents: 1,
     });
     kalshiOnlyBot.config.strategyMode = 'settle';
-    kalshiOnlyBot.config.tradeHype = 'on';
     kalshiOnlyBot.config.symbol = 'HYPE';
     const noFeedOpp = await kalshiOnlyBot._evaluateSymbolForSettle('HYPE', {
       HYPE: { ready: false, price: null },
@@ -4448,7 +4448,6 @@ async function testBotTradingFlow() {
       },
       {
         symbol: 'AUTO',
-        tradeHype: 'on',
         strategyMode: 'settle',
         settleEntryMinCents: 80,
         settleEntryMaxCents: 92,
@@ -4460,7 +4459,6 @@ async function testBotTradingFlow() {
       }
     );
     rankBot.config.strategyMode = 'settle';
-    rankBot.config.tradeHype = 'on';
     rankBot.config.symbol = 'AUTO';
     const ranked = await rankBot._rankSettleOpportunities({
       BTC: { ready: false },

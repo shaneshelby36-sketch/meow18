@@ -266,14 +266,14 @@
               <option value="HYPE">HYPE</option>
               <option value="DOGE">DOGE</option>
             </select>
-            <span class="field-hint">AUTO scans enabled coins (BTC/ETH/SOL/XRP/BNB/NEAR by default). HYPE and DOGE stay off until you turn them on below. ZEC is dashboard-only (no Kalshi 15m).</span>
+            <span class="field-hint">AUTO scans enabled coins (BTC/ETH/SOL/XRP/BNB/HYPE by default). NEAR and DOGE stay off until you turn them on below. ZEC is dashboard-only (no Kalshi 15m).</span>
           </label>
-          <label>Trade HYPE
-            <select id="bot-trade-hype">
+          <label>Trade NEAR
+            <select id="bot-trade-near">
               <option value="off">Off (default)</option>
               <option value="on">On</option>
             </select>
-            <span class="field-hint">Off = skip HYPE for new entries (still manage any open HYPE). Flip On anytime to add it back to AUTO / single-symbol.</span>
+            <span class="field-hint">Off = skip NEAR for new entries (still manage any open NEAR). Flip On anytime to add it back to AUTO / single-symbol.</span>
           </label>
           <label>Trade DOGE
             <select id="bot-trade-doge">
@@ -392,7 +392,7 @@
               <option value="on">On (default)</option>
               <option value="off">Off — full stake</option>
             </select>
-            <span class="field-hint">Settle only: NEAR entries risk ½ stake; other enabled coins stay full size.</span>
+            <span class="field-hint">Settle only, when Trade NEAR is On: NEAR entries risk ½ stake; other coins stay full size.</span>
           </label>
           <label>Settle: only open with ≤ this many min left
             <div class="slider-row">

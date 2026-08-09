@@ -534,7 +534,7 @@ app.get("/", (req, res) => {
     HYPE: 'HYPE-USD',
     ZEC: 'ZEC-USD',
   };
-  // Same set the live AUTO bot can trade on Kalshi (ZEC: no 15m; HYPE/DOGE opt-in).
+  // Same set the live AUTO bot can trade on Kalshi (ZEC: no 15m; NEAR/DOGE opt-in).
   const AUTO_BACKTEST_SYMBOLS = tradeableKalshiSymbols(bot ? bot.config : null);
   const MAX_BACKTEST_HOURS = 168; // 7 full days of continuous minute data
 

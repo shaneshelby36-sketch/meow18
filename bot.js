@@ -71,11 +71,11 @@ const SERIES_BY_SYMBOL = {
 };
 
 // Opt-in coins: mapped for exits/management, but new entries stay off until
-// tradeDoge / tradeHype is flipped On in settings (can re-enable anytime).
-const OPTIONAL_TRADE_SYMBOLS = new Set(['DOGE', 'HYPE']);
+// tradeDoge / tradeNear is flipped On in settings (can re-enable anytime).
+const OPTIONAL_TRADE_SYMBOLS = new Set(['DOGE', 'NEAR']);
 
 /** Default opt-outs when config knobs are unset (export for tests). */
-const DISABLED_TRADE_SYMBOLS = new Set(['DOGE', 'HYPE']);
+const DISABLED_TRADE_SYMBOLS = new Set(['DOGE', 'NEAR']);
 
 function isOnOffEnabled(value, defaultOn = false) {
   if (value == null || value === '') return defaultOn;
@@ -102,7 +102,7 @@ function isKalshiTradeEnabled(symbol, config = null) {
   if (!SERIES_BY_SYMBOL[sym]) return false;
   if (!OPTIONAL_TRADE_SYMBOLS.has(sym)) return true;
   if (sym === 'DOGE') return isOnOffEnabled(config && config.tradeDoge, false);
-  if (sym === 'HYPE') return isOnOffEnabled(config && config.tradeHype, false);
+  if (sym === 'NEAR') return isOnOffEnabled(config && config.tradeNear, false);
   return false;
 }
 
@@ -970,7 +970,7 @@ const EDITABLE_STRING_FIELDS = {
   halfStakeNear: (v) => parseOnOffField(v, true),
   secondOpenRequiresGreen: (v) => parseOnOffField(v, true),
   tradeDoge: (v) => parseOnOffField(v, false),
-  tradeHype: (v) => parseOnOffField(v, false),
+  tradeNear: (v) => parseOnOffField(v, false),
   skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
 };
@@ -1221,7 +1221,7 @@ class TradingBot {
       secondOpenRequiresGreen: 'on',
       // Opt-in coins (off by default). Flip On anytime to let AUTO / single-symbol trade them.
       tradeDoge: 'off',
-      tradeHype: 'off',
+      tradeNear: 'off',
       skimMode: 'insurance', // 'insurance' | 'percent' | 'fixed' | 'off'
       skimPercent: 50, // used when skimMode === 'percent'
       skimFixedDollars: 5, // used when skimMode === 'fixed'
