@@ -4045,13 +4045,27 @@ async function testBotTradingFlow() {
   check(Object.keys(SERIES_BY_SYMBOL).includes('ETH'), 'ETH series mapped');
   check(Object.keys(SERIES_BY_SYMBOL).includes('BTC'), 'BTC series mapped');
   check(Object.keys(SERIES_BY_SYMBOL).includes('DOGE'), 'DOGE series kept for exit management');
-  check(!isKalshiTradeEnabled('DOGE'), 'DOGE opted out of new trades');
+  check(Object.keys(SERIES_BY_SYMBOL).includes('HYPE'), 'HYPE series kept for exit management');
+  check(!isKalshiTradeEnabled('DOGE'), 'DOGE opted out by default');
+  check(!isKalshiTradeEnabled('HYPE'), 'HYPE opted out by default');
   check(isKalshiTradeEnabled('BTC'), 'BTC still tradeable');
-  check(!tradeableKalshiSymbols().includes('DOGE'), 'AUTO tradeable set excludes DOGE');
+  check(!tradeableKalshiSymbols().includes('DOGE'), 'AUTO tradeable set excludes DOGE by default');
+  check(!tradeableKalshiSymbols().includes('HYPE'), 'AUTO tradeable set excludes HYPE by default');
   check(tradeableKalshiSymbols().includes('ETH'), 'AUTO tradeable set includes ETH');
   check(tradeableKalshiSymbols().includes('NEAR'), 'AUTO tradeable set includes NEAR');
-  check(tradeableKalshiSymbols().includes('HYPE'), 'AUTO tradeable set includes HYPE');
   check(tradeableKalshiSymbols().includes('BNB'), 'AUTO tradeable set includes BNB');
+  check(
+    isKalshiTradeEnabled('HYPE', { tradeHype: 'on' }),
+    'HYPE tradeable when tradeHype on'
+  );
+  check(
+    isKalshiTradeEnabled('DOGE', { tradeDoge: 'on' }),
+    'DOGE tradeable when tradeDoge on'
+  );
+  check(
+    tradeableKalshiSymbols({ tradeHype: 'on' }).includes('HYPE'),
+    'AUTO includes HYPE when enabled'
+  );
   checkEq(SERIES_BY_SYMBOL.NEAR, 'KXNEAR15M', 'NEAR Kalshi series');
   checkEq(SERIES_BY_SYMBOL.HYPE, 'KXHYPE15M', 'HYPE Kalshi series');
 
@@ -4156,12 +4170,17 @@ async function testBotTradingFlow() {
     checkEq(settleExitPlan(82).targetCents, 94, 'entry 82¢ aims for 94¢');
     checkEq(settleExitPlan(77).targetCents, 93, 'entry 77¢ aims for 93¢');
     checkEq(settleExitPlan(77).tier, 'low', 'entry 77¢ is low tier');
-    checkEq(settleExitPlan(72).targetCents, 92, 'late entry 72¢ aims for 92¢');
-    checkEq(settleExitPlan(72).staleMinutesLeft, 3.5, 'late entry stale @ 3.5m');
+    checkEq(settleExitPlan(72).targetCents, 88, 'late entry 72¢ aims for 88¢');
+    checkEq(settleExitPlan(72).staleMinutesLeft, 3.5, 'late 70–74 stale @ 3.5m');
+    checkEq(settleExitPlan(72).tier, 'late', 'entry 72¢ is late tier');
+    checkEq(settleExitPlan(65).targetCents, 85, 'deep late 65¢ aims for 85¢');
+    checkEq(settleExitPlan(65).staleMinutesLeft, 4, 'deep late stale @ 4m');
+    checkEq(settleExitPlan(65).tier, 'deep', 'entry 65¢ is deep tier');
     const dashTiers = settleExitTiersForDashboard();
     checkEq(dashTiers.length, SETTLE_EXIT_TIERS.length, 'dashboard tiers match SETTLE_EXIT_TIERS');
     checkEq(dashTiers[0].entryLabel, '≥90¢', 'dashboard first tier ≥90¢');
-    checkEq(dashTiers[4].aimLabel, '92¢', 'dashboard late tier aims 92¢');
+    checkEq(dashTiers[4].aimLabel, '88¢', 'dashboard 70–74 tier aims 88¢');
+    checkEq(dashTiers[5].aimLabel, '85¢', 'dashboard deep late aims 85¢');
     checkEq(settleExitPlan(94).targetCents, null, 'entry 94¢ holds to settle (no TP chase)');
     checkEq(settleExitPlan(90).tier, 'hold', 'entry 90¢ is hold tier');
     check(isSettleTieredExitsEnabled({}), 'tiered exits default on');
@@ -4311,7 +4330,51 @@ async function testBotTradingFlow() {
       settleTouched90: true,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
-    checkEq(trade.exitReason, 'take_profit', 'touched-90 still banks tier TP at aim');
+    checkEq(trade.exitReason, 'take_profit', 'touched-90 still banks high-aim tier TP (87→96)');
+  }
+
+  // Late low-aim: bank 88 before 90; once 90 prints, wait for settle (don't sell the low TP)
+  {
+    const now = Date.now();
+    const bankBot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 88,
+        no_bid: 12,
+      }),
+      { settleStopLossCents: 20 }
+    );
+    const bankTrade = openTrade(bankBot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 72,
+      windowCloseTime: now + 10 * 60 * 1000,
+      openedAt: now,
+    });
+    await bankBot._manageOpenTrade(bankTrade, predictions(3000));
+    checkEq(bankTrade.exitReason, 'take_profit', 'late 72¢ banks 88¢ TP before tagging 90');
+
+    const waitBot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 90,
+        no_bid: 10,
+      }),
+      { settleStopLossCents: 20 }
+    );
+    const waitTrade = openTrade(waitBot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 72,
+      windowCloseTime: now + 10 * 60 * 1000,
+      openedAt: now,
+    });
+    await waitBot._manageOpenTrade(waitTrade, predictions(3000));
+    checkEq(waitTrade.status, 'open', 'late 72¢ at 90¢ stays open (wait for settle)');
+    checkEq(waitTrade.settleTouched90, true, 'late 72¢ latches touched-90 at 90¢');
+    checkEq(waitTrade.exitReason, undefined, 'late 72¢ does not bank low TP after 90');
   }
 
   // Settle Kalshi-only: no Coinbase ready still opens when ask is in band
@@ -4329,6 +4392,7 @@ async function testBotTradingFlow() {
     };
     const kalshiOnlyBot = makeBot(mockClient(hypeMarket), {
       symbol: 'HYPE',
+      tradeHype: 'on',
       strategyMode: 'settle',
       settleEntryMinCents: 80,
       settleEntryMaxCents: 92,
@@ -4339,6 +4403,8 @@ async function testBotTradingFlow() {
       minEntryCents: 1,
     });
     kalshiOnlyBot.config.strategyMode = 'settle';
+    kalshiOnlyBot.config.tradeHype = 'on';
+    kalshiOnlyBot.config.symbol = 'HYPE';
     const noFeedOpp = await kalshiOnlyBot._evaluateSymbolForSettle('HYPE', {
       HYPE: { ready: false, price: null },
     });
@@ -4382,6 +4448,7 @@ async function testBotTradingFlow() {
       },
       {
         symbol: 'AUTO',
+        tradeHype: 'on',
         strategyMode: 'settle',
         settleEntryMinCents: 80,
         settleEntryMaxCents: 92,
@@ -4393,6 +4460,7 @@ async function testBotTradingFlow() {
       }
     );
     rankBot.config.strategyMode = 'settle';
+    rankBot.config.tradeHype = 'on';
     rankBot.config.symbol = 'AUTO';
     const ranked = await rankBot._rankSettleOpportunities({
       BTC: { ready: false },

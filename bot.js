@@ -70,16 +70,44 @@ const SERIES_BY_SYMBOL = {
   HYPE: 'KXHYPE15M',
 };
 
-// Opted out of new entries (AUTO + single-symbol). Series stay mapped so any
-// leftover open position can still be managed/exited. Dashboard still tracks price.
-const DISABLED_TRADE_SYMBOLS = new Set(['DOGE']);
+// Opt-in coins: mapped for exits/management, but new entries stay off until
+// tradeDoge / tradeHype is flipped On in settings (can re-enable anytime).
+const OPTIONAL_TRADE_SYMBOLS = new Set(['DOGE', 'HYPE']);
 
-function isKalshiTradeEnabled(symbol) {
-  return Boolean(SERIES_BY_SYMBOL[symbol]) && !DISABLED_TRADE_SYMBOLS.has(symbol);
+/** Default opt-outs when config knobs are unset (export for tests). */
+const DISABLED_TRADE_SYMBOLS = new Set(['DOGE', 'HYPE']);
+
+function isOnOffEnabled(value, defaultOn = false) {
+  if (value == null || value === '') return defaultOn;
+  if (value === true || value === 1) return true;
+  if (value === false || value === 0) return false;
+  const s = String(value).toLowerCase();
+  if (s === 'on' || s === 'true' || s === 'yes' || s === '1') return true;
+  if (s === 'off' || s === 'false' || s === 'no' || s === '0') return false;
+  return defaultOn;
 }
 
-function tradeableKalshiSymbols() {
-  return Object.keys(SERIES_BY_SYMBOL).filter((s) => isKalshiTradeEnabled(s));
+function parseOnOffField(v, defaultOn = false) {
+  if (v === true || v === 1) return 'on';
+  if (v === false || v === 0) return 'off';
+  if (v == null || v === '') return defaultOn ? 'on' : 'off';
+  const s = String(v).toLowerCase();
+  if (s === 'on' || s === 'true' || s === 'yes') return 'on';
+  if (s === 'off' || s === 'false' || s === 'no') return 'off';
+  return null;
+}
+
+function isKalshiTradeEnabled(symbol, config = null) {
+  const sym = String(symbol || '').toUpperCase();
+  if (!SERIES_BY_SYMBOL[sym]) return false;
+  if (!OPTIONAL_TRADE_SYMBOLS.has(sym)) return true;
+  if (sym === 'DOGE') return isOnOffEnabled(config && config.tradeDoge, false);
+  if (sym === 'HYPE') return isOnOffEnabled(config && config.tradeHype, false);
+  return false;
+}
+
+function tradeableKalshiSymbols(config = null) {
+  return Object.keys(SERIES_BY_SYMBOL).filter((s) => isKalshiTradeEnabled(s, config));
 }
 
 // Rough Kalshi 15m crypto liquidity preference (higher = usually tighter books).
@@ -258,15 +286,26 @@ const SETTLE_EXIT_TIERS = [
     aimLabel: '93¢',
     staleLabel: '≤3m left',
   },
+  // Late / deep entries: lower absolute TPs so we bank +10–18¢ instead of chasing 92.
   {
-    minEntry: 1,
+    minEntry: 70,
     maxEntry: 74,
-    targetCents: 92,
+    targetCents: 88,
     staleMinutesLeft: 3.5,
     tier: 'late',
-    entryLabel: '<75¢ (late)',
-    aimLabel: '92¢',
+    entryLabel: '70–74¢ (late)',
+    aimLabel: '88¢',
     staleLabel: '≤3.5m left',
+  },
+  {
+    minEntry: 1,
+    maxEntry: 69,
+    targetCents: 85,
+    staleMinutesLeft: 4,
+    tier: 'deep',
+    entryLabel: '<70¢ (late)',
+    aimLabel: '85¢',
+    staleLabel: '≤4m left',
   },
 ];
 
@@ -921,32 +960,17 @@ function applyProfitBuckets({
 }
 
 const EDITABLE_STRING_FIELDS = {
-  symbol: (v) => (v === 'AUTO' || isKalshiTradeEnabled(v) ? v : null),
+  symbol: (v) => {
+    const s = String(v || '').toUpperCase();
+    if (s === 'AUTO') return 'AUTO';
+    return SERIES_BY_SYMBOL[s] ? s : null;
+  },
   strategyMode: (v) => (['edge', 'settle'].includes(String(v || '').toLowerCase()) ? String(v).toLowerCase() : null),
-  settleTieredExits: (v) => {
-    if (v === true || v === 1) return 'on';
-    if (v === false || v === 0) return 'off';
-    const s = String(v || '').toLowerCase();
-    if (s === 'on' || s === 'true' || s === 'yes') return 'on';
-    if (s === 'off' || s === 'false' || s === 'no') return 'off';
-    return null;
-  },
-  halfStakeNear: (v) => {
-    if (v === true || v === 1) return 'on';
-    if (v === false || v === 0) return 'off';
-    const s = String(v || '').toLowerCase();
-    if (s === 'on' || s === 'true' || s === 'yes') return 'on';
-    if (s === 'off' || s === 'false' || s === 'no') return 'off';
-    return null;
-  },
-  secondOpenRequiresGreen: (v) => {
-    if (v === true || v === 1) return 'on';
-    if (v === false || v === 0) return 'off';
-    const s = String(v || '').toLowerCase();
-    if (s === 'on' || s === 'true' || s === 'yes') return 'on';
-    if (s === 'off' || s === 'false' || s === 'no') return 'off';
-    return null;
-  },
+  settleTieredExits: (v) => parseOnOffField(v, true),
+  halfStakeNear: (v) => parseOnOffField(v, true),
+  secondOpenRequiresGreen: (v) => parseOnOffField(v, true),
+  tradeDoge: (v) => parseOnOffField(v, false),
+  tradeHype: (v) => parseOnOffField(v, false),
   skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
 };
@@ -1195,6 +1219,9 @@ class TradingBot {
       maxOpenPositions: 2,
       // With ≥1 open: only allow another if an existing hold is green (bid ≥ entry).
       secondOpenRequiresGreen: 'on',
+      // Opt-in coins (off by default). Flip On anytime to let AUTO / single-symbol trade them.
+      tradeDoge: 'off',
+      tradeHype: 'off',
       skimMode: 'insurance', // 'insurance' | 'percent' | 'fixed' | 'off'
       skimPercent: 50, // used when skimMode === 'percent'
       skimFixedDollars: 5, // used when skimMode === 'fixed'
@@ -1211,7 +1238,7 @@ class TradingBot {
       ...loadConfigOverrides(), // saved runtime edits win over env/defaults, except `mode`/`liveAuthorized`
     };
     normalizeInsuranceThresholds(this.config);
-    if (this.config.symbol !== 'AUTO' && !isKalshiTradeEnabled(this.config.symbol)) {
+    if (this.config.symbol !== 'AUTO' && !isKalshiTradeEnabled(this.config.symbol, this.config)) {
       console.warn(
         `[bot] ${this.config.symbol} is opted out of trading — switching symbol to AUTO`
       );
@@ -1331,6 +1358,10 @@ class TradingBot {
       applied[field] = value;
     }
     normalizeInsuranceThresholds(this.config);
+    if (this.config.symbol !== 'AUTO' && !isKalshiTradeEnabled(this.config.symbol, this.config)) {
+      this.config.symbol = 'AUTO';
+      applied.symbol = 'AUTO';
+    }
     if (applied.insuranceCapDollars != null) applied.insuranceCapDollars = this.config.insuranceCapDollars;
     if (applied.insuranceFloorDollars != null) applied.insuranceFloorDollars = this.config.insuranceFloorDollars;
     if (applied.insuranceOverflowDollars != null) {
@@ -2956,8 +2987,13 @@ class TradingBot {
       }
       const skipEarlyExits = plan.tier === 'hold' || trade.settleTouched90 === true;
 
-      // Still bank tier TP if we print the aim (e.g. 85→96) even after tagging 90.
+      // Tier TP: bank the aim when printed — unless we've already tagged 90¢ on a
+      // low-aim late entry (85/88). Those wait for settlement once 90 prints.
+      // High aims (93+) still bank after a 90 tag (e.g. 87→96).
+      const aimAbove90 = plan.targetCents != null && plan.targetCents > 90;
+      const allowTierTp = !trade.settleTouched90 || aimAbove90;
       if (
+        allowTierTp &&
         bidOk &&
         plan.targetCents != null &&
         heldSideBidCents >= plan.targetCents &&
@@ -3813,7 +3849,7 @@ class TradingBot {
    * worth acting on (or the market/prediction data isn't available).
    */
   async _evaluateSymbolForEdge(symbol, predictions) {
-    if (!isKalshiTradeEnabled(symbol)) {
+    if (!isKalshiTradeEnabled(symbol, this.config)) {
       this.lastDecision = `Waiting: ${symbol} is opted out of trading.`;
       return null;
     }
@@ -3949,7 +3985,7 @@ class TradingBot {
       if (typeof onSkip === 'function') onSkip(symbol, msg);
       if (!quiet) this.lastDecision = msg;
     };
-    if (!isKalshiTradeEnabled(symbol)) {
+    if (!isKalshiTradeEnabled(symbol, this.config)) {
       say(`Waiting: ${symbol} is opted out of trading.`);
       return null;
     }
@@ -4187,7 +4223,7 @@ class TradingBot {
 
   async _rankSettleOpportunities(predictions, { preferOtherThan = null } = {}) {
     const cooling = this._entryMissCooldownSymbols();
-    const allTradeable = tradeableKalshiSymbols();
+    const allTradeable = tradeableKalshiSymbols(this.config);
     const noSpotLean = allTradeable.filter((sym) => !predictions[sym] || !predictions[sym].ready);
     // Settle scans every tradeable Kalshi series — Coinbase ready is optional (Kalshi-only).
     const candidates = allTradeable.filter(
@@ -4289,7 +4325,7 @@ class TradingBot {
    */
   async _findBestOpportunity(predictions, { preferOtherThan = null } = {}) {
     const cooling = this._entryMissCooldownSymbols();
-    const candidates = tradeableKalshiSymbols().filter(
+    const candidates = tradeableKalshiSymbols(this.config).filter(
       (sym) =>
         predictions[sym] &&
         !this._hasOpenOnSymbol(sym) &&
@@ -4452,6 +4488,7 @@ module.exports = {
   TradingBot,
   SERIES_BY_SYMBOL,
   DISABLED_TRADE_SYMBOLS,
+  OPTIONAL_TRADE_SYMBOLS,
   isKalshiTradeEnabled,
   tradeableKalshiSymbols,
   liquidityPriority,

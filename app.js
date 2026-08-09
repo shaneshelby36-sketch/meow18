@@ -1297,7 +1297,8 @@ const SETTLE_EXIT_TIERS_FALLBACK = [
   { entryLabel: '85–89¢', aimLabel: '96¢', staleLabel: '≤2m left' },
   { entryLabel: '80–84¢', aimLabel: '94¢', staleLabel: '≤2.5m left' },
   { entryLabel: '75–79¢', aimLabel: '93¢', staleLabel: '≤3m left' },
-  { entryLabel: '<75¢ (late)', aimLabel: '92¢', staleLabel: '≤3.5m left' },
+  { entryLabel: '70–74¢ (late)', aimLabel: '88¢', staleLabel: '≤3.5m left' },
+  { entryLabel: '<70¢ (late)', aimLabel: '85¢', staleLabel: '≤4m left' },
 ];
 
 function renderSettleExitTable(tiers) {
@@ -1463,7 +1464,15 @@ function wireBotConfigAutoSave() {
     el.addEventListener('change', scheduleAutoSaveBotConfig);
     if (el.tagName === 'INPUT') el.addEventListener('input', scheduleAutoSaveBotConfig);
   }
-  for (const id of ['bot-settle-tiered', 'bot-half-stake-near', 'bot-second-green', 'bot-symbol', 'bot-strategy-mode']) {
+  for (const id of [
+    'bot-settle-tiered',
+    'bot-half-stake-near',
+    'bot-second-green',
+    'bot-trade-hype',
+    'bot-trade-doge',
+    'bot-symbol',
+    'bot-strategy-mode',
+  ]) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('change', scheduleAutoSaveBotConfig);
   }
@@ -1526,6 +1535,24 @@ async function loadBotConfigIntoForm() {
         c.halfStakeNear === 'off' ||
         c.halfStakeNear === 'false';
       halfStakeNear.value = nearOff ? 'off' : 'on';
+    }
+    const tradeHype = document.getElementById('bot-trade-hype');
+    if (tradeHype) {
+      const on =
+        c.tradeHype === true ||
+        c.tradeHype === 1 ||
+        c.tradeHype === 'on' ||
+        c.tradeHype === 'true';
+      tradeHype.value = on ? 'on' : 'off';
+    }
+    const tradeDoge = document.getElementById('bot-trade-doge');
+    if (tradeDoge) {
+      const on =
+        c.tradeDoge === true ||
+        c.tradeDoge === 1 ||
+        c.tradeDoge === 'on' ||
+        c.tradeDoge === 'true';
+      tradeDoge.value = on ? 'on' : 'off';
     }
     const settleTiered = document.getElementById('bot-settle-tiered');
     if (settleTiered) {
@@ -1609,6 +1636,8 @@ async function saveBotConfig(opts = {}) {
     settleLateEntryMinCents: parseFloat(document.getElementById('bot-settle-late-floor')?.value || '70'),
     settleStuckHoldMinutes: parseFloat(document.getElementById('bot-settle-stuck')?.value || '3'),
     halfStakeNear: document.getElementById('bot-half-stake-near')?.value || 'on',
+    tradeHype: document.getElementById('bot-trade-hype')?.value || 'off',
+    tradeDoge: document.getElementById('bot-trade-doge')?.value || 'off',
     settleTieredExits: document.getElementById('bot-settle-tiered')?.value || 'on',
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
