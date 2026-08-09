@@ -3648,8 +3648,9 @@ class TradingBot {
    * down to settleLateEntryMinCents (default 70) and take the closest ask to
    * the primary band (highest price). Soft thesis still applies.
    */
-  async _evaluateSymbolForSettle(symbol, predictions, { quiet = false } = {}) {
+  async _evaluateSymbolForSettle(symbol, predictions, { quiet = false, onSkip = null } = {}) {
     const say = (msg) => {
+      if (typeof onSkip === 'function') onSkip(symbol, msg);
       if (!quiet) this.lastDecision = msg;
     };
     if (!isKalshiTradeEnabled(symbol)) {
@@ -3878,27 +3879,61 @@ class TradingBot {
 
   async _rankSettleOpportunities(predictions, { preferOtherThan = null } = {}) {
     const cooling = this._entryMissCooldownSymbols();
-    const candidates = tradeableKalshiSymbols().filter(
+    const allTradeable = tradeableKalshiSymbols();
+    const notReady = allTradeable.filter((sym) => !predictions[sym] || !predictions[sym].ready);
+    const candidates = allTradeable.filter(
       (sym) =>
         predictions[sym] &&
+        predictions[sym].ready &&
         !this._hasOpenOnSymbol(sym) &&
         !this._hasRecentEntryMiss(sym)
     );
     if (candidates.length === 0) {
+      const readyHint = notReady.length ? ` Not ready (need Coinbase feed): ${notReady.join(', ')}.` : '';
       if (cooling.length) {
         this.lastDecision =
-          `Waiting: fill-miss cool-down on ${cooling.join(', ')} — not pinging those; waiting for other mid-band books.`;
+          `Waiting: fill-miss cool-down on ${cooling.join(', ')} — not pinging those.${readyHint}`;
+      } else {
+        this.lastDecision =
+          `Waiting: no tradeable coins ready for settle scan.${readyHint}`;
       }
       return [];
     }
+    const skips = [];
+    const shortSkip = (msg) => {
+      const m = String(msg || '');
+      if (/not ready|seeding/i.test(m)) return 'feed not ready';
+      if (/too rich|not enough upside|≥\d+¢/i.test(m)) return 'ask too rich / thin upside';
+      if (/stale zone|churn entry/i.test(m)) return 'already in stale window';
+      if (/leans NO/i.test(m)) return 'engine leans NO';
+      if (/leans YES/i.test(m)) return 'engine leans YES';
+      if (/outside .+¢/i.test(m)) return 'ask outside band';
+      if (/sit-out|same-side/i.test(m)) return 'same-side sit-out';
+      if (/min left/i.test(m)) return 'time window gate';
+      if (/no open Kalshi/i.test(m)) return 'no Kalshi market';
+      return m.replace(/^Waiting:\s*/i, '').slice(0, 48);
+    };
     const evaluations = await Promise.all(
-      candidates.map((sym) => this._evaluateSymbolForSettle(sym, predictions, { quiet: true }))
+      candidates.map((sym) =>
+        this._evaluateSymbolForSettle(sym, predictions, {
+          quiet: true,
+          onSkip: (s, msg) => {
+            if (skips.length < 12) skips.push({ symbol: s, why: shortSkip(msg) });
+          },
+        })
+      )
     );
     const valid = evaluations.filter(Boolean);
+    const skipLine = skips.length
+      ? skips.map((s) => `${s.symbol} (${s.why})`).join('; ')
+      : '';
+    const readyLine = notReady.length ? `Not ready: ${notReady.join(', ')}.` : '';
     if (valid.length === 0) {
-      this.lastDecision = cooling.length
-        ? `Waiting: no mid-band settle setup on free coins (cooling: ${cooling.join(', ')}). Skips ≥${settleRichAskFloorCents(this.config)}¢ / thin upside.`
-        : `Waiting: no mid-band settle setup right now (skips ≥${settleRichAskFloorCents(this.config)}¢ and upside < stop). Watching other cryptos.`;
+      this.lastDecision =
+        `Settle scan: no entry.` +
+        (readyLine ? ` ${readyLine}` : '') +
+        (skipLine ? ` Skipped: ${skipLine}.` : '') +
+        (cooling.length ? ` Cooling: ${cooling.join(', ')}.` : '');
       return [];
     }
     valid.sort((a, b) => {
@@ -3914,6 +3949,13 @@ class TradingBot {
       if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
       return liquidityPriority(b.symbol) - liquidityPriority(a.symbol);
     });
+    // Keep Decision honest when alts were in mind but lost to filters / ranking.
+    const best = valid[0];
+    const altNote = skipLine ? ` Also skipped: ${skipLine}.` : '';
+    const feedNote = readyLine ? ` ${readyLine}` : '';
+    this.lastDecision =
+      `Settle scan: best ${best.symbol} ${String(best.side).toUpperCase()} @ ${best.priceCents}¢` +
+      ` (${valid.length} mid-band).${feedNote}${altNote}`;
     return valid;
   }
 
