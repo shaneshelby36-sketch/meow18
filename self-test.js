@@ -3371,9 +3371,29 @@ async function testBotTradingFlow() {
     const firstOnly = makeBot(mockClient({}), { mode: 'live', liveAuthorized: true });
     const m0 = firstOnly._noteEntryMiss('SOL');
     checkEq(m0.cooldownMs, 60_000, 'first miss cools 1m');
-    const m1 = retryBot._noteEntryMiss('ETH');
+    const m1 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000);
     check(m1.streak >= 2, 'second miss escalates streak');
-    check(m1.cooldownMs >= 300_000, 'second miss cools ≥5m');
+    check(m1.cooldownMs >= 120_000, 'second miss cools ≥2m');
+    checkEq(m1.cooldownMs, 120_000, 'second miss cools exactly 2m');
+    const m2 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000);
+    checkEq(m2.cooldownMs, 180_000, 'third miss cools 3m');
+    const m3 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000);
+    checkEq(m3.cooldownMs, 240_000, 'fourth miss cools 4m');
+    // Session end (or new window) clears streak + cooldown
+    const sessionBot = makeBot(mockClient({}), { mode: 'live', liveAuthorized: true });
+    const sessionClose = Date.now() + 60_000;
+    sessionBot._noteEntryMiss('BNB', null, sessionClose);
+    sessionBot._noteEntryMiss('BNB', null, sessionClose);
+    checkEq(sessionBot._entryMissStreak.BNB, 2, 'streak is 2 mid-session');
+    check(
+      sessionBot._expireEntryMissIfSessionEnded('BNB', sessionClose + 1),
+      'expire returns true after session close'
+    );
+    check(!sessionBot._hasRecentEntryMiss('BNB'), 'no cooldown after session end');
+    checkEq(sessionBot._entryMissStreak.BNB, undefined, 'streak cleared after session end');
+    const mFresh = sessionBot._noteEntryMiss('BNB', null, Date.now() + 600_000);
+    checkEq(mFresh.streak, 1, 'next session starts at miss #1 again');
+    checkEq(mFresh.cooldownMs, 60_000, 'next session first miss is 1m again');
   }
 
   // Live entry: all attempts miss → no trade (single attempt)

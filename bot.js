@@ -1274,8 +1274,11 @@ class TradingBot {
     this.lastError = null;
     this.lastDecision = 'Waiting for a prediction cycle.';
     // Symbol → timestamp until which we demote after a live entry fill miss
-    // (try other cryptos first, then allow retry).
+    // (try other cryptos first, then allow retry). Streak resets when that
+    // coin's Kalshi session ends (or on a successful fill / any close).
     this._entryMissUntil = Object.create(null);
+    this._entryMissStreak = Object.create(null);
+    this._entryMissSessionClose = Object.create(null);
     const runState = loadRunState();
     this.isRunning = runState.isRunning !== false;
     this.runningSince = this.isRunning ? (Number(runState.runningSince) || Date.now()) : null;
@@ -2513,6 +2516,8 @@ class TradingBot {
       trade.closedAt = Date.now();
       trade.exitPriceCents = bookedExit;
       trade.exitReason = reason;
+      // New session / done with this coin's ticket — miss ladder starts fresh next window.
+      this._clearEntryMiss(trade.symbol);
       const entryFees = Math.max(0, Math.round(Number(trade.entryFeesCents) || 0));
       const exitFees = Math.max(0, Math.round(Number(trade.exitFeesCents) || 0));
       trade.feesCents = entryFees + exitFees;
@@ -3338,7 +3343,7 @@ class TradingBot {
             !isSettleEntryPriceCents(workingPrice, this.config, minutesLeft)
           ) {
             // Can't cross without leaving the band — skip rather than rest a dead bid.
-            this._noteEntryMiss(symbol);
+            this._noteEntryMiss(symbol, null, closeAt);
             this.lastError =
               `Skipped ${symbol} live entry: live ask ${freshAsk}¢ can't cross inside settle band ` +
               `(would need ${workingPrice}¢). Focusing on other cryptos.`;
@@ -3432,7 +3437,7 @@ class TradingBot {
       }
 
       if (filled < 1) {
-        const miss = this._noteEntryMiss(symbol);
+        const miss = this._noteEntryMiss(symbol, null, closeAt);
         const coolMin = Math.max(1, Math.round((miss.cooldownMs || 60_000) / 60000));
         this.lastError =
           `Live entry on ${symbol} did not fill` +
@@ -3544,22 +3549,30 @@ class TradingBot {
   /**
    * After a live fill miss, hard-skip this coin on an escalating ladder so we
    * stop pinging the same thin book and focus on other cryptos:
-   * 1m → 5m → 10m → 15m (cap).
+   * 1m → 2m → 3m → 4m (cap).
+   * Streak + cooldown reset when that coin's session ends (close time), on a
+   * successful fill, or when any open on that coin closes/settles.
    */
-  _noteEntryMiss(symbol, cooldownMs = null) {
+  _noteEntryMiss(symbol, cooldownMs = null, sessionCloseMs = null) {
     if (!symbol) return;
     const sym = String(symbol).toUpperCase();
+    this._expireEntryMissIfSessionEnded(sym);
     if (!this._entryMissStreak) this._entryMissStreak = Object.create(null);
     if (!this._entryMissUntil) this._entryMissUntil = Object.create(null);
+    if (!this._entryMissSessionClose) this._entryMissSessionClose = Object.create(null);
     const streak = (this._entryMissStreak[sym] || 0) + 1;
     this._entryMissStreak[sym] = streak;
-    const ladder = [60_000, 300_000, 600_000, 900_000];
+    const ladder = [60_000, 120_000, 180_000, 240_000];
     const ms =
       Number.isFinite(cooldownMs) && cooldownMs > 0
         ? cooldownMs
         : ladder[Math.min(streak - 1, ladder.length - 1)];
     this._entryMissUntil[sym] = Date.now() + ms;
-    return { streak, cooldownMs: ms };
+    const close = Number(sessionCloseMs);
+    if (Number.isFinite(close) && close > 0) {
+      this._entryMissSessionClose[sym] = close;
+    }
+    return { streak, cooldownMs: ms, sessionCloseMs: this._entryMissSessionClose[sym] };
   }
 
   _clearEntryMiss(symbol) {
@@ -3567,20 +3580,50 @@ class TradingBot {
     const sym = String(symbol).toUpperCase();
     if (this._entryMissUntil) delete this._entryMissUntil[sym];
     if (this._entryMissStreak) delete this._entryMissStreak[sym];
+    if (this._entryMissSessionClose) delete this._entryMissSessionClose[sym];
+  }
+
+  /**
+   * Drop miss streak/cooldown when the Kalshi session that caused the miss
+   * has ended, or when we see a different session close time (new window).
+   */
+  _expireEntryMissIfSessionEnded(symbol, now = Date.now(), currentSessionCloseMs = null) {
+    if (!symbol) return false;
+    const sym = String(symbol).toUpperCase();
+    const stored = this._entryMissSessionClose && Number(this._entryMissSessionClose[sym]);
+    if (Number.isFinite(stored) && stored > 0 && now >= stored) {
+      this._clearEntryMiss(sym);
+      return true;
+    }
+    const cur = Number(currentSessionCloseMs);
+    if (
+      Number.isFinite(stored) &&
+      stored > 0 &&
+      Number.isFinite(cur) &&
+      cur > 0 &&
+      cur !== stored
+    ) {
+      this._clearEntryMiss(sym);
+      return true;
+    }
+    return false;
   }
 
   _entryMissCooldownMs(symbol) {
+    this._expireEntryMissIfSessionEnded(symbol);
     if (!this._entryMissUntil || !symbol) return 0;
     const until = this._entryMissUntil[String(symbol).toUpperCase()];
     if (!Number.isFinite(until)) return 0;
     return Math.max(0, until - Date.now());
   }
 
-  _hasRecentEntryMiss(symbol) {
+  _hasRecentEntryMiss(symbol, currentSessionCloseMs = null) {
+    this._expireEntryMissIfSessionEnded(symbol, Date.now(), currentSessionCloseMs);
     if (!this._entryMissUntil || !symbol) return false;
     const until = this._entryMissUntil[String(symbol).toUpperCase()];
     if (!Number.isFinite(until)) return false;
     if (Date.now() >= until) {
+      // Cooldown elapsed mid-session — unlock retries but keep streak for ladder.
       delete this._entryMissUntil[String(symbol).toUpperCase()];
       return false;
     }
@@ -3591,9 +3634,12 @@ class TradingBot {
     if (!this._entryMissUntil) return [];
     const now = Date.now();
     const out = [];
-    for (const [sym, until] of Object.entries(this._entryMissUntil)) {
+    for (const sym of Object.keys(this._entryMissUntil)) {
+      this._expireEntryMissIfSessionEnded(sym, now);
+    }
+    for (const [sym, until] of Object.entries(this._entryMissUntil || {})) {
       if (Number.isFinite(until) && until > now) out.push(sym);
-      else delete this._entryMissUntil[sym];
+      else if (this._entryMissUntil) delete this._entryMissUntil[sym];
     }
     return out;
   }
