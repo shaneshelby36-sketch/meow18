@@ -1009,6 +1009,7 @@ async function testBotExits() {
       side: 'yes',
       entryPriceCents: 87,
       windowCloseTime: now + 10 * 60 * 1000,
+      openedAt: now, // fresh open — must not stuck-exit while still climbing
     });
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.status, 'open', 'settle holds under tier target early in window');
@@ -4114,12 +4115,63 @@ async function testBotTradingFlow() {
     checkEq(settleExitPlan(87).targetCents, 96, 'entry 87¢ aims for 96¢');
     checkEq(settleExitPlan(87).staleMinutesLeft, 2, 'entry 87¢ stale @ 2m left');
     checkEq(settleExitPlan(82).targetCents, 94, 'entry 82¢ aims for 94¢');
-    checkEq(settleExitPlan(72).targetCents, 93, 'late entry 72¢ aims for 93¢');
+    checkEq(settleExitPlan(77).targetCents, 93, 'entry 77¢ aims for 93¢');
+    checkEq(settleExitPlan(77).tier, 'low', 'entry 77¢ is low tier');
+    checkEq(settleExitPlan(72).targetCents, 92, 'late entry 72¢ aims for 92¢');
+    checkEq(settleExitPlan(72).staleMinutesLeft, 3.5, 'late entry stale @ 3.5m');
     checkEq(settleExitPlan(94).targetCents, null, 'entry 94¢ holds to settle (no TP chase)');
     checkEq(settleExitPlan(90).tier, 'hold', 'entry 90¢ is hold tier');
     check(isSettleTieredExitsEnabled({}), 'tiered exits default on');
     check(isSettleTieredExitsEnabled({ settleTieredExits: 'on' }), 'tiered exits on');
     check(!isSettleTieredExitsEnabled({ settleTieredExits: 'off' }), 'tiered exits off');
+  }
+
+  // Settle stuck: flat at entry for 4m → breakeven
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 80,
+        no_bid: 20,
+      }),
+      { settleStopLossCents: 20, settleStuckHoldMinutes: 4 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 80,
+      windowCloseTime: now + 10 * 60 * 1000,
+      openedAt: now - 5 * 60 * 1000,
+      _settleNearEntrySince: now - 5 * 60 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.exitReason, 'breakeven', 'settle stuck flat exits breakeven');
+  }
+
+  // Settle stuck: small green parked under target → settle_stuck
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 83,
+        no_bid: 17,
+      }),
+      { settleStopLossCents: 20, settleStuckHoldMinutes: 4 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 80,
+      windowCloseTime: now + 10 * 60 * 1000,
+      openedAt: now - 5 * 60 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.exitReason, 'settle_stuck', 'settle stuck banks small green');
+    checkEq(trade.exitPriceCents, 83, 'settle stuck sells at live bid');
   }
 
   // Settle Kalshi-only: no Coinbase ready still opens when ask is in band

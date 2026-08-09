@@ -1271,6 +1271,7 @@ const SLIDER_UNITS = {
   'bot-settle-cooldown': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
   'bot-settle-late-min': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
   'bot-settle-late-floor': (v) => `${Math.round(v)}¢`,
+  'bot-settle-stuck': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
   'bot-stake': (v) => `$${Math.round(v)}`,
   'bot-maxpos': (v) => `${Math.round(v)}`,
   'bot-paper-balance': (v) => `$${Math.round(v)}`,
@@ -1365,6 +1366,7 @@ function wireSliderDisplays() {
     'bot-settle-cooldown',
     'bot-settle-late-min',
     'bot-settle-late-floor',
+    'bot-settle-stuck',
     'bot-stake',
     'bot-maxpos',
     'bot-paper-balance',
@@ -1417,6 +1419,7 @@ function wireBotConfigAutoSave() {
     'bot-settle-cooldown',
     'bot-settle-late-min',
     'bot-settle-late-floor',
+    'bot-settle-stuck',
     'bot-stake',
     'bot-maxpos',
     'bot-paper-balance',
@@ -1473,6 +1476,10 @@ async function loadBotConfigIntoForm() {
     if (settleLateFloor) {
       settleLateFloor.value = c.settleLateEntryMinCents != null ? c.settleLateEntryMinCents : 70;
     }
+    const settleStuck = document.getElementById('bot-settle-stuck');
+    if (settleStuck) {
+      settleStuck.value = c.settleStuckHoldMinutes != null ? c.settleStuckHoldMinutes : 4;
+    }
     const settleTiered = document.getElementById('bot-settle-tiered');
     if (settleTiered) {
       const tieredOff =
@@ -1517,6 +1524,7 @@ async function loadBotConfigIntoForm() {
       'bot-settle-cooldown',
       'bot-settle-late-min',
       'bot-settle-late-floor',
+      'bot-settle-stuck',
       'bot-stake',
       'bot-maxpos',
       'bot-paper-balance',
@@ -1552,6 +1560,7 @@ async function saveBotConfig(opts = {}) {
     ),
     settleLateEntryMinutes: parseFloat(document.getElementById('bot-settle-late-min')?.value || '3.5'),
     settleLateEntryMinCents: parseFloat(document.getElementById('bot-settle-late-floor')?.value || '70'),
+    settleStuckHoldMinutes: parseFloat(document.getElementById('bot-settle-stuck')?.value || '4'),
     settleTieredExits: document.getElementById('bot-settle-tiered')?.value || 'on',
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),

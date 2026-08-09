@@ -320,34 +320,41 @@
         </div>
 
         <div id="bot-settings-settle" class="bot-field-grid" hidden>
-          <p class="settings-hint">Buys YES or NO when the ask is in the band (default 85–92¢), with enough time left. Skips “rich” asks (≥94¢) and anything with less upside to 100¢ than the settle stop (default 8¢) — e.g. 95¢ only pays +5¢ but can stop −8¢. Soft filter: engine must not lean against the side. Late fallback can dip to ~70¢. Entry-tiered exits On = target/stale by entry; Off = stop + hold to settle.</p>
+          <p class="settings-hint">Buys YES or NO when the ask is in the band (you’re on ~75–92¢), with enough time left. Skips “rich” asks (≥94¢) and thin upside to 100. Soft filter: engine lean when Coinbase is ready. Late fallback can dip lower. Entry-tiered exits On = TP/stale/stuck by entry; Off = stop + hold to settle.</p>
           <label>Settle entry min (¢)
             <div class="slider-row">
-              <input id="bot-settle-min" type="range" min="70" max="95" step="1" />
+              <input id="bot-settle-min" type="range" min="65" max="95" step="1" />
               <span class="slider-value" id="bot-settle-min-value">—</span>
             </div>
-            <span class="field-hint">Lowest ask price allowed (default 85¢).</span>
+            <span class="field-hint">Lowest ask in the primary band (code default 85¢; many live setups use 75¢).</span>
           </label>
           <label>Settle entry max (¢)
             <div class="slider-row">
               <input id="bot-settle-max" type="range" min="75" max="98" step="1" />
               <span class="slider-value" id="bot-settle-max-value">—</span>
             </div>
-            <span class="field-hint">Highest ask allowed (default 92¢). Also requires upside to 100 ≥ settle stop (8¢) and skips ≥94¢ so AUTO hunts other coins instead of staring at dead R:R tickets.</span>
+            <span class="field-hint">Highest ask allowed (default 92¢). Also requires upside to 100 ≥ min upside and skips ≥94¢ so AUTO hunts other coins.</span>
           </label>
           <label>Settle stop-loss (¢ below entry)
             <div class="slider-row">
               <input id="bot-settle-stoploss" type="range" min="1" max="30" step="1" />
               <span class="slider-value" id="bot-settle-stoploss-value">—</span>
             </div>
-            <span class="field-hint">Default 20¢ — absorbs mid-band noise wicks. 8¢ was stopping real dumps and noise alike. Entry band / min upside stay separate (still skip ≥94¢ tickets).</span>
+            <span class="field-hint">Default 20¢ — absorbs mid-band noise wicks. Entry band / min upside stay separate (still skip ≥94¢ tickets).</span>
           </label>
-          <label>Entry-tiered exits (TP / stale by entry)
+          <label>Entry-tiered exits (TP / stale / stuck by entry)
             <select id="bot-settle-tiered">
               <option value="on">On (default)</option>
               <option value="off">Off — stop + hold to settle only</option>
             </select>
-            <span class="field-hint">On: ≥90¢ holds to settle; 85–89¢ aims 96¢; 80–84¢ aims 94¢; late &lt;80¢ aims 93¢ (stale green bank near close). Off: stop + hold to settlement only.</span>
+            <span class="field-hint">On: ≥90 hold; 85–89→96; 80–84→94; 75–79→93; &lt;75→92 (stale green near close). Stuck: after N min flat (±1¢) → breakeven; small green (+2–5¢) parked under target → bank. Off: stop + hold only.</span>
+          </label>
+          <label>Stuck exit after (min parked)
+            <div class="slider-row">
+              <input id="bot-settle-stuck" type="range" min="0" max="10" step="0.5" />
+              <span class="slider-value" id="bot-settle-stuck-value">—</span>
+            </div>
+            <span class="field-hint">If the bid sits at entry (±1¢) this long → breakeven. If it sits +2–5¢ under the tier target this long → bank (settle_stuck). 0 = off. Skips ≥90¢ hold tier. Default 4 min.</span>
           </label>
           <label>Settle: only open with ≤ this many min left
             <div class="slider-row">
