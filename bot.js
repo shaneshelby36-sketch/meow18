@@ -262,6 +262,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'postStopMaxOneMinutes',
   'postStopSameSideCooldownMinutes',
   'settlePostStopSameSideCooldownMinutes',
+  'settlePostStaleSameSideCooldownMinutes',
   'settleEntryMinCents',
   'settleEntryMaxCents',
   'settleStopLossCents',
@@ -560,18 +561,42 @@ function checkPostStopSameSideCooldown({
   cooldownMs = 0,
   now = Date.now(),
 }) {
+  return checkSameSideExitCooldown({
+    lastTrade: lastStopTrade,
+    exitReasons: ['stop_loss'],
+    forCandidateSymbol,
+    forCandidateSide,
+    cooldownMs,
+    now,
+    reasonVerb: 'stopped',
+  });
+}
+
+/**
+ * Same-coin same-side sit-out after listed exit reasons (stop, settle_stale, …).
+ * Blocks reopen churn (e.g. stale → reopen → stale in the same final minutes).
+ */
+function checkSameSideExitCooldown({
+  lastTrade,
+  exitReasons = ['stop_loss'],
+  forCandidateSymbol = null,
+  forCandidateSide = null,
+  cooldownMs = 0,
+  now = Date.now(),
+  reasonVerb = 'exited',
+}) {
   const maxMs = Number(cooldownMs);
   if (!Number.isFinite(maxMs) || maxMs <= 0) return { ok: true };
-  if (!lastStopTrade || lastStopTrade.exitReason !== 'stop_loss') return { ok: true };
+  if (!lastTrade || !exitReasons.includes(lastTrade.exitReason)) return { ok: true };
 
-  const closedAt = Number(lastStopTrade.closedAt);
+  const closedAt = Number(lastTrade.closedAt);
   if (!Number.isFinite(closedAt)) return { ok: true };
 
-  const stoppedSym = String(lastStopTrade.symbol || '').toUpperCase();
+  const prevSym = String(lastTrade.symbol || '').toUpperCase();
   const candSym = String(forCandidateSymbol || '').toUpperCase();
-  const stopSide = String(lastStopTrade.side || '').toLowerCase();
+  const prevSide = String(lastTrade.side || '').toLowerCase();
   const candSide = String(forCandidateSide || '').toLowerCase();
-  if (!stoppedSym || !candSym || candSym !== stoppedSym || candSide !== stopSide) {
+  if (!prevSym || !candSym || candSym !== prevSym || candSide !== prevSide) {
     return { ok: true };
   }
 
@@ -579,13 +604,27 @@ function checkPostStopSameSideCooldown({
 
   const mins = maxMs / 60000;
   const minsLabel = Number.isInteger(mins) ? String(mins) : String(Math.round(mins * 10) / 10);
-  const sideLabel = String(lastStopTrade.side || '').toUpperCase();
+  const sideLabel = String(lastTrade.side || '').toUpperCase();
+  const why = lastTrade.exitReason === 'stop_loss' ? 'stopped' : reasonVerb;
   return {
     ok: false,
     reason:
-      `Waiting: ${lastStopTrade.symbol} ${sideLabel} stopped — same-side sit-out ~${minsLabel}m ` +
-      `before knife-catch re-entry.`,
+      `Waiting: ${lastTrade.symbol} ${sideLabel} ${why} (${lastTrade.exitReason}) — same-side sit-out ~${minsLabel}m ` +
+      `before re-entry.`,
   };
+}
+
+/** Default minutes to sit out same side after settle_stale / settle take_profit. */
+const SETTLE_POST_STALE_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES = 3;
+
+/** Min time in trade before settle_stale may fire (avoids instant churn in final minutes). */
+const SETTLE_STALE_MIN_HOLD_MS = 90_000;
+
+function settlePostStaleSameSideCooldownMs(config = {}) {
+  const mins = Number(config.settlePostStaleSameSideCooldownMinutes);
+  if (Number.isFinite(mins) && mins <= 0) return 0;
+  if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 60 * 1000);
+  return Math.round(SETTLE_POST_STALE_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES * 60 * 1000);
 }
 
 /**
@@ -1049,6 +1088,8 @@ class TradingBot {
       settleMaxMinutesToOpen: 12, // late-ish windows (was 8 — early 85¢ quotes looked stuck)
       // Settle same-side sit-out after stop (longer than Edge — prevents SOL-style loops).
       settlePostStopSameSideCooldownMinutes: 5,
+      // After settle_stale / settle TP: don't reopen same coin+side for a few minutes.
+      settlePostStaleSameSideCooldownMinutes: 3,
       // Late fallback: if nothing in primary band and ≤ this many min left, allow down to late min.
       settleLateEntryMinutes: 3.5,
       settleLateEntryMinCents: 70,
@@ -2755,14 +2796,19 @@ class TradingBot {
         });
         return;
       }
+      const openedAt = Number(trade.openedAt);
+      const heldLongEnough =
+        !Number.isFinite(openedAt) || now - openedAt >= SETTLE_STALE_MIN_HOLD_MS;
       if (
         bidOk &&
+        heldLongEnough &&
         plan.staleMinutesLeft != null &&
         minutesRemaining <= plan.staleMinutesLeft &&
         heldSideBidCents >= trade.entryPriceCents &&
         (plan.targetCents == null || heldSideBidCents < plan.targetCents)
       ) {
         // Target not reached in time — bank green rather than wait on settle lag.
+        // Min hold blocks open→stale→reopen churn in the final minutes.
         await this._closePosition(trade, heldSideBidCents, 'settle_stale', {
           liveSellPriceCents: heldSideBidCents,
         });
@@ -3764,6 +3810,36 @@ class TradingBot {
       return null;
     }
 
+    // Don't open if we're already inside this entry's stale window — would
+    // churn: enter → immediately green → settle_stale → reopen (see BTC 7:25–7:27).
+    if (isSettleTieredExitsEnabled(this.config)) {
+      const entryPlan = settleExitPlan(pick.priceCents);
+      if (
+        entryPlan.staleMinutesLeft != null &&
+        minutesRemaining <= entryPlan.staleMinutesLeft
+      ) {
+        say(
+          `Waiting: ${symbol} settle — ≤${entryPlan.staleMinutesLeft}m left (already in stale zone); not opening a churn entry.`
+        );
+        return null;
+      }
+    }
+
+    const lastClosed = this.ledger.trades.find((t) => t.status === 'closed');
+    const staleSitOut = checkSameSideExitCooldown({
+      lastTrade: lastClosed,
+      exitReasons: ['settle_stale', 'take_profit'],
+      forCandidateSymbol: symbol,
+      forCandidateSide: pick.side,
+      cooldownMs: settlePostStaleSameSideCooldownMs(this.config),
+      now: Date.now(),
+      reasonVerb: 'banked',
+    });
+    if (!staleSitOut.ok) {
+      say(staleSitOut.reason);
+      return null;
+    }
+
     const recoveryCheck = await this._stoppedCoinRecoveryGate(
       symbol,
       pick.side,
@@ -4046,6 +4122,9 @@ module.exports = {
   isPostStopMaxOneActive,
   postStopSameSideCooldownMs,
   checkPostStopSameSideCooldown,
+  checkSameSideExitCooldown,
+  settlePostStaleSameSideCooldownMs,
+  SETTLE_STALE_MIN_HOLD_MS,
   stopTradeReferenceMs,
   tradeWindowCloseMs,
   isPostStopRecoverySessionExpired,

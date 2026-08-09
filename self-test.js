@@ -1047,10 +1047,34 @@ async function testBotExits() {
       side: 'yes',
       entryPriceCents: 87,
       windowCloseTime: now + 90 * 1000,
+      openedAt: now - 3 * 60 * 1000, // held long enough for stale
     });
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.exitReason, 'settle_stale', 'settle stale banks green before close');
     checkEq(trade.exitPriceCents, 93, 'settle stale sells at live bid');
+  }
+
+  // Settle: inside stale clock but held <90s — do not instant-stale (churn guard)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 90 * 1000).toISOString(),
+        yes_bid: 93,
+        no_bid: 7,
+      }),
+      { settleStopLossCents: 8 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 87,
+      windowCloseTime: now + 90 * 1000,
+      openedAt: now - 15_000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.status, 'open', 'settle stale waits for min hold (~90s)');
   }
 
   // Settle: underwater past stale deadline — do not force sell (stop/settle only)
