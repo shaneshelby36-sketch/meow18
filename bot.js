@@ -2924,6 +2924,15 @@ class TradingBot {
         Number.isFinite(heldSideBidCents) &&
         heldSideBidCents >= 1 &&
         heldSideBidCents <= 99;
+
+      // Once bid tags 90¢, latch hold-to-settle for dips (stuck/stale off; stop still on).
+      const RIDE_SETTLE_CENTS = 90;
+      if (bidOk && heldSideBidCents >= RIDE_SETTLE_CENTS) {
+        trade.settleTouched90 = true;
+      }
+      const skipEarlyExits = plan.tier === 'hold' || trade.settleTouched90 === true;
+
+      // Still bank tier TP if we print the aim (e.g. 85→96) even after tagging 90.
       if (
         bidOk &&
         plan.targetCents != null &&
@@ -2940,11 +2949,14 @@ class TradingBot {
         return;
       }
 
+      // Touched 90¢ (or entry ≥90): no stuck/stale — ride settlement through dips below 90.
+      if (skipEarlyExits) return;
+
       // Track "parked at/under entry" for stuck exits (hold tier skips these).
       // NOTE: Number(null)===0 is finite — never treat null/0 as a valid "since" stamp
       // or nearMs becomes ~epoch and breakeven fires on the next tick (BNB 30s BE).
       const stuckMs = settleStuckHoldMs(this.config);
-      if (bidOk && stuckMs > 0 && plan.tier !== 'hold' && Number.isFinite(entry)) {
+      if (bidOk && stuckMs > 0 && Number.isFinite(entry)) {
         const nearSinceRaw = Number(trade._settleNearEntrySince);
         const nearSinceOk = Number.isFinite(nearSinceRaw) && nearSinceRaw > 1e12;
         // Flat = at entry or 1¢ under — not green (+1 was falsely "flat" before).

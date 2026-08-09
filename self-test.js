@@ -1047,10 +1047,10 @@ async function testBotExits() {
       mockClient({
         status: 'open',
         close_time: new Date(now + 90 * 1000).toISOString(),
-        yes_bid: 93,
-        no_bid: 7,
+        yes_bid: 89, // under 90 so touched-90 latch does not skip stale
+        no_bid: 11,
       }),
-      { settleStopLossCents: 8 }
+      { settleStopLossCents: 8, settleStuckHoldMinutes: 0 }
     );
     const trade = openTrade(bot, {
       strategy: 'settle',
@@ -1061,7 +1061,7 @@ async function testBotExits() {
     });
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.exitReason, 'settle_stale', 'settle stale banks green before close');
-    checkEq(trade.exitPriceCents, 93, 'settle stale sells at live bid');
+    checkEq(trade.exitPriceCents, 89, 'settle stale sells at live bid');
   }
 
   // Settle: inside stale clock but held <90s — do not instant-stale (churn guard)
@@ -4241,6 +4241,55 @@ async function testBotTradingFlow() {
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.exitReason, 'settle_stuck', 'settle stuck banks small green');
     checkEq(trade.exitPriceCents, 83, 'settle stuck sells at live bid');
+  }
+
+  // Settle: touched 90¢ then dipped — hold (no stuck / stale), stop still works
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 90 * 1000).toISOString(),
+        yes_bid: 87,
+        no_bid: 13,
+      }),
+      { settleStopLossCents: 20, settleStuckHoldMinutes: 3 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 84,
+      windowCloseTime: now + 90 * 1000,
+      openedAt: now - 5 * 60 * 1000,
+      settleTouched90: true,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.status, 'open', 'after tagging 90¢, dip holds through stale window');
+    checkEq(trade.exitReason, undefined, 'touched-90 hold has no early exit');
+  }
+
+  // Settle: after tagging 90, still take tier TP if aim prints
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 96,
+        no_bid: 4,
+      }),
+      { settleStopLossCents: 20 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 87,
+      windowCloseTime: now + 10 * 60 * 1000,
+      openedAt: now,
+      settleTouched90: true,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.exitReason, 'take_profit', 'touched-90 still banks tier TP at aim');
   }
 
   // Settle Kalshi-only: no Coinbase ready still opens when ask is in band
