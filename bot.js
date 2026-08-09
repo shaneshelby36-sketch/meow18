@@ -3702,7 +3702,8 @@ class TradingBot {
    * Settle mode: buy a side in the primary band (default 85–95¢). If nothing
    * hits and ≤ settleLateEntryMinutes remain (default 3.5), expand the floor
    * down to settleLateEntryMinCents (default 70) and take the closest ask to
-   * the primary band (highest price). Soft thesis still applies.
+   * the primary band (highest price). Soft thesis (engine lean) applies only
+   * when Coinbase spot is ready; otherwise Kalshi quotes alone are enough.
    */
   async _evaluateSymbolForSettle(symbol, predictions, { quiet = false, onSkip = null } = {}) {
     const say = (msg) => {
@@ -3718,11 +3719,13 @@ class TradingBot {
       return null;
     }
 
-    const assetPrediction = predictions[symbol];
-    if (!assetPrediction || !assetPrediction.ready) {
-      say(`Waiting: ${symbol} prediction data is still seeding.`);
-      return null;
-    }
+    const assetPrediction = predictions && predictions[symbol];
+    const engineReady = Boolean(
+      assetPrediction &&
+        assetPrediction.ready &&
+        assetPrediction.windows &&
+        typeof assetPrediction.windows === 'object'
+    );
 
     const seriesTicker = SERIES_BY_SYMBOL[symbol];
     if (!seriesTicker) {
@@ -3778,7 +3781,10 @@ class TradingBot {
       return null;
     }
 
-    const window = this._pickWindow(assetPrediction.windows, minutesRemaining);
+    // Neutral placeholder when Coinbase isn't seeded — band/quote gates still apply.
+    const window = engineReady
+      ? this._pickWindow(assetPrediction.windows, minutesRemaining)
+      : { probabilityUp: 50, probabilityDown: 50, confidence: 0 };
     if (!window) {
       say(`Waiting: ${symbol} has no usable prediction window for settle.`);
       return null;
@@ -3847,24 +3853,30 @@ class TradingBot {
       return null;
     }
 
-    // Prefer engine-agreed side; then highest ask still under the rich floor.
-    const favorsYes = window.probabilityUp >= window.probabilityDown;
-    candidates.sort((a, b) => {
-      const aAgree = (a.side === 'yes') === favorsYes ? 0 : 1;
-      const bAgree = (b.side === 'yes') === favorsYes ? 0 : 1;
-      if (aAgree !== bAgree) return aAgree - bAgree;
-      return b.priceCents - a.priceCents;
-    });
+    // Prefer engine-agreed side when spot is ready; else highest ask under rich floor.
+    if (engineReady) {
+      const favorsYes = window.probabilityUp >= window.probabilityDown;
+      candidates.sort((a, b) => {
+        const aAgree = (a.side === 'yes') === favorsYes ? 0 : 1;
+        const bAgree = (b.side === 'yes') === favorsYes ? 0 : 1;
+        if (aAgree !== bAgree) return aAgree - bAgree;
+        return b.priceCents - a.priceCents;
+      });
+    } else {
+      candidates.sort((a, b) => b.priceCents - a.priceCents);
+    }
     const pick = candidates[0];
 
-    // Soft thesis: don't buy a side the engine currently leans against.
-    if (pick.side === 'yes' && window.probabilityUp < window.probabilityDown) {
-      say(`Waiting: ${symbol} settle YES @ ${pick.priceCents}¢ but engine leans NO.`);
-      return null;
-    }
-    if (pick.side === 'no' && window.probabilityDown < window.probabilityUp) {
-      say(`Waiting: ${symbol} settle NO @ ${pick.priceCents}¢ but engine leans YES.`);
-      return null;
+    // Soft thesis only with a live Coinbase lean — Kalshi-only skips this filter.
+    if (engineReady) {
+      if (pick.side === 'yes' && window.probabilityUp < window.probabilityDown) {
+        say(`Waiting: ${symbol} settle YES @ ${pick.priceCents}¢ but engine leans NO.`);
+        return null;
+      }
+      if (pick.side === 'no' && window.probabilityDown < window.probabilityUp) {
+        say(`Waiting: ${symbol} settle NO @ ${pick.priceCents}¢ but engine leans YES.`);
+        return null;
+      }
     }
 
     // Don't open if we're already inside this entry's stale window — would
@@ -3930,28 +3942,24 @@ class TradingBot {
         Math.max(0, 15 - Math.max(0, yesAsk - yesBid)),
       strategy: 'settle',
       settleLateEntry: usedLateBand,
+      engineReady,
     };
   }
 
   async _rankSettleOpportunities(predictions, { preferOtherThan = null } = {}) {
     const cooling = this._entryMissCooldownSymbols();
     const allTradeable = tradeableKalshiSymbols();
-    const notReady = allTradeable.filter((sym) => !predictions[sym] || !predictions[sym].ready);
+    const noSpotLean = allTradeable.filter((sym) => !predictions[sym] || !predictions[sym].ready);
+    // Settle scans every tradeable Kalshi series — Coinbase ready is optional (Kalshi-only).
     const candidates = allTradeable.filter(
-      (sym) =>
-        predictions[sym] &&
-        predictions[sym].ready &&
-        !this._hasOpenOnSymbol(sym) &&
-        !this._hasRecentEntryMiss(sym)
+      (sym) => !this._hasOpenOnSymbol(sym) && !this._hasRecentEntryMiss(sym)
     );
     if (candidates.length === 0) {
-      const readyHint = notReady.length ? ` Not ready (need Coinbase feed): ${notReady.join(', ')}.` : '';
       if (cooling.length) {
         this.lastDecision =
-          `Waiting: fill-miss cool-down on ${cooling.join(', ')} — not pinging those.${readyHint}`;
+          `Waiting: fill-miss cool-down on ${cooling.join(', ')} — not pinging those.`;
       } else {
-        this.lastDecision =
-          `Waiting: no tradeable coins ready for settle scan.${readyHint}`;
+        this.lastDecision = `Waiting: no tradeable coins available for settle scan.`;
       }
       return [];
     }
@@ -3983,11 +3991,14 @@ class TradingBot {
     const skipLine = skips.length
       ? skips.map((s) => `${s.symbol} (${s.why})`).join('; ')
       : '';
-    const readyLine = notReady.length ? `Not ready: ${notReady.join(', ')}.` : '';
+    const kalshiOnlyLine =
+      noSpotLean.length > 0
+        ? `Kalshi-only (no spot lean): ${noSpotLean.join(', ')}.`
+        : '';
     if (valid.length === 0) {
       this.lastDecision =
         `Settle scan: no entry.` +
-        (readyLine ? ` ${readyLine}` : '') +
+        (kalshiOnlyLine ? ` ${kalshiOnlyLine}` : '') +
         (skipLine ? ` Skipped: ${skipLine}.` : '') +
         (cooling.length ? ` Cooling: ${cooling.join(', ')}.` : '');
       return [];
@@ -4002,16 +4013,21 @@ class TradingBot {
       const aMiss = (this._entryMissStreak && this._entryMissStreak[a.symbol]) || 0;
       const bMiss = (this._entryMissStreak && this._entryMissStreak[b.symbol]) || 0;
       if (aMiss !== bMiss) return aMiss - bMiss;
+      // When scores tie, prefer a Coinbase lean over pure Kalshi-only.
+      const aLean = a.engineReady ? 1 : 0;
+      const bLean = b.engineReady ? 1 : 0;
+      if (aLean !== bLean) return bLean - aLean;
       if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
       return liquidityPriority(b.symbol) - liquidityPriority(a.symbol);
     });
     // Keep Decision honest when alts were in mind but lost to filters / ranking.
     const best = valid[0];
     const altNote = skipLine ? ` Also skipped: ${skipLine}.` : '';
-    const feedNote = readyLine ? ` ${readyLine}` : '';
+    const feedNote = kalshiOnlyLine ? ` ${kalshiOnlyLine}` : '';
+    const leanTag = best.engineReady ? '' : ' · no spot lean';
     this.lastDecision =
       `Settle scan: best ${best.symbol} ${String(best.side).toUpperCase()} @ ${best.priceCents}¢` +
-      ` (${valid.length} mid-band).${feedNote}${altNote}`;
+      ` (${valid.length} mid-band${leanTag}).${feedNote}${altNote}`;
     return valid;
   }
 

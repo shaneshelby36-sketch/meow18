@@ -4095,6 +4095,99 @@ async function testBotTradingFlow() {
     check(!isSettleTieredExitsEnabled({ settleTieredExits: 'off' }), 'tiered exits off');
   }
 
+  // Settle Kalshi-only: no Coinbase ready still opens when ask is in band
+  {
+    const now = Date.now();
+    const hypeMarket = {
+      ticker: 'KXHYPE15M-KONLY',
+      status: 'open',
+      floor_strike: 40,
+      close_time: new Date(now + 8 * 60 * 1000).toISOString(),
+      yes_bid: 86,
+      yes_ask: 88,
+      no_bid: 12,
+      no_ask: 14,
+    };
+    const kalshiOnlyBot = makeBot(mockClient(hypeMarket), {
+      symbol: 'HYPE',
+      strategyMode: 'settle',
+      settleEntryMinCents: 80,
+      settleEntryMaxCents: 92,
+      settleMinMinutesToOpen: 0.5,
+      settleMaxMinutesToOpen: 12,
+      settleStopLossCents: 20,
+      settleMinUpsideCents: 8,
+      minEntryCents: 1,
+    });
+    kalshiOnlyBot.config.strategyMode = 'settle';
+    const noFeedOpp = await kalshiOnlyBot._evaluateSymbolForSettle('HYPE', {
+      HYPE: { ready: false, price: null },
+    });
+    check(noFeedOpp, 'settle allows Kalshi-only when Coinbase not ready');
+    checkEq(noFeedOpp && noFeedOpp.side, 'yes', 'Kalshi-only picks YES in band');
+    checkEq(noFeedOpp && noFeedOpp.engineReady, false, 'Kalshi-only marks engineReady false');
+    checkEq(noFeedOpp && noFeedOpp.priceCents, 88, 'Kalshi-only uses yes ask');
+
+    // Ready + lean against still blocks
+    const leanNo = await kalshiOnlyBot._evaluateSymbolForSettle('HYPE', {
+      HYPE: {
+        ready: true,
+        price: 40,
+        windows: {
+          w5: { probabilityUp: 35, probabilityDown: 65, confidence: 70 },
+          w10: { probabilityUp: 35, probabilityDown: 65, confidence: 70 },
+          w15: { probabilityUp: 35, probabilityDown: 65, confidence: 70 },
+        },
+      },
+    });
+    checkEq(leanNo, null, 'settle still blocks when spot lean disagrees');
+    check(/leans NO/i.test(kalshiOnlyBot.lastDecision || ''), 'lean block decision mentions leans NO');
+
+    // Rank scan includes not-ready coins (not stuck on "Not ready")
+    const rankBot = makeBot(
+      {
+        hasCredentials: false,
+        async getMarket() {
+          return hypeMarket;
+        },
+        async getOpenMarkets(series) {
+          if (series === 'KXHYPE15M') return [hypeMarket];
+          return [];
+        },
+        async createOrder() {
+          throw new Error('unused');
+        },
+        async getBalance() {
+          return { balance: 0, portfolio_value: 0 };
+        },
+      },
+      {
+        symbol: 'AUTO',
+        strategyMode: 'settle',
+        settleEntryMinCents: 80,
+        settleEntryMaxCents: 92,
+        settleMinMinutesToOpen: 0.5,
+        settleMaxMinutesToOpen: 12,
+        settleStopLossCents: 20,
+        settleMinUpsideCents: 8,
+        minEntryCents: 1,
+      }
+    );
+    rankBot.config.strategyMode = 'settle';
+    rankBot.config.symbol = 'AUTO';
+    const ranked = await rankBot._rankSettleOpportunities({
+      BTC: { ready: false },
+      ETH: { ready: false },
+      SOL: { ready: false },
+      XRP: { ready: false },
+      BNB: { ready: false },
+      NEAR: { ready: false },
+      HYPE: { ready: false },
+    });
+    check(ranked.some((o) => o.symbol === 'HYPE'), 'settle rank includes Kalshi-only HYPE');
+    check(/Kalshi-only/i.test(rankBot.lastDecision || ''), 'decision notes Kalshi-only coins');
+  }
+
   // Settle toggle off: ignore entry-tiered TP even when target bid prints
   {
     const now = Date.now();
