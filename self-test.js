@@ -3011,22 +3011,30 @@ async function testBotTradingFlow() {
     });
     halfBot.config.strategyMode = 'settle';
     halfBot.config.halfStakeNear = 'on';
-    checkEq(halfBot._stakeDollarsForEntry(85, { settle: true, symbol: 'BNB' }), 10, 'BNB full stake');
-    checkEq(halfBot._stakeDollarsForEntry(79, { settle: true, symbol: 'BTC' }), 10, 'BTC full stake even below 80');
-    checkEq(halfBot._stakeDollarsForEntry(88, { settle: true, symbol: 'NEAR' }), 5, 'NEAR half stake');
-    checkEq(halfBot._stakeDollarsForEntry(65, { settle: true, symbol: 'NEAR' }), 5, 'NEAR half stake on late entry');
-    checkEq(halfBot._stakeDollarsForEntry(65, { settle: false, symbol: 'NEAR' }), 10, 'edge mode ignores NEAR half-stake');
+    checkEq(halfBot._stakeDollarsForEntry(85, { settle: true, symbol: 'BNB' }), 10, 'BNB full stake at 85');
+    checkEq(halfBot._stakeDollarsForEntry(80, { settle: true, symbol: 'BTC' }), 10, 'BTC full stake at exactly 80');
+    checkEq(halfBot._stakeDollarsForEntry(79, { settle: true, symbol: 'BTC' }), 2.5, 'BTC quarter stake below 80');
+    checkEq(halfBot._stakeDollarsForEntry(72, { settle: true, symbol: 'BNB' }), 2.5, 'BNB quarter stake late');
+    checkEq(halfBot._stakeDollarsForEntry(88, { settle: true, symbol: 'NEAR' }), 5, 'NEAR half stake at 88');
+    checkEq(halfBot._stakeDollarsForEntry(65, { settle: true, symbol: 'NEAR' }), 2.5, 'NEAR under 80 is quarter not half');
+    checkEq(halfBot._stakeDollarsForEntry(65, { settle: false, symbol: 'NEAR' }), 10, 'edge mode ignores settle sizing');
     halfBot.config.halfStakeNear = 'off';
-    checkEq(halfBot._stakeDollarsForEntry(88, { settle: true, symbol: 'NEAR' }), 10, 'NEAR half-stake off');
+    checkEq(halfBot._stakeDollarsForEntry(88, { settle: true, symbol: 'NEAR' }), 10, 'NEAR half-stake off at 88');
+    checkEq(halfBot._stakeDollarsForEntry(79, { settle: true, symbol: 'NEAR' }), 2.5, 'under 80 still quarter when NEAR half off');
     checkEq(
       halfBot._stakeDollarsForEntry(85, { settle: true, symbol: 'BNB', thirdSlot: true }),
       5,
-      '3rd open half stake'
+      '3rd open half stake at 85'
+    );
+    checkEq(
+      halfBot._stakeDollarsForEntry(72, { settle: true, symbol: 'BNB', thirdSlot: true }),
+      2.5,
+      '3rd under 80 stays quarter (no stack)'
     );
     checkEq(
       halfBot._stakeDollarsForEntry(88, { settle: true, symbol: 'NEAR', thirdSlot: true }),
       5,
-      '3rd + NEAR still half (no double-halve)'
+      '3rd + NEAR at 88 still half'
     );
     halfBot.openTrades = [
       { symbol: 'BTC', settleTouched90: true },
@@ -4286,7 +4294,32 @@ async function testBotTradingFlow() {
     checkEq(trade.exitPriceCents, 83, 'settle stuck sells at live bid');
   }
 
-  // Settle: touched 90¢ then dipped — hold (no stuck / stale), stop still works
+  // Settle: touched 90¢ then dipped — with ≥3:30 left, hold (no stuck / stale)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 5 * 60 * 1000).toISOString(),
+        yes_bid: 87,
+        no_bid: 13,
+      }),
+      { settleStopLossCents: 20, settleStuckHoldMinutes: 3 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 84,
+      windowCloseTime: now + 5 * 60 * 1000,
+      openedAt: now - 5 * 60 * 1000,
+      settleTouched90: true,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.status, 'open', 'after tagging 90¢ with ≥3:30 left, dip holds (no stale)');
+    checkEq(trade.exitReason, undefined, 'touched-90 hold has no early exit when time remains');
+  }
+
+  // Settle: touched 90 but inside final 3:30 — stale can bank green under target
   {
     const now = Date.now();
     const bot = makeBot(
@@ -4307,11 +4340,10 @@ async function testBotTradingFlow() {
       settleTouched90: true,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
-    checkEq(trade.status, 'open', 'after tagging 90¢, dip holds through stale window');
-    checkEq(trade.exitReason, undefined, 'touched-90 hold has no early exit');
+    checkEq(trade.exitReason, 'settle_stale', 'touched-90 inside final 3:30 can still stale-bank');
   }
 
-  // Settle: after tagging 90, still take tier TP if aim prints
+  // Settle: after tagging 90 with ≥3:30 left, hold to settle (ignore TP) — stop still on
   {
     const now = Date.now();
     const bot = makeBot(
@@ -4332,10 +4364,59 @@ async function testBotTradingFlow() {
       settleTouched90: true,
     });
     await bot._manageOpenTrade(trade, predictions(3000));
-    checkEq(trade.exitReason, 'take_profit', 'touched-90 still banks high-aim tier TP (87→96)');
+    checkEq(trade.status, 'open', 'touched-90 with ≥3:30 left holds through tier TP');
+    checkEq(trade.exitReason, undefined, 'no TP while holding to settle after 90');
   }
 
-  // Late low-aim: bank 88 before 90; once 90 prints, wait for settle (don't sell the low TP)
+  // Settle: after tagging 90 but inside final 3:30, tier TP can bank again
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 2 * 60 * 1000).toISOString(),
+        yes_bid: 96,
+        no_bid: 4,
+      }),
+      { settleStopLossCents: 20 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 87,
+      windowCloseTime: now + 2 * 60 * 1000,
+      openedAt: now,
+      settleTouched90: true,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.exitReason, 'take_profit', 'touched-90 inside final 3:30 banks tier TP');
+  }
+
+  // Settle: stop still fires after tagging 90 with time left
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 60,
+        no_bid: 40,
+      }),
+      { settleStopLossCents: 20 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 87,
+      windowCloseTime: now + 10 * 60 * 1000,
+      openedAt: now,
+      settleTouched90: true,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.exitReason, 'stop_loss', 'stop still applies after touched-90 hold');
+  }
+
+  // Late low-aim: bank 88 before 90; once 90 prints with time left, wait for settle
   {
     const now = Date.now();
     const bankBot = makeBot(

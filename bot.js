@@ -309,6 +309,13 @@ const SETTLE_EXIT_TIERS = [
   },
 ];
 
+/**
+ * After bid tags 90¢, if at least this many minutes remain until close, skip
+ * TP / stuck / stale and hold to settlement. Stop-loss still applies.
+ * Inside the final 3:30, tier exits can bank again.
+ */
+const SETTLE_TOUCHED90_HOLD_MINUTES = 3.5;
+
 function settleExitTiersForDashboard() {
   return SETTLE_EXIT_TIERS.map((t) => ({
     entryLabel: t.entryLabel,
@@ -1690,15 +1697,20 @@ class TradingBot {
 
   /**
    * Stake for this settle entry.
-   * - NEAR: ½ normal when halfStakeNear is on
-   * - 3rd concurrent open (only allowed while a hold has tagged 90¢): ½ normal
-   * Both map to half of base — no double-halving.
+   * - Ask &lt; 80¢: ¼ normal (all coins)
+   * - Else NEAR: ½ normal when halfStakeNear is on
+   * - Else 3rd concurrent open (touched-90 bonus slot): ½ normal
+   * Under-80 quarter wins over NEAR/3rd — no stacking to ⅛.
    * Edge mode: always full (unless caller forces settle sizing).
    */
   _stakeDollarsForEntry(priceCents, { settle = false, symbol = null, thirdSlot = false } = {}) {
     const base = Number(this._computeNextStake());
     const safeBase = Number.isFinite(base) && base > 0 ? base : Number(this.config.stakeDollars) || 10;
     if (!settle) return safeBase;
+    const p = Number(priceCents);
+    if (Number.isFinite(p) && p < 80) {
+      return Math.max(0.5, +(safeBase / 4).toFixed(2));
+    }
     const nearHalf = String(this.config.halfStakeNear == null ? 'on' : this.config.halfStakeNear).toLowerCase();
     const nearHalfOn = !(nearHalf === 'off' || nearHalf === 'false' || nearHalf === '0' || nearHalf === 'no');
     const halfNear = nearHalfOn && String(symbol || '').toUpperCase() === 'NEAR';
@@ -2981,19 +2993,20 @@ class TradingBot {
         heldSideBidCents >= 1 &&
         heldSideBidCents <= 99;
 
-      // Once bid tags 90¢, latch hold-to-settle for dips (stuck/stale off; stop still on).
+      // Once bid tags 90¢ with ≥3:30 left → hold to settle (ignore TP/stuck/stale).
+      // Stop-loss above still applies. Inside the final 3:30, tier exits may bank.
       if (bidOk && heldSideBidCents >= 90) {
         trade.settleTouched90 = true;
       }
-      const skipEarlyExits = plan.tier === 'hold' || trade.settleTouched90 === true;
+      const holdToSettleAfter90 =
+        trade.settleTouched90 === true &&
+        Number.isFinite(minutesRemaining) &&
+        minutesRemaining >= SETTLE_TOUCHED90_HOLD_MINUTES;
+      const skipEarlyExits = plan.tier === 'hold' || holdToSettleAfter90;
 
-      // Tier TP: bank the aim when printed — unless we've already tagged 90¢ on a
-      // low-aim late entry (85/88). Those wait for settlement once 90 prints.
-      // High aims (93+) still bank after a 90 tag (e.g. 87→96).
-      const aimAbove90 = plan.targetCents != null && plan.targetCents > 90;
-      const allowTierTp = !trade.settleTouched90 || aimAbove90;
+      // Tier TP when not in the post-90 hold window (and not a ≥90 hold-tier entry).
       if (
-        allowTierTp &&
+        !skipEarlyExits &&
         bidOk &&
         plan.targetCents != null &&
         heldSideBidCents >= plan.targetCents &&
@@ -3009,7 +3022,7 @@ class TradingBot {
         return;
       }
 
-      // Touched 90¢ (or entry ≥90): no stuck/stale — ride settlement through dips below 90.
+      // ≥90 hold tier, or tagged 90 with ≥3:30 left: no stuck/stale — ride settlement.
       if (skipEarlyExits) return;
 
       // Track "parked at/under entry" for stuck exits (hold tier skips these).
@@ -3478,15 +3491,22 @@ class TradingBot {
       const primary = settleEntryBand(this.config);
       const lateNote =
         eff.late && trade.entryPriceCents < primary.min ? ' · late fallback' : '';
-      const halfNote = thirdSlot
-        ? ' · half stake (3rd)'
-        : this._stakeDollarsForEntry(trade.entryPriceCents, { settle: true, symbol }) <
-            Number(this._computeNextStake()) - 0.001
-          ? ' · half stake'
-          : '';
+      const sized = this._stakeDollarsForEntry(trade.entryPriceCents, {
+        settle: true,
+        symbol,
+        thirdSlot,
+      });
+      const baseStake = Number(this._computeNextStake());
+      let sizeNote = '';
+      if (thirdSlot && trade.entryPriceCents >= 80) {
+        sizeNote = ' · half stake (3rd)';
+      } else if (Number.isFinite(sized) && Number.isFinite(baseStake) && sized < baseStake - 0.001) {
+        const ratio = sized / baseStake;
+        sizeNote = ratio <= 0.3 ? ' · quarter stake' : ' · half stake';
+      }
       this.lastDecision =
         `Opened ${symbol} ${side.toUpperCase()} settle position at ${trade.entryPriceCents}¢` +
-        ` (hold to settlement${lateNote}${halfNote}).`;
+        ` (hold to settlement${lateNote}${sizeNote}).`;
     } else {
       this.lastDecision =
         `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${trade.entryPriceCents}¢` +
@@ -4518,6 +4538,7 @@ module.exports = {
   checkSameSideExitCooldown,
   settlePostStaleSameSideCooldownMs,
   SETTLE_STALE_MIN_HOLD_MS,
+  SETTLE_TOUCHED90_HOLD_MINUTES,
   SETTLE_STUCK_HOLD_DEFAULT_MINUTES,
   stopTradeReferenceMs,
   tradeWindowCloseMs,
