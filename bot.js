@@ -213,36 +213,101 @@ function isSettleTieredExitsEnabled(config = {}) {
 }
 
 /**
+ * Single source of truth for settle entry → TP / stale-green table.
+ * Dashboard reads this via /api/bot/config; settleExitPlan uses the same rows.
+ * Edit here when changing tiers — UI updates automatically on next config load.
+ */
+const SETTLE_EXIT_TIERS = [
+  {
+    minEntry: 90,
+    maxEntry: 99,
+    targetCents: null,
+    staleMinutesLeft: null,
+    tier: 'hold',
+    entryLabel: '≥90¢',
+    aimLabel: 'hold to settle',
+    staleLabel: '—',
+  },
+  {
+    minEntry: 85,
+    maxEntry: 89,
+    targetCents: 96,
+    staleMinutesLeft: 2,
+    tier: 'high',
+    entryLabel: '85–89¢',
+    aimLabel: '96¢',
+    staleLabel: '≤2m left',
+  },
+  {
+    minEntry: 80,
+    maxEntry: 84,
+    targetCents: 94,
+    staleMinutesLeft: 2.5,
+    tier: 'mid',
+    entryLabel: '80–84¢',
+    aimLabel: '94¢',
+    staleLabel: '≤2.5m left',
+  },
+  {
+    minEntry: 75,
+    maxEntry: 79,
+    targetCents: 93,
+    staleMinutesLeft: 3,
+    tier: 'low',
+    entryLabel: '75–79¢',
+    aimLabel: '93¢',
+    staleLabel: '≤3m left',
+  },
+  {
+    minEntry: 1,
+    maxEntry: 74,
+    targetCents: 92,
+    staleMinutesLeft: 3.5,
+    tier: 'late',
+    entryLabel: '<75¢ (late)',
+    aimLabel: '92¢',
+    staleLabel: '≤3.5m left',
+  },
+];
+
+function settleExitTiersForDashboard() {
+  return SETTLE_EXIT_TIERS.map((t) => ({
+    entryLabel: t.entryLabel,
+    aimLabel: t.aimLabel,
+    staleLabel: t.staleLabel,
+    tier: t.tier,
+    targetCents: t.targetCents,
+    staleMinutesLeft: t.staleMinutesLeft,
+  }));
+}
+
+/**
  * Entry-tiered settle exits: target bid depends on fill price; if that target
  * is not reached by `staleMinutesLeft` remaining, bank a green bid instead of
- * sitting for settlement.
- *
- * Tuned for wider primary bands (e.g. 75–92) + late fallback (~65):
- *
- *   entry ≥90 → hold to settle (target null)
- *   entry 85–89 → aim 96¢, stale @ 2.0m left
- *   entry 80–84 → aim 94¢, stale @ 2.5m left
- *   entry 75–79 → aim 93¢, stale @ 3.0m left
- *   entry <75  → aim 92¢, stale @ 3.5m left (deep late)
+ * sitting for settlement. Tiers live in SETTLE_EXIT_TIERS (keep dashboard in sync).
  */
 function settleExitPlan(entryPriceCents) {
   const entry = Math.round(Number(entryPriceCents));
   if (!Number.isFinite(entry) || entry < 1) {
     return { targetCents: null, staleMinutesLeft: null, tier: 'invalid' };
   }
-  if (entry >= 90) {
-    return { targetCents: null, staleMinutesLeft: null, tier: 'hold', entry };
+  for (const t of SETTLE_EXIT_TIERS) {
+    if (entry >= t.minEntry && entry <= t.maxEntry) {
+      return {
+        targetCents: t.targetCents,
+        staleMinutesLeft: t.staleMinutesLeft,
+        tier: t.tier,
+        entry,
+      };
+    }
   }
-  if (entry >= 85) {
-    return { targetCents: 96, staleMinutesLeft: 2, tier: 'high', entry };
-  }
-  if (entry >= 80) {
-    return { targetCents: 94, staleMinutesLeft: 2.5, tier: 'mid', entry };
-  }
-  if (entry >= 75) {
-    return { targetCents: 93, staleMinutesLeft: 3, tier: 'low', entry };
-  }
-  return { targetCents: 92, staleMinutesLeft: 3.5, tier: 'late', entry };
+  const late = SETTLE_EXIT_TIERS[SETTLE_EXIT_TIERS.length - 1];
+  return {
+    targetCents: late.targetCents,
+    staleMinutesLeft: late.staleMinutesLeft,
+    tier: late.tier,
+    entry,
+  };
 }
 
 // Settings that can be safely edited at runtime (via the API/dashboard)
@@ -623,7 +688,7 @@ const SETTLE_POST_STALE_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES = 3;
 const SETTLE_STALE_MIN_HOLD_MS = 90_000;
 
 /** Default: after this long parked near entry / small-green, bank or scratch (0 = off). */
-const SETTLE_STUCK_HOLD_DEFAULT_MINUTES = 4;
+const SETTLE_STUCK_HOLD_DEFAULT_MINUTES = 3;
 
 function settleStuckHoldMs(config = {}) {
   const mins = Number(config.settleStuckHoldMinutes);
@@ -1120,7 +1185,7 @@ class TradingBot {
       settleTieredExits: 'on',
       // After this many minutes parked flat (±1¢) or small-green (+2..+5¢ under target), exit.
       // 0 = off. Does not apply to ≥90¢ hold-to-settle tier.
-      settleStuckHoldMinutes: 4,
+      settleStuckHoldMinutes: 3,
       // AUTO settle: prefer asks below this before 94¢+ “almost certain” tickets.
       settleRichAskFloorCents: 94,
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
@@ -2875,37 +2940,39 @@ class TradingBot {
         return;
       }
 
-      // Track "parked near entry" for stuck exits (hold tier skips these).
+      // Track "parked at/under entry" for stuck exits (hold tier skips these).
+      // NOTE: Number(null)===0 is finite — never treat null/0 as a valid "since" stamp
+      // or nearMs becomes ~epoch and breakeven fires on the next tick (BNB 30s BE).
       const stuckMs = settleStuckHoldMs(this.config);
       if (bidOk && stuckMs > 0 && plan.tier !== 'hold' && Number.isFinite(entry)) {
-        const nearFlat = Math.abs(heldSideBidCents - entry) <= 1;
+        const nearSinceRaw = Number(trade._settleNearEntrySince);
+        const nearSinceOk = Number.isFinite(nearSinceRaw) && nearSinceRaw > 1e12;
+        // Flat = at entry or 1¢ under — not green (+1 was falsely "flat" before).
+        const nearFlat = heldSideBidCents >= entry - 1 && heldSideBidCents <= entry;
         if (nearFlat) {
-          if (!Number.isFinite(Number(trade._settleNearEntrySince))) {
-            trade._settleNearEntrySince = now;
-          }
+          if (!nearSinceOk) trade._settleNearEntrySince = now;
         } else {
-          trade._settleNearEntrySince = null;
+          trade._settleNearEntrySince = undefined;
         }
         const openedAt = Number(trade.openedAt);
         const heldMs = Number.isFinite(openedAt) ? now - openedAt : 0;
-        const nearMs = Number.isFinite(Number(trade._settleNearEntrySince))
-          ? now - Number(trade._settleNearEntrySince)
-          : 0;
+        const nearSince = Number(trade._settleNearEntrySince);
+        const nearMs =
+          nearFlat && Number.isFinite(nearSince) && nearSince > 1e12 ? now - nearSince : 0;
 
-        // Small green parked under target for stuckMs wall-clock → bank it.
-        // Checked before flat BE so +2..+5¢ doesn't get labeled breakeven.
+        // Small green (+1..+5¢) parked under target for stuckMs → bank it.
         const underTarget =
           plan.targetCents == null || heldSideBidCents < plan.targetCents;
         const smallGreen =
-          heldSideBidCents >= entry + 2 && heldSideBidCents <= entry + 5;
+          heldSideBidCents >= entry + 1 && heldSideBidCents <= entry + 5;
         if (heldMs >= stuckMs && underTarget && smallGreen) {
           await this._closePosition(trade, heldSideBidCents, 'settle_stuck', {
             liveSellPriceCents: heldSideBidCents,
           });
           return;
         }
-        // Flat / ±1¢ for stuckMs → scratch at bid if not red.
-        if (nearMs >= stuckMs && heldSideBidCents >= entry && heldSideBidCents <= entry + 1) {
+        // Truly flat (≤ entry) for stuckMs continuous + held long enough → scratch.
+        if (heldMs >= stuckMs && nearMs >= stuckMs && heldSideBidCents <= entry) {
           await this._closePosition(trade, heldSideBidCents, 'breakeven', {
             liveSellPriceCents: heldSideBidCents,
           });
@@ -4353,6 +4420,8 @@ module.exports = {
   isSettleTrade,
   isSettleTieredExitsEnabled,
   settleExitPlan,
+  settleExitTiersForDashboard,
+  SETTLE_EXIT_TIERS,
   settleStuckHoldMs,
   settleRichAskFloorCents,
   settleRankAskScore,

@@ -991,6 +991,57 @@ body[data-view-mode="bot"] .asset-picker {
   font-weight: 400;
 }
 
+.settle-exit-table-wrap {
+  grid-column: 1 / -1;
+  margin: 4px 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-raised) 88%, transparent);
+}
+.settle-exit-table-wrap.is-disabled {
+  opacity: 0.45;
+}
+.settle-exit-table-title {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin: 0 0 8px;
+  font-family: var(--font-display);
+}
+.settle-exit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+.settle-exit-table th,
+.settle-exit-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.settle-exit-table th {
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.settle-exit-table td:first-child {
+  color: var(--text);
+  white-space: nowrap;
+}
+.settle-exit-table-loading {
+  color: var(--text-dim);
+  font-style: italic;
+}
+#settle-exit-table-note {
+  margin: 8px 0 0;
+}
+
 /* ---------- Sliders (bot settings) ---------- */
 
 .slider-row {

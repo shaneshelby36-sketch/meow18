@@ -1288,6 +1288,37 @@ function setBotStrategyTab(mode) {
   const settlePanel = document.getElementById('bot-settings-settle');
   if (edgePanel) edgePanel.hidden = strategy === 'settle';
   if (settlePanel) settlePanel.hidden = strategy !== 'settle';
+  syncSettleExitTableEnabled();
+}
+
+/** Fallback if API omits tiers (offline / old deploy). Keep in sync with bot SETTLE_EXIT_TIERS. */
+const SETTLE_EXIT_TIERS_FALLBACK = [
+  { entryLabel: '≥90¢', aimLabel: 'hold to settle', staleLabel: '—' },
+  { entryLabel: '85–89¢', aimLabel: '96¢', staleLabel: '≤2m left' },
+  { entryLabel: '80–84¢', aimLabel: '94¢', staleLabel: '≤2.5m left' },
+  { entryLabel: '75–79¢', aimLabel: '93¢', staleLabel: '≤3m left' },
+  { entryLabel: '<75¢ (late)', aimLabel: '92¢', staleLabel: '≤3.5m left' },
+];
+
+function renderSettleExitTable(tiers) {
+  const body = document.getElementById('settle-exit-table-body');
+  if (!body) return;
+  const rows = Array.isArray(tiers) && tiers.length ? tiers : SETTLE_EXIT_TIERS_FALLBACK;
+  body.innerHTML = rows
+    .map(
+      (t) =>
+        `<tr><td>${escapeHtml(t.entryLabel || '')}</td><td>${escapeHtml(t.aimLabel || '')}</td><td>${escapeHtml(t.staleLabel || '')}</td></tr>`
+    )
+    .join('');
+  syncSettleExitTableEnabled();
+}
+
+function syncSettleExitTableEnabled() {
+  const wrap = document.getElementById('settle-exit-table-wrap');
+  const tiered = document.getElementById('bot-settle-tiered');
+  if (!wrap) return;
+  const off = tiered && tiered.value === 'off';
+  wrap.classList.toggle('is-disabled', !!off);
 }
 
 function wireBotStrategyTabs() {
@@ -1436,6 +1467,8 @@ function wireBotConfigAutoSave() {
     const el = document.getElementById(id);
     if (el) el.addEventListener('change', scheduleAutoSaveBotConfig);
   }
+  const settleTieredEl = document.getElementById('bot-settle-tiered');
+  if (settleTieredEl) settleTieredEl.addEventListener('change', syncSettleExitTableEnabled);
 }
 
 async function loadBotConfigIntoForm() {
@@ -1446,6 +1479,7 @@ async function loadBotConfigIntoForm() {
     if (!res.ok) return;
     const data = await res.json();
     const c = data.config;
+    renderSettleExitTable(data.settleExitTiers);
     document.getElementById('bot-symbol').value = c.symbol;
     setBotStrategyTab(c.strategyMode || 'edge');
     const backtestSymbol = document.getElementById('backtest-symbol');
@@ -1482,7 +1516,7 @@ async function loadBotConfigIntoForm() {
     }
     const settleStuck = document.getElementById('bot-settle-stuck');
     if (settleStuck) {
-      settleStuck.value = c.settleStuckHoldMinutes != null ? c.settleStuckHoldMinutes : 4;
+      settleStuck.value = c.settleStuckHoldMinutes != null ? c.settleStuckHoldMinutes : 3;
     }
     const halfStakeNear = document.getElementById('bot-half-stake-near');
     if (halfStakeNear) {
@@ -1573,7 +1607,7 @@ async function saveBotConfig(opts = {}) {
     ),
     settleLateEntryMinutes: parseFloat(document.getElementById('bot-settle-late-min')?.value || '3.5'),
     settleLateEntryMinCents: parseFloat(document.getElementById('bot-settle-late-floor')?.value || '70'),
-    settleStuckHoldMinutes: parseFloat(document.getElementById('bot-settle-stuck')?.value || '4'),
+    settleStuckHoldMinutes: parseFloat(document.getElementById('bot-settle-stuck')?.value || '3'),
     halfStakeNear: document.getElementById('bot-half-stake-near')?.value || 'on',
     settleTieredExits: document.getElementById('bot-settle-tiered')?.value || 'on',
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
@@ -1604,6 +1638,8 @@ async function saveBotConfig(opts = {}) {
       return;
     }
     const saved = await res.json().catch(() => ({}));
+    if (saved.settleExitTiers) renderSettleExitTable(saved.settleExitTiers);
+    syncSettleExitTableEnabled();
     const skimText = formatSkimLabel(saved.config || payload);
     let msg = opts.auto ? `✓ Auto-saved — ${skimText}.` : `✓ Saved — ${skimText}.`;
     try {

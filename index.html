@@ -347,14 +347,30 @@
               <option value="on">On (default)</option>
               <option value="off">Off — stop + hold to settle only</option>
             </select>
-            <span class="field-hint">On: ≥90 hold; 85–89→96; 80–84→94; 75–79→93; &lt;75→92 (stale green near close). Stuck: after N min flat (±1¢) → breakeven; small green (+2–5¢) parked under target → bank. Off: stop + hold only.</span>
+            <span class="field-hint">On uses the table below. Stuck exits (flat / small-green) still follow the stuck slider. Off = stop + hold to settlement only.</span>
           </label>
+          <div id="settle-exit-table-wrap" class="settle-exit-table-wrap">
+            <div class="settle-exit-table-title">Exit plan by entry</div>
+            <table class="settle-exit-table" aria-label="Settle take-profit and stale exits by entry price">
+              <thead>
+                <tr>
+                  <th scope="col">Entry</th>
+                  <th scope="col">Aim</th>
+                  <th scope="col">Stale green if not there by</th>
+                </tr>
+              </thead>
+              <tbody id="settle-exit-table-body">
+                <tr><td colspan="3" class="settle-exit-table-loading">Loading…</td></tr>
+              </tbody>
+            </table>
+            <p class="field-hint" id="settle-exit-table-note">Live from bot tiers — updates when this table changes in code / deploy.</p>
+          </div>
           <label>Stuck exit after (min parked)
             <div class="slider-row">
               <input id="bot-settle-stuck" type="range" min="0" max="10" step="0.5" />
               <span class="slider-value" id="bot-settle-stuck-value">—</span>
             </div>
-            <span class="field-hint">If the bid sits at entry (±1¢) this long → breakeven. If it sits +2–5¢ under the tier target this long → bank (settle_stuck). 0 = off. Skips ≥90¢ hold tier. Default 4 min.</span>
+            <span class="field-hint">If the bid sits at/under entry this long → breakeven. If it sits +1–5¢ under the tier target this long → bank (settle_stuck). 0 = off. Skips ≥90¢ hold tier. Default 3 min.</span>
           </label>
           <label>Half stake on NEAR
             <select id="bot-half-stake-near">

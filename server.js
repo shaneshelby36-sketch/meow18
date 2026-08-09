@@ -13,7 +13,7 @@ const { buildPredictions } = require('./prediction');
 const { PredictionTracker } = require('./tracker');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
 const { KalshiClient } = require('./kalshiClient');
-const { TradingBot, SERIES_BY_SYMBOL, tradeableKalshiSymbols } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, tradeableKalshiSymbols, settleExitTiersForDashboard } = require('./bot');
 const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
 const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir, ARCHIVE_RETENTION_DAYS } = require('./paths');
 const APP_VERSION = require('./package.json').version;
@@ -469,7 +469,10 @@ app.get("/", (req, res) => {
       res.status(404).json({ enabled: false, message: 'Bot is not enabled (set KALSHI_ENABLED=true).' });
       return;
     }
-    res.json({ config: bot.config });
+    res.json({
+      config: bot.config,
+      settleExitTiers: settleExitTiersForDashboard(),
+    });
   });
 
   app.post('/api/bot/config', (req, res) => {
@@ -478,7 +481,7 @@ app.get("/", (req, res) => {
       return;
     }
     const result = bot.updateConfig(req.body || {});
-    res.json(result);
+    res.json({ ...result, settleExitTiers: settleExitTiersForDashboard() });
   });
 
   app.post('/api/bot/reset-paper', (req, res) => {
