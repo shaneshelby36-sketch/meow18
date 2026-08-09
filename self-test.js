@@ -3003,6 +3003,23 @@ async function testBotTradingFlow() {
   ];
   checkEq(stakeBot._computeNextStake(), 10, 'halve-after-win resets after loss');
 
+  {
+    const halfBot = makeBot(mockClient({}), {
+      stakeDollars: 10,
+      halfStakeNear: 'on',
+      strategyMode: 'settle',
+    });
+    halfBot.config.strategyMode = 'settle';
+    halfBot.config.halfStakeNear = 'on';
+    checkEq(halfBot._stakeDollarsForEntry(85, { settle: true, symbol: 'BNB' }), 10, 'BNB full stake');
+    checkEq(halfBot._stakeDollarsForEntry(79, { settle: true, symbol: 'BTC' }), 10, 'BTC full stake even below 80');
+    checkEq(halfBot._stakeDollarsForEntry(88, { settle: true, symbol: 'NEAR' }), 5, 'NEAR half stake');
+    checkEq(halfBot._stakeDollarsForEntry(65, { settle: true, symbol: 'NEAR' }), 5, 'NEAR half stake on late entry');
+    checkEq(halfBot._stakeDollarsForEntry(65, { settle: false, symbol: 'NEAR' }), 10, 'edge mode ignores NEAR half-stake');
+    halfBot.config.halfStakeNear = 'off';
+    checkEq(halfBot._stakeDollarsForEntry(88, { settle: true, symbol: 'NEAR' }), 10, 'NEAR half-stake off');
+  }
+
   // Live: official Kalshi result books 0/100 with NO sell order
   let liveOrders = 0;
   let getOrderCalls = 0;

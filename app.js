@@ -1432,6 +1432,10 @@ function wireBotConfigAutoSave() {
     el.addEventListener('change', scheduleAutoSaveBotConfig);
     if (el.tagName === 'INPUT') el.addEventListener('input', scheduleAutoSaveBotConfig);
   }
+  for (const id of ['bot-settle-tiered', 'bot-half-stake-near', 'bot-second-green', 'bot-symbol', 'bot-strategy-mode']) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', scheduleAutoSaveBotConfig);
+  }
 }
 
 async function loadBotConfigIntoForm() {
@@ -1479,6 +1483,15 @@ async function loadBotConfigIntoForm() {
     const settleStuck = document.getElementById('bot-settle-stuck');
     if (settleStuck) {
       settleStuck.value = c.settleStuckHoldMinutes != null ? c.settleStuckHoldMinutes : 4;
+    }
+    const halfStakeNear = document.getElementById('bot-half-stake-near');
+    if (halfStakeNear) {
+      const nearOff =
+        c.halfStakeNear === false ||
+        c.halfStakeNear === 0 ||
+        c.halfStakeNear === 'off' ||
+        c.halfStakeNear === 'false';
+      halfStakeNear.value = nearOff ? 'off' : 'on';
     }
     const settleTiered = document.getElementById('bot-settle-tiered');
     if (settleTiered) {
@@ -1561,6 +1574,7 @@ async function saveBotConfig(opts = {}) {
     settleLateEntryMinutes: parseFloat(document.getElementById('bot-settle-late-min')?.value || '3.5'),
     settleLateEntryMinCents: parseFloat(document.getElementById('bot-settle-late-floor')?.value || '70'),
     settleStuckHoldMinutes: parseFloat(document.getElementById('bot-settle-stuck')?.value || '4'),
+    halfStakeNear: document.getElementById('bot-half-stake-near')?.value || 'on',
     settleTieredExits: document.getElementById('bot-settle-tiered')?.value || 'on',
     stakeDollars: parseFloat(document.getElementById('bot-stake').value),
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),

@@ -866,6 +866,14 @@ const EDITABLE_STRING_FIELDS = {
     if (s === 'off' || s === 'false' || s === 'no') return 'off';
     return null;
   },
+  halfStakeNear: (v) => {
+    if (v === true || v === 1) return 'on';
+    if (v === false || v === 0) return 'off';
+    const s = String(v || '').toLowerCase();
+    if (s === 'on' || s === 'true' || s === 'yes') return 'on';
+    if (s === 'off' || s === 'false' || s === 'no') return 'off';
+    return null;
+  },
   secondOpenRequiresGreen: (v) => {
     if (v === true || v === 1) return 'on';
     if (v === false || v === 0) return 'off';
@@ -1116,6 +1124,8 @@ class TradingBot {
       // AUTO settle: prefer asks below this before 94¢+ “almost certain” tickets.
       settleRichAskFloorCents: 94,
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
+      // Settle NEAR only: risk half stake (thinner book / choppier). Other coins full size.
+      halfStakeNear: 'on',
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
       maxOpenPositions: 2,
       // With ≥1 open: only allow another if an existing hold is green (bid ≥ entry).
@@ -1580,6 +1590,22 @@ class TradingBot {
       return Math.max(0.5, lastClosed.stakeDollars / 2); // halve after a win, never quite to zero
     }
     return this.config.stakeDollars; // reset to base after a loss
+  }
+
+  /**
+   * Stake for this settle entry. NEAR uses ½ stake when halfStakeNear is on
+   * (thinner / choppier). All other coins use full stake. Edge mode: always full.
+   */
+  _stakeDollarsForEntry(priceCents, { settle = false, symbol = null } = {}) {
+    const base = Number(this._computeNextStake());
+    const safeBase = Number.isFinite(base) && base > 0 ? base : Number(this.config.stakeDollars) || 10;
+    if (!settle) return safeBase;
+    const nearHalf = String(this.config.halfStakeNear == null ? 'on' : this.config.halfStakeNear).toLowerCase();
+    const nearHalfOn = !(nearHalf === 'off' || nearHalf === 'false' || nearHalf === '0' || nearHalf === 'no');
+    if (nearHalfOn && String(symbol || '').toUpperCase() === 'NEAR') {
+      return Math.max(0.5, +(safeBase / 2).toFixed(2));
+    }
+    return safeBase;
   }
 
   _computeSkim(pnlCents) {
@@ -3090,7 +3116,7 @@ class TradingBot {
     // Each Kalshi contract costs `priceCents` cents and pays out $1 if it
     // wins, so buying (stakeDollars * 100 / priceCents) contracts risks
     // approximately stakeDollars. Always at least 1 contract.
-    const stakeDollars = this._computeNextStake();
+    const stakeDollars = this._stakeDollarsForEntry(priceCents, { settle: isSettle, symbol });
     const contracts = Math.max(1, Math.floor((stakeDollars * 100) / priceCents));
     const entryCostCents = contracts * priceCents;
     const capital = this._capitalStatus();
@@ -3165,7 +3191,12 @@ class TradingBot {
         }
       }
 
-      let attemptContracts = Math.max(1, Math.floor((stakeDollars * 100) / workingPrice));
+      let attemptContracts = Math.max(
+        1,
+        Math.floor(
+          (this._stakeDollarsForEntry(workingPrice, { settle: isSettle, symbol }) * 100) / workingPrice
+        )
+      );
       const bookAskSize =
         liveMarket &&
         (side === 'yes'
@@ -3301,12 +3332,18 @@ class TradingBot {
       const primary = settleEntryBand(this.config);
       const lateNote =
         eff.late && trade.entryPriceCents < primary.min ? ' · late fallback' : '';
+      const halfNote =
+        this._stakeDollarsForEntry(trade.entryPriceCents, { settle: true, symbol }) <
+        Number(this._computeNextStake()) - 0.001
+          ? ' · half stake'
+          : '';
       this.lastDecision =
         `Opened ${symbol} ${side.toUpperCase()} settle position at ${trade.entryPriceCents}¢` +
-        ` (hold to settlement${lateNote}).`;
+        ` (hold to settlement${lateNote}${halfNote}).`;
     } else {
       this.lastDecision =
-        `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${trade.entryPriceCents}¢ (confidence ${engineConfidence}%).`;
+        `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${trade.entryPriceCents}¢` +
+        ` (confidence ${engineConfidence}%).`;
     }
     this._logActivity(this.lastDecision, {
       kind: 'open',
