@@ -3363,7 +3363,7 @@ async function testBotTradingFlow() {
     });
     checkEq(opened, false, 'unfilled entry returns false');
     checkEq(retryBot.openTrades.length, 0, 'unfilled entry leaves no trade');
-    checkEq(entryOrders, 3, 'unfilled entry retries IOC up to 3 times');
+    checkEq(entryOrders, 2, 'unfilled entry retries IOC up to 2 times');
     check(retryBot._hasRecentEntryMiss('ETH'), 'fill miss demotes ETH briefly');
     check(/skipping this coin|focusing on other/i.test(retryBot.lastError || ''), 'miss message mentions skip/focus');
     check(/miss #1/i.test(retryBot.lastError || ''), 'first miss labeled #1');
@@ -3448,8 +3448,60 @@ async function testBotTradingFlow() {
       engineConfidence: 70,
     });
     checkEq(missBot.openTrades.length, 0, 'unfilled entry after miss leaves no trade');
-    checkEq(entryOrders, 3, 'unfilled entry attempted 3 buys');
+    checkEq(entryOrders, 2, 'unfilled entry attempted 2 buys');
     check(/did not fill/i.test(missBot.lastError || ''), 'unfilled entry error mentions did not fill');
+  }
+
+  // Settle dual-entry: empty book + maxOpen 2 opens top 2 in parallel (paper)
+  {
+    const closeMs = Date.now() + 8 * 60 * 1000;
+    const dualBot = makeBot(
+      {
+        hasCredentials: false,
+        async getMarket() {
+          return {};
+        },
+        async getOpenMarkets() {
+          return [];
+        },
+        async createOrder() {
+          throw new Error('paper dual-entry should not order');
+        },
+        async getBalance() {
+          return { balance: 0, portfolio_value: 0 };
+        },
+      },
+      {
+        strategyMode: 'settle',
+        symbol: 'AUTO',
+        maxOpenPositions: 2,
+        settleEntryMinCents: 80,
+        settleEntryMaxCents: 92,
+        settleMinMinutesToOpen: 0.5,
+        settleMaxMinutesToOpen: 12,
+        settleMinUpsideCents: 8,
+        stakeDollars: 10,
+        paperStartingBalanceDollars: 200,
+      }
+    );
+    dualBot.config.strategyMode = 'settle';
+    dualBot.config.maxOpenPositions = 2;
+    const mkOpp = (symbol, ticker) => ({
+      symbol,
+      side: 'yes',
+      priceCents: 85,
+      closeTime: closeMs,
+      market: { ticker, floor_strike: 100 },
+      window: { probabilityUp: 70, probabilityDown: 30, confidence: 60 },
+    });
+    const t0 = Date.now();
+    await dualBot._openSettleRanked([mkOpp('BTC', 'KXBTC15M-A'), mkOpp('ETH', 'KXETH15M-A'), mkOpp('SOL', 'KXSOL15M-A')]);
+    const elapsed = Date.now() - t0;
+    checkEq(dualBot.openTrades.length, 2, 'settle dual-entry opens two from empty book');
+    const syms = dualBot.openTrades.map((t) => t.symbol).sort();
+    checkEq(syms.join(','), 'BTC,ETH', 'settle dual-entry took top-2 ranked coins');
+    check(elapsed < 500, 'settle dual-entry paper path stays fast (parallel, not long sleeps)');
+    check(/dual-entry|Opened/i.test(dualBot.lastDecision || ''), 'dual-entry left a decision note');
   }
 
   // Late fill after poll timeout: polls empty → cancel → getOrder then shows fills

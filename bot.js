@@ -3228,6 +3228,7 @@ class TradingBot {
     engineProbability,
     engineConfidence,
     strategy = 'edge',
+    entryAttempts = null,
   }) {
     // A paper trade must obey the same price rules as a live order. Without
     // this guard an empty Kalshi quote could be stored as `null` and then
@@ -3356,15 +3357,17 @@ class TradingBot {
     };
 
     if (this.config.mode === 'live') {
-      // Up to 3 IOC tries: re-quote each time, chase ask by +0/+1/+2¢ inside the
-      // settle ceiling. Thin books move between cycles — one shot was missing too often.
+      // Default 2 IOC tries (lighter): re-quote each time, chase ask by +0/+1¢
+      // inside the settle ceiling. Pass entryAttempts to override (cap 3).
       let filled = 0;
       let fill = null;
       let orderId = null;
       let workingPrice = priceCents;
       let lastErr = null;
       let freshAsk = null;
-      const maxEntryAttempts = 3;
+      const rawAttempts = Number(entryAttempts);
+      const maxEntryAttempts =
+        Number.isFinite(rawAttempts) && rawAttempts > 0 ? Math.min(3, Math.floor(rawAttempts)) : 2;
 
       for (let attempt = 0; attempt < maxEntryAttempts; attempt++) {
         if (attempt > 0) await this._sleep(250);
@@ -3547,63 +3550,92 @@ class TradingBot {
       this._clearEntryMiss(symbol);
     }
 
-    this.ledger.trades.unshift(trade);
-    if (this.ledger.trades.length > 200) this.ledger.trades.length = 200;
-    this._noteProtectionGate(false); // open implies gate no longer blocking
-    if (isSettle) {
-      const minsLeftNow = (closeAt - Date.now()) / 60000;
-      const eff = settleEffectiveEntryBand(this.config, minsLeftNow);
-      const primary = settleEntryBand(this.config);
-      const lateNote =
-        eff.late && trade.entryPriceCents < primary.min ? ' · late fallback' : '';
-      const sized = this._stakeDollarsForEntry(trade.entryPriceCents, {
-        settle: true,
-        symbol,
-        thirdSlot,
-      });
-      const baseStake = Number(this._computeNextStake());
-      let sizeNote = '';
-      if (thirdSlot && trade.entryPriceCents >= 80) {
-        sizeNote = ' · half stake (3rd)';
-      } else if (Number.isFinite(sized) && Number.isFinite(baseStake) && sized < baseStake - 0.001) {
-        const ratio = sized / baseStake;
-        sizeNote = ratio <= 0.3 ? ' · quarter stake' : ' · half stake';
+    // Serialize ledger commit so parallel settle dual-entry can't clobber
+    // persist or overshoot maxOpen / paper capital.
+    return this._withTradeLock(() => {
+      if (this._hasOpenOnSymbol(symbol) || this._hasOpenOnTicker(ticker)) {
+        this.lastDecision = `Skipped ${symbol}: already have an open position on this coin/market.`;
+        return false;
       }
-      this.lastDecision =
-        `Opened ${symbol} ${side.toUpperCase()} settle position at ${trade.entryPriceCents}¢` +
-        ` (hold to settlement${lateNote}${sizeNote}).`;
-    } else {
-      this.lastDecision =
-        `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${trade.entryPriceCents}¢` +
-        ` (confidence ${engineConfidence}%).`;
-    }
-    this._logActivity(this.lastDecision, {
-      kind: 'open',
-      symbol,
-      side,
-      strategy: trade.strategy,
-      tradeId: trade.id,
+      if (this.openTrades.length >= this._effectiveMaxOpenPositions()) {
+        this.lastDecision =
+          `Skipped ${symbol}: max open positions reached during dual-entry commit.`;
+        if (trade.liveOrderId) {
+          console.warn(
+            `[bot] live fill on ${symbol} after max-open — ledgering anyway to avoid orphan`
+          );
+        } else {
+          return false;
+        }
+      }
+      if (this.config.mode === 'paper') {
+        const cost = Math.round(Number(trade.stakeDollars) * 100);
+        const capital = this._capitalStatus();
+        if (cost > capital.paperAvailableCents) {
+          this.lastDecision =
+            `Insufficient paper funds at commit: $${(capital.paperAvailableCents / 100).toFixed(2)} spendable.`;
+          return false;
+        }
+      }
+
+      this.ledger.trades.unshift(trade);
+      if (this.ledger.trades.length > 200) this.ledger.trades.length = 200;
+      this._noteProtectionGate(false); // open implies gate no longer blocking
+      if (isSettle) {
+        const minsLeftNow = (closeAt - Date.now()) / 60000;
+        const eff = settleEffectiveEntryBand(this.config, minsLeftNow);
+        const primary = settleEntryBand(this.config);
+        const lateNote =
+          eff.late && trade.entryPriceCents < primary.min ? ' · late fallback' : '';
+        const sized = this._stakeDollarsForEntry(trade.entryPriceCents, {
+          settle: true,
+          symbol,
+          thirdSlot,
+        });
+        const baseStake = Number(this._computeNextStake());
+        let sizeNote = '';
+        if (thirdSlot && trade.entryPriceCents >= 80) {
+          sizeNote = ' · half stake (3rd)';
+        } else if (Number.isFinite(sized) && Number.isFinite(baseStake) && sized < baseStake - 0.001) {
+          const ratio = sized / baseStake;
+          sizeNote = ratio <= 0.3 ? ' · quarter stake' : ' · half stake';
+        }
+        this.lastDecision =
+          `Opened ${symbol} ${side.toUpperCase()} settle position at ${trade.entryPriceCents}¢` +
+          ` (hold to settlement${lateNote}${sizeNote}).`;
+      } else {
+        this.lastDecision =
+          `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${trade.entryPriceCents}¢` +
+          ` (confidence ${engineConfidence}%).`;
+      }
+      this._logActivity(this.lastDecision, {
+        kind: 'open',
+        symbol,
+        side,
+        strategy: trade.strategy,
+        tradeId: trade.id,
+      });
+      upsertTradeLog({
+        id: trade.id,
+        mode: trade.mode,
+        strategy: trade.strategy,
+        symbol: trade.symbol,
+        ticker: trade.ticker,
+        side: trade.side,
+        contracts: trade.contracts,
+        stakeDollars: trade.stakeDollars,
+        entryPriceCents: trade.entryPriceCents,
+        entryFeesCents: trade.entryFeesCents || 0,
+        floorStrike: trade.floorStrike,
+        openedAt: trade.openedAt,
+        windowCloseTime: trade.windowCloseTime,
+        engineProbability: trade.engineProbability,
+        engineConfidence: trade.engineConfidence,
+        status: 'open',
+      });
+      this._persist();
+      return true;
     });
-    upsertTradeLog({
-      id: trade.id,
-      mode: trade.mode,
-      strategy: trade.strategy,
-      symbol: trade.symbol,
-      ticker: trade.ticker,
-      side: trade.side,
-      contracts: trade.contracts,
-      stakeDollars: trade.stakeDollars,
-      entryPriceCents: trade.entryPriceCents,
-      entryFeesCents: trade.entryFeesCents || 0,
-      floorStrike: trade.floorStrike,
-      openedAt: trade.openedAt,
-      windowCloseTime: trade.windowCloseTime,
-      engineProbability: trade.engineProbability,
-      engineConfidence: trade.engineConfidence,
-      status: 'open',
-    });
-    this._persist();
-    return true;
   }
 
   /**
@@ -3777,27 +3809,7 @@ class TradingBot {
         this.config.symbol === 'AUTO' || scanAllAfterStop
           ? await this._rankSettleOpportunities(predictions, { preferOtherThan })
           : [await this._evaluateSymbolForSettle(this.config.symbol, predictions)].filter(Boolean);
-      // Try best → next coin on fill miss (no same-coin chase spam).
-      for (const opp of ranked) {
-        if (preferOtherThan && opp.symbol !== preferOtherThan && ranked[0] === opp) {
-          this.lastDecision =
-            `Post-stop: chose ${opp.symbol} over recently stopped ${preferOtherThan} ` +
-            `(checking other cryptos first).`;
-        }
-        const opened = await this._openPosition({
-          symbol: opp.symbol,
-          ticker: opp.market.ticker,
-          side: opp.side,
-          priceCents: opp.priceCents,
-          floorStrike: opp.market.floor_strike,
-          closeTime: opp.closeTime,
-          engineProbability: opp.side === 'yes' ? opp.window.probabilityUp : opp.window.probabilityDown,
-          engineConfidence: opp.window.confidence,
-          strategy: 'settle',
-        });
-        if (opened) return;
-        if (this.openTrades.length >= this._effectiveMaxOpenPositions()) return;
-      }
+      await this._openSettleRanked(ranked, { preferOtherThan });
       return;
     }
 
@@ -3825,6 +3837,70 @@ class TradingBot {
       engineConfidence: opportunity.window.confidence,
       strategy: 'edge',
     });
+  }
+
+  _settleOppToOpenArgs(opp, entryAttempts = 2) {
+    return {
+      symbol: opp.symbol,
+      ticker: opp.market.ticker,
+      side: opp.side,
+      priceCents: opp.priceCents,
+      floorStrike: opp.market.floor_strike,
+      closeTime: opp.closeTime,
+      engineProbability: opp.side === 'yes' ? opp.window.probabilityUp : opp.window.probabilityDown,
+      engineConfidence: opp.window.confidence,
+      strategy: 'settle',
+      entryAttempts,
+    };
+  }
+
+  /**
+   * Settle AUTO opens: with an empty book and ≥2 free slots, IOC the top 2
+   * candidates in parallel (2 tries each) so a slow miss on #1 doesn't age
+   * #2's book. Then fill remaining slots sequentially. One slot / already
+   * holding → sequential only (second-green / 3rd-slot rules still apply).
+   */
+  async _openSettleRanked(ranked, { preferOtherThan = null } = {}) {
+    if (!ranked || ranked.length === 0) return;
+    const slotsFree = () =>
+      Math.max(0, this._effectiveMaxOpenPositions() - this.openTrades.length);
+
+    const tryOne = async (opp, attempts) => {
+      if (preferOtherThan && opp.symbol !== preferOtherThan && ranked[0] === opp) {
+        this.lastDecision =
+          `Post-stop: chose ${opp.symbol} over recently stopped ${preferOtherThan} ` +
+          `(checking other cryptos first).`;
+      }
+      return this._openPosition(this._settleOppToOpenArgs(opp, attempts));
+    };
+
+    let i = 0;
+    // Parallel top-2 only from an empty book (avoids half-stake 3rd-slot races).
+    if (this.openTrades.length === 0 && slotsFree() >= 2 && ranked.length >= 2) {
+      const a = ranked[0];
+      const b = ranked[1];
+      this.lastDecision =
+        `Settle dual-entry: trying ${a.symbol} + ${b.symbol} in parallel.`;
+      this._logActivity(this.lastDecision, {
+        kind: 'open',
+        symbol: `${a.symbol}+${b.symbol}`,
+        strategy: 'settle',
+      });
+      await Promise.all([tryOne(a, 2), tryOne(b, 2)]);
+      i = 2;
+    }
+
+    for (; i < ranked.length; i++) {
+      if (slotsFree() <= 0) return;
+      if (this.openTrades.length >= 1) {
+        const extra = await this._canOpenAdditionalPosition();
+        if (!extra.ok) {
+          this.lastDecision = extra.reason;
+          return;
+        }
+      }
+      await tryOne(ranked[i], 2);
+    }
   }
 
   /**
