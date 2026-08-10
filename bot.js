@@ -2730,6 +2730,11 @@ class TradingBot {
         trade.stopPostMinBidCents = null;
         trade.stopPostMaxBidCents = null;
       }
+      // Weak-switch is the same knife-catch risk as a stop — block same-cycle reopen.
+      if (reason === 'settle_weak_switch' && trade.symbol) {
+        if (!this._stoppedSymbolsThisCycle) this._stoppedSymbolsThisCycle = new Set();
+        this._stoppedSymbolsThisCycle.add(String(trade.symbol).toUpperCase());
+      }
       const entryFees = Math.max(0, Math.round(Number(trade.entryFeesCents) || 0));
       const exitFees = Math.max(0, Math.round(Number(trade.exitFeesCents) || 0));
       trade.feesCents = entryFees + exitFees;
@@ -3627,6 +3632,24 @@ class TradingBot {
       if (!sitOut.ok) {
         this.lastDecision = sitOut.reason;
         this._noteProtectionGate(sitOut.reason, { fromSymbol: symbol });
+        return false;
+      }
+    }
+    // Same sit-out after settle_weak_switch (BNB 10:11 reopen loop).
+    const lastClosedAny = this._mostRecentClosedTrade();
+    if (lastClosedAny && lastClosedAny.exitReason === 'settle_weak_switch') {
+      const weakSit = checkSameSideExitCooldown({
+        lastTrade: lastClosedAny,
+        exitReasons: ['settle_weak_switch'],
+        forCandidateSymbol: symbol,
+        forCandidateSide: side,
+        cooldownMs: postStopSameSideCooldownMs(this.config),
+        now: Date.now(),
+        reasonVerb: 'weak-switched',
+      });
+      if (!weakSit.ok) {
+        this.lastDecision = weakSit.reason;
+        this._noteProtectionGate(weakSit.reason, { fromSymbol: symbol });
         return false;
       }
     }
@@ -4575,7 +4598,7 @@ class TradingBot {
    * still expands both sides toward settleLateEntryMinCents. Coinbase lean only
    * ranks YES vs NO when both are in band — it does not veto the priced side.
    */
-  async _evaluateSymbolForSettle(symbol, predictions, { quiet = false, onSkip = null } = {}) {
+  async _evaluateSymbolForSettle(symbol, predictions, { quiet = false, onSkip = null, onQuote = null } = {}) {
     const say = (msg) => {
       if (typeof onSkip === 'function') onSkip(symbol, msg);
       if (!quiet) this.lastDecision = msg;
@@ -4680,6 +4703,15 @@ class TradingBot {
 
     const primary = settleEntryBand(this.config);
     const noMin = settleNoEntryMinCents(this.config);
+    if (typeof onQuote === 'function') {
+      onQuote({
+        symbol,
+        yesAsk: yesAskOk ? yesAsk : null,
+        noAsk: noAskOk ? noAsk : null,
+        noInBand:
+          noAskOk && noAsk >= noMin && noAsk <= primary.max && 100 - noAsk >= settleMinUpsideCents(this.config),
+      });
+    }
     // YES uses primary min; NO may start lower (default 80¢) so downs in the 80s qualify.
     const collect = (yesMinCents, noMinCents, maxCents) => {
       const out = [];
@@ -4771,12 +4803,18 @@ class TradingBot {
     const lastClosed = this._mostRecentClosedTrade();
     const staleSitOut = checkSameSideExitCooldown({
       lastTrade: lastClosed,
-      exitReasons: ['settle_stale', 'take_profit', 'settle_stuck'],
+      exitReasons: ['settle_stale', 'take_profit', 'settle_stuck', 'settle_weak_switch'],
       forCandidateSymbol: symbol,
       forCandidateSide: pick.side,
-      cooldownMs: settlePostStaleSameSideCooldownMs(this.config),
+      cooldownMs: Math.max(
+        settlePostStaleSameSideCooldownMs(this.config),
+        // Weak-switch uses the longer settle post-stop sit-out (default 2.5m).
+        lastClosed && lastClosed.exitReason === 'settle_weak_switch'
+          ? postStopSameSideCooldownMs(this.config)
+          : 0
+      ),
       now: Date.now(),
-      reasonVerb: 'banked',
+      reasonVerb: lastClosed && lastClosed.exitReason === 'settle_weak_switch' ? 'weak-switched' : 'banked',
     });
     if (!staleSitOut.ok) {
       say(staleSitOut.reason);
@@ -4817,6 +4855,10 @@ class TradingBot {
       strategy: 'settle',
       settleLateEntry: usedLateBand,
       engineReady,
+      // Quote snapshot so AUTO Decision/activity can prove NO was considered.
+      settleYesAskCents: yesAskOk ? yesAsk : null,
+      settleNoAskCents: noAskOk ? noAsk : null,
+      settleNoInBand: candidates.some((c) => c.side === 'no'),
     };
   }
 
@@ -4838,6 +4880,7 @@ class TradingBot {
       return [];
     }
     const skips = [];
+    const quoteSnaps = [];
     const shortSkip = (msg) => {
       const m = String(msg || '');
       if (/not ready|seeding/i.test(m)) return 'feed not ready';
@@ -4845,11 +4888,14 @@ class TradingBot {
       if (/stale zone|churn entry/i.test(m)) return 'already in stale window';
       if (/leans NO/i.test(m)) return 'engine leans NO';
       if (/leans YES/i.test(m)) return 'engine leans YES';
+      // Keep YES/NO ask snapshot so activity/Decision prove NO was scanned.
+      const yesNo = m.match(/YES ask\s+([^\s(]+).*NO ask\s+([^\s(]+)/i);
+      if (yesNo) return `YES ${yesNo[1]} / NO ${yesNo[2]}`;
       if (/outside .+¢/i.test(m)) return 'ask outside band';
-      if (/sit-out|same-side/i.test(m)) return 'same-side sit-out';
+      if (/sit-out|same-side|weak-switched/i.test(m)) return 'same-side sit-out';
       if (/min left/i.test(m)) return 'time window gate';
       if (/no open Kalshi/i.test(m)) return 'no Kalshi market';
-      return m.replace(/^Waiting:\s*/i, '').slice(0, 48);
+      return m.replace(/^Waiting:\s*/i, '').slice(0, 64);
     };
     const evaluations = await Promise.all(
       candidates.map((sym) =>
@@ -4857,6 +4903,9 @@ class TradingBot {
           quiet: true,
           onSkip: (s, msg) => {
             if (skips.length < 12) skips.push({ symbol: s, why: shortSkip(msg) });
+          },
+          onQuote: (q) => {
+            if (quoteSnaps.length < 16) quoteSnaps.push(q);
           },
         })
       )
@@ -4869,9 +4918,27 @@ class TradingBot {
       noSpotLean.length > 0
         ? `Kalshi-only (no spot lean): ${noSpotLean.join(', ')}.`
         : '';
+    const noInBandOpps = valid.filter((o) => o.side === 'no');
+    const noQuotedInBand = quoteSnaps.filter((q) => q && q.noInBand);
+    const noScanParts = [];
+    if (noInBandOpps.length) {
+      noScanParts.push(
+        ...noInBandOpps.map((o) => `${o.symbol}@${o.priceCents}¢`)
+      );
+    } else if (noQuotedInBand.length) {
+      noScanParts.push(
+        ...noQuotedInBand.map((q) => `${q.symbol}@${q.noAsk}¢(gated)`)
+      );
+    }
+    const noScanLine =
+      noScanParts.length > 0
+        ? `NO in-band: ${[...new Set(noScanParts)].join(', ')}.`
+        : 'NO in-band: none.';
+    // Persist a short activity breadcrumb so trade log isn't the only NO proof.
+    this._noteSettleNoScan(noScanLine, noInBandOpps, noQuotedInBand);
     if (valid.length === 0) {
       this.lastDecision =
-        `Settle scan: no entry.` +
+        `Settle scan: no entry. ${noScanLine}` +
         (kalshiOnlyLine ? ` ${kalshiOnlyLine}` : '') +
         (skipLine ? ` Skipped: ${skipLine}.` : '') +
         (cooling.length ? ` Cooling: ${cooling.join(', ')}.` : '');
@@ -4901,8 +4968,47 @@ class TradingBot {
     const leanTag = best.engineReady ? '' : ' · no spot lean';
     this.lastDecision =
       `Settle scan: best ${best.symbol} ${String(best.side).toUpperCase()} @ ${best.priceCents}¢` +
-      ` (${valid.length} mid-band${leanTag}).${feedNote}${altNote}`;
+      ` (${valid.length} mid-band${leanTag}). ${noScanLine}${feedNote}${altNote}`;
     return valid;
+  }
+
+  /**
+   * Activity breadcrumb for settle NO scanning (deduped so polls don't spam).
+   * When NO is in-band, log immediately; when none, log at most every ~2 min.
+   */
+  _noteSettleNoScan(noScanLine, noInBandOpps = [], noQuotedInBand = []) {
+    const line = String(noScanLine || '').trim();
+    if (!line) return;
+    const now = Date.now();
+    const hasNoOpp = Array.isArray(noInBandOpps) && noInBandOpps.length > 0;
+    const hasNoQuoted = Array.isArray(noQuotedInBand) && noQuotedInBand.length > 0;
+    const hasNo = hasNoOpp || hasNoQuoted;
+    const key = hasNoOpp
+      ? `no:${noInBandOpps.map((o) => `${o.symbol}@${o.priceCents}`).join(',')}`
+      : hasNoQuoted
+        ? `gated:${noQuotedInBand.map((q) => `${q.symbol}@${q.noAsk}`).join(',')}`
+        : 'no:none';
+    if (this._lastSettleNoScanKey === key && now - (this._lastSettleNoScanAt || 0) < (hasNo ? 45_000 : 120_000)) {
+      return;
+    }
+    this._lastSettleNoScanKey = key;
+    this._lastSettleNoScanAt = now;
+    let msg;
+    if (hasNoOpp) {
+      msg = `Settle NO scan: ${noInBandOpps.map((o) => `${o.symbol} NO @ ${o.priceCents}¢`).join(', ')}`;
+    } else if (hasNoQuoted) {
+      msg =
+        `Settle NO scan (priced in band, gated): ` +
+        noQuotedInBand.map((q) => `${q.symbol} NO @ ${q.noAsk}¢`).join(', ');
+    } else {
+      msg = 'Settle NO scan: no NO asks in band (markets YES-priced / outside 80–94).';
+    }
+    this._logActivity(msg, {
+      kind: 'settle-no-scan',
+      side: hasNo ? 'no' : null,
+      symbol: hasNoOpp ? noInBandOpps[0].symbol : hasNoQuoted ? noQuotedInBand[0].symbol : null,
+    });
+    this._persist();
   }
 
   async _findBestSettleOpportunity(predictions, { preferOtherThan = null } = {}) {
