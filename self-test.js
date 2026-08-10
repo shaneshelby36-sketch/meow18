@@ -4379,8 +4379,8 @@ async function testBotTradingFlow() {
       ],
       { now, currentMaxMinutes: 8 }
     );
-    checkEq(rough.light, 'red', 'rough recent settle book → red 5m');
-    checkEq(rough.suggestedMaxMinutes, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, 'red suggests 5m');
+    checkEq(rough.light, 'red', 'rough recent settle book → red 5.5m');
+    checkEq(rough.suggestedMaxMinutes, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, 'red suggests 5.5m');
 
     const midBetter = recommendSettleOpenWindow(
       [

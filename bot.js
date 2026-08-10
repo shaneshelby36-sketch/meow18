@@ -413,7 +413,7 @@ function classifyStopVerdictFromBids({
 /** Stable settle open ceiling (minutes left) when retrospect is green. */
 const SETTLE_WINDOW_STABLE_MAX_MINUTES = 8;
 /** Volatile settle open ceiling when retrospect is red. */
-const SETTLE_WINDOW_VOLATILE_MAX_MINUTES = 5;
+const SETTLE_WINDOW_VOLATILE_MAX_MINUTES = 5.5;
 const SETTLE_WINDOW_RETRO_SHORT_MS = 2 * 60 * 60 * 1000;
 const SETTLE_WINDOW_RETRO_LONG_MS = 12 * 60 * 60 * 1000;
 const SETTLE_WINDOW_RETRO_MIN_TRADES = 3;
@@ -468,7 +468,7 @@ function summarizeSettleWindowSample(trades) {
 }
 
 /**
- * Retrospect settle open-window: green → prefer 8m ceiling, red → 5m.
+ * Retrospect settle open-window: green → prefer 8m ceiling, red → 5.5m.
  * Prefers last 2h when enough settle closes; else expands to 12h.
  * Does not auto-apply — caller must press Apply.
  */
