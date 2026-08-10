@@ -2170,6 +2170,37 @@ class TradingBot {
       };
     }
 
+    // Create Order V2 returns the post-match state immediately. For IOC, unfilled
+    // size is already canceled → remaining_count "0.00". Trust that and skip
+    // getOrder: canceled IOC ids often 404 on GET /portfolio/orders/{id}.
+    if (lastOrder) {
+      const remaining = this._parseFpCount(
+        lastOrder.remaining_count_fp ??
+          lastOrder.remainingCountFp ??
+          lastOrder.remaining_count ??
+          lastOrder.remainingCount
+      );
+      const status = String(lastOrder.status || '').toLowerCase();
+      const seedTerminal =
+        remaining === 0 ||
+        status === 'canceled' ||
+        status === 'cancelled' ||
+        status === 'executed' ||
+        status === 'filled' ||
+        status === 'complete' ||
+        status === 'completed';
+      if (seedTerminal) {
+        return {
+          ok: bestFilled >= minFill,
+          filled: bestFilled,
+          avgPriceCents: this._orderAvgFillPriceCents(lastOrder, heldSide, action),
+          order: lastOrder,
+          recovered: false,
+        };
+      }
+    }
+
+    let sawNotFound = false;
     for (let i = 0; i < attempts; i += 1) {
       try {
         const snap = await this._fetchOrderSnapshot(orderId);
@@ -2217,7 +2248,18 @@ class TradingBot {
           }
         }
       } catch (err) {
-        console.warn(`[bot] getOrder ${orderId} poll failed:`, err.message);
+        const notFound =
+          Number(err && err.status) === 404 || /HTTP 404\b/.test(String(err && err.message));
+        if (notFound) {
+          if (!sawNotFound) {
+            sawNotFound = true;
+            console.warn(
+              `[bot] getOrder ${orderId} not found (IOC often evaporates) — using create seed / recovery`
+            );
+          }
+        } else {
+          console.warn(`[bot] getOrder ${orderId} poll failed:`, err.message);
+        }
       }
       await this._sleep(delayMs);
     }
@@ -2229,7 +2271,11 @@ class TradingBot {
     } catch (err) {
       // Cancel often fails when the order already fully filled — that is OK;
       // recovery getOrder below must still pick up the fill.
-      console.warn(`[bot] cancelOrder ${orderId} failed:`, err.message);
+      const notFound =
+        Number(err && err.status) === 404 || /HTTP 404\b/.test(String(err && err.message));
+      if (!notFound) {
+        console.warn(`[bot] cancelOrder ${orderId} failed:`, err.message);
+      }
     }
 
     // Give the matching engine a beat, then re-fetch (possibly multiple times).
@@ -2535,7 +2581,7 @@ class TradingBot {
       trade.closedAt = Date.now();
       trade.exitPriceCents = bookedExit;
       trade.exitReason = reason;
-      // New session / done with this coin's ticket — miss ladder starts fresh next window.
+      // Clear miss cooldown/streak for this coin once we're done with the ticket.
       this._clearEntryMiss(trade.symbol);
       if (reason === 'stop_loss' && trade.symbol) {
         if (!this._stoppedSymbolsThisCycle) this._stoppedSymbolsThisCycle = new Set();
@@ -3501,11 +3547,15 @@ class TradingBot {
 
       if (filled < 1) {
         const miss = this._noteEntryMiss(symbol, null, closeAt);
-        const coolMin = Math.max(1, Math.round((miss.cooldownMs || 60_000) / 60000));
+        const coolMs = Number(miss.cooldownMs) || 30_000;
+        const coolLabel =
+          coolMs < 60_000
+            ? `~${Math.max(1, Math.round(coolMs / 1000))}s`
+            : `~${Math.max(1, Math.round(coolMs / 60000))}m`;
         this.lastError =
           `Live entry on ${symbol} did not fill` +
           (lastErr ? ` (${lastErr.message})` : '') +
-          ` — skipping this coin ~${coolMin}m (miss #${miss.streak}); focusing on other cryptos.`;
+          ` — skipping this coin ${coolLabel} (miss #${miss.streak}); focusing on other cryptos.`;
         this.lastDecision = this.lastError;
         this._logActivity(this.lastDecision, {
           kind: 'open',
@@ -3639,9 +3689,9 @@ class TradingBot {
   }
 
   /**
-   * After a live fill miss, hard-skip this coin on an escalating ladder so we
-   * stop pinging the same thin book and focus on other cryptos:
-   * 1m → 2m → 3m → 4m (cap).
+   * After a live fill miss, hard-skip this coin briefly (default 30s) so we
+   * don't spam the same thin book every cycle — then retry. Flat cooldown
+   * (no escalating ladder). Streak still tracks misses for ranking demotion.
    * Streak + cooldown reset when that coin's session ends (close time), on a
    * successful fill, or when any open on that coin closes/settles.
    */
@@ -3654,11 +3704,8 @@ class TradingBot {
     if (!this._entryMissSessionClose) this._entryMissSessionClose = Object.create(null);
     const streak = (this._entryMissStreak[sym] || 0) + 1;
     this._entryMissStreak[sym] = streak;
-    const ladder = [60_000, 120_000, 180_000, 240_000];
     const ms =
-      Number.isFinite(cooldownMs) && cooldownMs > 0
-        ? cooldownMs
-        : ladder[Math.min(streak - 1, ladder.length - 1)];
+      Number.isFinite(cooldownMs) && cooldownMs > 0 ? cooldownMs : 30_000;
     this._entryMissUntil[sym] = Date.now() + ms;
     const close = Number(sessionCloseMs);
     if (Number.isFinite(close) && close > 0) {
@@ -3715,7 +3762,7 @@ class TradingBot {
     const until = this._entryMissUntil[String(symbol).toUpperCase()];
     if (!Number.isFinite(until)) return false;
     if (Date.now() >= until) {
-      // Cooldown elapsed mid-session — unlock retries but keep streak for ladder.
+      // Cooldown elapsed mid-session — unlock retries (streak kept for ranking).
       delete this._entryMissUntil[String(symbol).toUpperCase()];
       return false;
     }
@@ -4556,7 +4603,7 @@ class TradingBot {
     if (candidates.length === 0) {
       if (cooling.length) {
         this.lastDecision =
-          `Waiting: recent fill misses on ${cooling.join(', ')} — cooling ~1m before retry.`;
+          `Waiting: recent fill misses on ${cooling.join(', ')} — cooling ~30s before retry.`;
       }
       return null;
     }

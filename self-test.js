@@ -3367,18 +3367,17 @@ async function testBotTradingFlow() {
     check(retryBot._hasRecentEntryMiss('ETH'), 'fill miss demotes ETH briefly');
     check(/skipping this coin|focusing on other/i.test(retryBot.lastError || ''), 'miss message mentions skip/focus');
     check(/miss #1/i.test(retryBot.lastError || ''), 'first miss labeled #1');
-    check(/~1m/i.test(retryBot.lastError || ''), 'first miss cools ~1m');
+    check(/~30s/i.test(retryBot.lastError || ''), 'first miss cools ~30s');
     const firstOnly = makeBot(mockClient({}), { mode: 'live', liveAuthorized: true });
     const m0 = firstOnly._noteEntryMiss('SOL');
-    checkEq(m0.cooldownMs, 60_000, 'first miss cools 1m');
+    checkEq(m0.cooldownMs, 30_000, 'first miss cools 30s');
     const m1 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000);
-    check(m1.streak >= 2, 'second miss escalates streak');
-    check(m1.cooldownMs >= 120_000, 'second miss cools ≥2m');
-    checkEq(m1.cooldownMs, 120_000, 'second miss cools exactly 2m');
+    check(m1.streak >= 2, 'second miss increments streak');
+    checkEq(m1.cooldownMs, 30_000, 'second miss still cools 30s');
     const m2 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000);
-    checkEq(m2.cooldownMs, 180_000, 'third miss cools 3m');
+    checkEq(m2.cooldownMs, 30_000, 'third miss still cools 30s');
     const m3 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000);
-    checkEq(m3.cooldownMs, 240_000, 'fourth miss cools 4m');
+    checkEq(m3.cooldownMs, 30_000, 'fourth miss still cools 30s');
     // Session end (or new window) clears streak + cooldown
     const sessionBot = makeBot(mockClient({}), { mode: 'live', liveAuthorized: true });
     const sessionClose = Date.now() + 60_000;
@@ -3393,7 +3392,7 @@ async function testBotTradingFlow() {
     checkEq(sessionBot._entryMissStreak.BNB, undefined, 'streak cleared after session end');
     const mFresh = sessionBot._noteEntryMiss('BNB', null, Date.now() + 600_000);
     checkEq(mFresh.streak, 1, 'next session starts at miss #1 again');
-    checkEq(mFresh.cooldownMs, 60_000, 'next session first miss is 1m again');
+    checkEq(mFresh.cooldownMs, 30_000, 'next session first miss is 30s again');
   }
 
   // Live entry: all attempts miss → no trade (single attempt)
@@ -3694,6 +3693,68 @@ async function testBotTradingFlow() {
     checkEq(seedBot.openTrades[0].contracts, 20, 'V2 immediate fill uses create fill_count');
     checkEq(seedBot.openTrades[0].entryPriceCents, 50, 'V2 immediate fill uses average_fill_price');
     checkEq(getOrderCalls, 0, 'V2 immediate fill does not need getOrder');
+  }
+
+  // IOC create seed with remaining 0: trust seed, do not poll getOrder (avoids 404 spam)
+  {
+    let getOrderCalls = 0;
+    const iocSeedBot = makeBot(
+      {
+        hasCredentials: true,
+        async getOrder() {
+          getOrderCalls += 1;
+          throw new Error('getOrder should not run for terminal IOC seed');
+        },
+        async cancelOrder() {
+          throw new Error('cancelOrder should not run for terminal IOC seed');
+        },
+        async createOrder() {
+          throw new Error('unused');
+        },
+        async getBalance() {
+          return { balance: 0, portfolio_value: 0 };
+        },
+        async getMarket() {
+          return {};
+        },
+        async getOpenMarkets() {
+          return [];
+        },
+      },
+      { mode: 'live', liveAuthorized: true }
+    );
+    const miss = await iocSeedBot._awaitOrderFill('ioc-miss-oid', {
+      minFill: 1,
+      attempts: 4,
+      delayMs: 1,
+      seedOrder: {
+        order_id: 'ioc-miss-oid',
+        fill_count: '0.00',
+        remaining_count: '0.00',
+      },
+      heldSide: 'yes',
+      action: 'buy',
+    });
+    checkEq(miss.filled, 0, 'terminal IOC seed with 0 fill reports 0');
+    checkEq(miss.ok, false, 'terminal IOC miss is not ok');
+    checkEq(getOrderCalls, 0, 'terminal IOC seed skips getOrder');
+
+    const partial = await iocSeedBot._awaitOrderFill('ioc-partial-oid', {
+      minFill: 1,
+      attempts: 4,
+      delayMs: 1,
+      seedOrder: {
+        order_id: 'ioc-partial-oid',
+        fill_count: '4.00',
+        remaining_count: '0.00',
+        average_fill_price: '0.8500',
+      },
+      heldSide: 'yes',
+      action: 'buy',
+    });
+    checkEq(partial.filled, 4, 'terminal IOC partial fill uses create seed');
+    checkEq(partial.ok, true, 'terminal IOC partial fill is ok');
+    checkEq(getOrderCalls, 0, 'terminal IOC partial skips getOrder');
   }
 
   // Live exit: partial sell books sold slice + shrinks open remainder (no inventory desync)
