@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint">Pure engine windows: UP→YES, DOWN→NO. Minutes left pick the window (&gt;10m w5, 5–10m w10, ≤5m w5). If lean turns against you while flat/green (or confidence drops under the floor), scratch breakeven and wait. If already red when lean flips → model_lean_flip. Otherwise hold to Kalshi settlement.</p>
+          <p class="settings-hint">Pure engine windows: UP→YES, DOWN→NO. Minutes left pick the window (&gt;10m w5, 5–10m w10, ≤5m w5). Never enters above 93¢. TP is model-driven (no ¢ target): if you’re green and lean flips or confidence drops → bank the bid (take_profit). Flat + same → breakeven. Already red + lean flips → model_lean_flip. Otherwise hold to settlement.</p>
           <label>Min confidence
             <div class="slider-row">
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />

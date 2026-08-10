@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 21;
+const SETTINGS_DEFAULTS_VERSION = 22;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -465,6 +465,8 @@ const STRATEGY_RETRO_LATE_CUTOFF_MINUTES = 5.5;
 const STRATEGY_RETRO_MID_CEILING_MINUTES = 8.5;
 /** Edge: never buy above this ask (¢). */
 const EDGE_MAX_ENTRY_DEFAULT_CENTS = 95;
+/** Model: never buy richer than this (leaves a little room to 100). */
+const MODEL_MAX_ENTRY_DEFAULT_CENTS = 93;
 /** Edge: final-N-minute cash-out allows up to this much position PnL loss (¢). */
 const EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS = 75;
 const EDGE_PRE_CLOSE_MINUTES_DEFAULT = 5;
@@ -900,6 +902,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'settleMinUpsideCents',
   'settleStuckHoldMinutes',
   'modelMinConfidence',
+  'modelMaxEntryCents',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -1717,8 +1720,9 @@ class TradingBot {
       edgePreCloseMinutes: EDGE_PRE_CLOSE_MINUTES_DEFAULT,
       edgeBreakevenAfterMinutes: EDGE_BREAKEVEN_AFTER_MINUTES_DEFAULT,
       minMinutesToOpen: 3, // don't open when fewer than this many minutes remain in the window
-      // Model tab: window schedule + locked lean only; confidence floor before open.
+      // Model tab: window schedule + locked lean; confidence floor; max entry 93¢.
       modelMinConfidence: 55,
+      modelMaxEntryCents: MODEL_MAX_ENTRY_DEFAULT_CENTS,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
       stopRecoveryCents: 6,
@@ -3853,9 +3857,10 @@ class TradingBot {
       return;
     }
 
-    // Model: window lean + don't lose much.
-    // Flat/green + lean against (or confidence collapse) → scratch breakeven and wait.
-    // Underwater + lean against → model_lean_flip. Else hold to settle.
+    // Model: window lean + don't lose much + model-driven bank.
+    // Green + lean against / confidence collapse → take_profit at bid (model TP).
+    // Flat + same → breakeven. Underwater + lean against → model_lean_flip.
+    // Else hold to settle.
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
       const entry = Number(trade.entryPriceCents);
@@ -3866,6 +3871,7 @@ class TradingBot {
         heldSideBidCents <= 99;
       const flatOrGreen =
         bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents >= entry;
+      const isGreen = flatOrGreen && heldSideBidCents > entry;
       const against =
         picked &&
         picked.direction &&
@@ -3879,7 +3885,15 @@ class TradingBot {
         Number.isFinite(picked.window.confidence) &&
         picked.window.confidence < minConf;
 
-      if (bidOk && against && flatOrGreen) {
+      const modelSaysExit = against || weakConf;
+      if (bidOk && modelSaysExit && isGreen) {
+        // Model TP: windows say leave while ahead — bank the live bid.
+        await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+      if (bidOk && modelSaysExit && flatOrGreen) {
         const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
         await this._closePosition(trade, beFill, 'breakeven', {
           liveSellPriceCents: heldSideBidCents,
@@ -3888,13 +3902,6 @@ class TradingBot {
       }
       if (bidOk && against) {
         await this._closePosition(trade, heldSideBidCents, 'model_lean_flip', {
-          liveSellPriceCents: heldSideBidCents,
-        });
-        return;
-      }
-      if (bidOk && flatOrGreen && weakConf) {
-        const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
-        await this._closePosition(trade, beFill, 'breakeven', {
           liveSellPriceCents: heldSideBidCents,
         });
       }
@@ -4307,7 +4314,16 @@ class TradingBot {
           ` (need <${richFloor}¢ and ≥${minUpside}¢ to 100) — trying other cryptos.`;
         return false;
       }
-    } else if (!isModel) {
+    } else if (isModel) {
+      const maxEntry = Number.isFinite(Number(this.config.modelMaxEntryCents))
+        ? Number(this.config.modelMaxEntryCents)
+        : MODEL_MAX_ENTRY_DEFAULT_CENTS;
+      if (maxEntry > 0 && priceCents > maxEntry) {
+        this.lastDecision =
+          `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: above model max entry ${maxEntry}¢.`;
+        return false;
+      }
+    } else {
       const minEntry = Number(this.config.minEntryCents);
       if (Number.isFinite(minEntry) && minEntry > 0 && priceCents < minEntry) {
         this.lastDecision =
@@ -5387,6 +5403,14 @@ class TradingBot {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
       return null;
     }
+    const maxEntry = Number.isFinite(Number(this.config.modelMaxEntryCents))
+      ? Number(this.config.modelMaxEntryCents)
+      : MODEL_MAX_ENTRY_DEFAULT_CENTS;
+    if (maxEntry > 0 && priceCents > maxEntry) {
+      this.lastDecision =
+        `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — above model max entry ${maxEntry}¢.`;
+      return null;
+    }
 
     const leanStrength = Math.abs(Number(window.probabilityUp) - 50) || 1;
     return {
@@ -6094,6 +6118,7 @@ module.exports = {
   scoreSymbolFifteenMinuteWindow,
   scoreMarketRegime,
   EDGE_MAX_ENTRY_DEFAULT_CENTS,
+  MODEL_MAX_ENTRY_DEFAULT_CENTS,
   EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS,
   EDGE_PRE_CLOSE_MINUTES_DEFAULT,
   EDGE_BREAKEVEN_AFTER_MINUTES_DEFAULT,

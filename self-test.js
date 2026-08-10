@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -5313,6 +5313,7 @@ async function testModelStrategy() {
   check(!modelDirectionAgainstHeld('UP', 'yes'), 'UP not against YES');
   check(isModelStrategyMode({ strategyMode: 'model' }), 'model mode helper');
   check(isModelTrade({ strategy: 'model' }), 'model trade helper');
+  checkEq(MODEL_MAX_ENTRY_DEFAULT_CENTS, 93, 'model max entry default 93¢');
 
   // Entry: UP → YES with 12m left (w5)
   {
@@ -5344,6 +5345,38 @@ async function testModelStrategy() {
     const opp = await bot._evaluateSymbolForModel('ETH', preds);
     check(opp && opp.side === 'yes', 'model UP → YES entry');
     checkEq(opp && opp.windowKey, 'w5', '12m left uses w5');
+  }
+
+  // Never enter above 93¢
+  {
+    const closeMs = Date.now() + 12 * 60 * 1000;
+    const bot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-RICH',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(closeMs).toISOString(),
+        yes_bid: 93,
+        yes_ask: 95,
+        no_bid: 5,
+        no_ask: 7,
+      }),
+      { strategyMode: 'model', modelMinConfidence: 50 }
+    );
+    const preds = {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: {
+          w5: { ...win(70, 80), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    };
+    const rich = await bot._evaluateSymbolForModel('ETH', preds);
+    checkEq(rich, null, 'blocks model entry above 93¢');
+    check(/max entry 93/i.test(bot.lastDecision || ''), 'decision cites model max entry');
   }
 
   // Confidence floor blocks weak calls
@@ -5414,7 +5447,7 @@ async function testModelStrategy() {
     checkEq(trade.exitReason, 'model_lean_flip', 'underwater lean flip reason');
   }
 
-  // Flat/green + lean against → breakeven scratch (don't ride into a loss)
+  // Green + lean against → model TP (bank the bid)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -5444,11 +5477,45 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, against);
-    checkEq(trade.exitReason, 'breakeven', 'flat/green lean against → breakeven');
+    checkEq(trade.exitReason, 'take_profit', 'green + lean against → model TP');
+    checkEq(trade.exitPriceCents, 56, 'model TP banks the bid');
+  }
+
+  // Exactly flat + lean against → breakeven scratch
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 55,
+        no_bid: 45,
+      }),
+      { strategyMode: 'model', modelMinConfidence: 55 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      windowCloseTime: now + 12 * 60 * 1000,
+    });
+    const against = {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(35, 70), tracking: { predictedDirection: 'DOWN' } },
+          w10: win(40, 70),
+          w15: win(45, 60),
+        },
+      },
+    };
+    await bot._manageOpenTrade(trade, against);
+    checkEq(trade.exitReason, 'breakeven', 'flat + lean against → breakeven');
     checkEq(trade.exitPriceCents, 55, 'paper BE books entry');
   }
 
-  // Flat/green + confidence collapse → breakeven and wait
+  // Flat/green + confidence collapse → model exit (green → TP, flat → BE)
   {
     const now = Date.now();
     const bot = makeBot(
