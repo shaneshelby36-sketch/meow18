@@ -60,7 +60,11 @@ function bookSideFromLegacy(side, action) {
 
 /**
  * Build Create Order V2 body (POST /portfolio/events/orders).
- * priceCents is the limit on the traded outcome (1–99), same as legacy yes_price/no_price.
+ *
+ * V2 uses a single YES-denominated book: `bid` = buy YES, `ask` = sell YES
+ * (= buy NO at 1−price). `priceCents` from callers is always the traded
+ * outcome limit (YES ¢ or NO ¢). For NO outcomes we convert to the YES-leg
+ * wire price (100 − noCents) — sending the raw NO ¢ as `price` never crosses.
  */
 function buildCreateOrderV2Body({
   ticker,
@@ -79,13 +83,18 @@ function buildCreateOrderV2Body({
   if (!Number.isFinite(contracts) || contracts < 1) {
     throw new Error(`Invalid Kalshi order count: ${count}`);
   }
+  const outcome = String(side || '').toLowerCase();
+  const yesLegCents = outcome === 'no' ? 100 - rounded : rounded;
+  if (yesLegCents < 1 || yesLegCents > 99) {
+    throw new Error(`Invalid Kalshi YES-leg price from ${outcome} ${rounded}¢`);
+  }
   const tif = String(timeInForce || 'good_till_canceled').toLowerCase();
   const allowedTif = new Set(['good_till_canceled', 'immediate_or_cancel', 'fill_or_kill']);
   return {
     ticker,
     side: bookSideFromLegacy(side, action),
     count: `${contracts}.00`,
-    price: (rounded / 100).toFixed(4),
+    price: (yesLegCents / 100).toFixed(4),
     time_in_force: allowedTif.has(tif) ? tif : 'good_till_canceled',
     self_trade_prevention_type: 'taker_at_cross',
     client_order_id: clientOrderId || crypto.randomUUID(),

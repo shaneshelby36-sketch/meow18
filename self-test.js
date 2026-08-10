@@ -517,6 +517,25 @@ function testKalshiClient() {
     timeInForce: 'immediate_or_cancel',
   });
   checkEq(iocBody.time_in_force, 'immediate_or_cancel', 'V2 body supports IOC for live entry');
+  const buyNoBody = buildCreateOrderV2Body({
+    ticker: 'KXBTC15M-TEST',
+    side: 'no',
+    action: 'buy',
+    count: 11,
+    priceCents: 84, // NO ¢ — V2 wire must be YES-leg 16¢
+    clientOrderId: 'cid-no',
+  });
+  checkEq(buyNoBody.side, 'ask', 'buy NO → ask book');
+  checkEq(buyNoBody.price, '0.1600', 'buy NO 84¢ → YES-leg price 16¢');
+  const sellNoBody = buildCreateOrderV2Body({
+    ticker: 'KXBTC15M-TEST',
+    side: 'no',
+    action: 'sell',
+    count: 3,
+    priceCents: 70,
+  });
+  checkEq(sellNoBody.side, 'bid', 'sell NO → bid book');
+  checkEq(sellNoBody.price, '0.3000', 'sell NO 70¢ → YES-leg price 30¢');
   let badPrice = false;
   try {
     buildCreateOrderV2Body({
