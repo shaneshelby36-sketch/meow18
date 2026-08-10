@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 12;
+const SETTINGS_DEFAULTS_VERSION = 13;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -128,17 +128,17 @@ function liquidityPriority(symbol) {
 }
 
 /**
- * Settle AUTO: asks at/above this are demoted so mid-band names (e.g. 85–93¢)
- * get tried before nearly-certain 94¢+ tickets on the usual majors.
+ * Settle AUTO: asks at/above this are demoted so mid-band names get tried
+ * before nearly-certain 95¢+ tickets on the usual majors.
  */
 function settleRichAskFloorCents(config = {}) {
   const n = Number(config.settleRichAskFloorCents);
   if (Number.isFinite(n) && n >= 50 && n <= 99) return Math.round(n);
-  return 94;
+  return 95;
 }
 
 /** Ask component of settle rankScore (higher = better). Rich asks get −200. */
-function settleRankAskScore(priceCents, { richFloorCents = 94, usedLateBand = false } = {}) {
+function settleRankAskScore(priceCents, { richFloorCents = 95, usedLateBand = false } = {}) {
   const p = Math.round(Number(priceCents));
   if (!Number.isFinite(p)) return -999;
   const bandBonus = usedLateBand ? 0 : 100;
@@ -148,23 +148,23 @@ function settleRankAskScore(priceCents, { richFloorCents = 94, usedLateBand = fa
 
 /**
  * Minimum cents of upside to settlement (100 − ask) required to open a settle
- * trade. Default 8¢ (independent of stop — a wide 20¢ noise stop must not
- * force asks ≤80¢). 0 = off. Still blocks 94–95¢ dead R:R tickets via rich floor.
+ * trade. Default 6¢ so 90–94¢ hold-to-settle tickets are allowed. 0 = off.
+ * Still blocks 95¢+ dead R:R tickets via rich floor.
  */
 function settleMinUpsideCents(config = {}) {
   const explicit = Number(config.settleMinUpsideCents);
   if (Number.isFinite(explicit) && explicit <= 0) return 0;
   if (Number.isFinite(explicit) && explicit > 0) return Math.min(50, Math.round(explicit));
-  return 8;
+  return 6;
 }
 
-/** Settle-mode entry band (default 85–92¢). Clamped to 1–99; swaps if inverted. */
+/** Settle-mode entry band (default 85–94¢). Clamped to 1–99; swaps if inverted. */
 function settleEntryBand(config = {}) {
   let min = Number(config.settleEntryMinCents);
   let max = Number(config.settleEntryMaxCents);
   if (!Number.isFinite(min)) min = 85;
-  // Default 92: with an 8¢ stop you need ≥8¢ upside to 100 (ask ≤92).
-  if (!Number.isFinite(max)) max = 92;
+  // Default 94: hold-to-settle tier (≥90¢) is allowed through 94¢.
+  if (!Number.isFinite(max)) max = 94;
   min = Math.max(1, Math.min(99, Math.round(min)));
   max = Math.max(1, Math.min(99, Math.round(max)));
   if (max < min) {
@@ -1212,11 +1212,11 @@ class TradingBot {
       // Settle strategy: buy ask in [min,max]¢; tiered target/stale exit by entry
       // (see settleExitPlan), else hold to official settlement.
       settleEntryMinCents: 85,
-      settleEntryMaxCents: 92, // keep mid-band; min upside filter is separate (8¢)
+      settleEntryMaxCents: 94, // includes ≥90¢ hold-to-settle through 94¢
       // Wide vs 8¢: Kalshi mid-band often wicks 10–15¢ without thesis death.
       settleStopLossCents: 20,
       // Reject asks with less upside to 100 than this. Independent of stop. 0 = off.
-      settleMinUpsideCents: 8,
+      settleMinUpsideCents: 6, // allows 94¢ (6¢ to 100); 95¢+ still blocked
       settleMinMinutesToOpen: 0.5, // still need a little time; 0 = allow until last seconds
       settleMaxMinutesToOpen: 12, // late-ish windows (was 8 — early 85¢ quotes looked stuck)
       // Settle same-side sit-out after stop (longer than Edge — prevents SOL-style loops).
@@ -1231,8 +1231,8 @@ class TradingBot {
       // After this many minutes parked flat (±1¢) or small-green (+2..+5¢ under target), exit.
       // 0 = off. Does not apply to ≥90¢ hold-to-settle tier.
       settleStuckHoldMinutes: 3,
-      // AUTO settle: prefer asks below this before 94¢+ “almost certain” tickets.
-      settleRichAskFloorCents: 94,
+      // AUTO settle: prefer asks below this before 95¢+ “almost certain” tickets.
+      settleRichAskFloorCents: 95,
       stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
       // Settle NEAR only: risk half stake (thinner book / choppier). Other coins full size.
       halfStakeNear: 'on',

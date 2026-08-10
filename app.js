@@ -1577,7 +1577,7 @@ async function loadBotConfigIntoForm() {
     const settleMin = document.getElementById('bot-settle-min');
     if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 85;
     const settleMax = document.getElementById('bot-settle-max');
-    if (settleMax) settleMax.value = c.settleEntryMaxCents != null ? c.settleEntryMaxCents : 92;
+    if (settleMax) settleMax.value = c.settleEntryMaxCents != null ? c.settleEntryMaxCents : 94;
     const settleStop = document.getElementById('bot-settle-stoploss');
     if (settleStop) {
       const raw = c.settleStopLossCents != null ? Number(c.settleStopLossCents) : 20;
@@ -1709,7 +1709,7 @@ async function saveBotConfig(opts = {}) {
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '85'),
-    settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '92'),
+    settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '94'),
     settleStopLossCents: Math.max(
       8,
       parseFloat(document.getElementById('bot-settle-stoploss')?.value || '20') || 20

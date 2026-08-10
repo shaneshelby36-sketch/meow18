@@ -4214,19 +4214,19 @@ async function testBotTradingFlow() {
 
   section('settle strategy helpers');
   checkEq(settleEntryBand({}).min, 85, 'settle band default min 85');
-  checkEq(settleEntryBand({}).max, 92, 'settle band default max 92');
-  checkEq(settleMinUpsideCents({}), 8, 'settle min upside defaults to 8¢');
+  checkEq(settleEntryBand({}).max, 94, 'settle band default max 94');
+  checkEq(settleMinUpsideCents({}), 6, 'settle min upside defaults to 6¢');
   checkEq(
     settleMinUpsideCents({ settleStopLossCents: 20 }),
-    8,
+    6,
     'wide settle stop does not force min upside = 20'
   );
   check(isSettleEntryPriceCents(87), '87¢ inside settle band');
-  check(isSettleEntryPriceCents(92), '92¢ at settle band max');
-  check(!isSettleEntryPriceCents(93), '93¢ outside tightened settle band');
+  check(isSettleEntryPriceCents(92), '92¢ inside settle band');
+  check(isSettleEntryPriceCents(94), '94¢ at settle band max (hold-to-settle)');
+  check(!isSettleEntryPriceCents(95), '95¢ outside settle band');
   check(!isSettleEntryPriceCents(84), '84¢ outside settle band');
   check(!isSettleEntryPriceCents(96), '96¢ outside settle band');
-  check(!isSettleEntryPriceCents(95), '95¢ outside tightened settle band');
   check(!isSettleEntryPriceCents(72, {}, 10), '72¢ blocked with 10m left (late not open)');
   check(isSettleEntryPriceCents(72, {}, 3), '72¢ allowed with 3m left (late fallback)');
   checkEq(settleEffectiveEntryBand({}, 3).min, 70, 'late effective band floor 70');
@@ -4355,8 +4355,8 @@ async function testBotTradingFlow() {
       'settle AUTO prefers 90¢ ask over 95¢ (rich demotion)'
     );
     check(
-      settleRankAskScore(92) > settleRankAskScore(88),
-      'among sub-94 asks, higher still ranks better'
+      settleRankAskScore(94) > settleRankAskScore(88),
+      'among sub-95 asks, higher still ranks better'
     );
     checkEq(settleExitPlan(91).targetCents, null, 'entry 91¢ holds to settle');
     checkEq(settleExitPlan(91).tier, 'hold', 'entry 91¢ is hold tier');
