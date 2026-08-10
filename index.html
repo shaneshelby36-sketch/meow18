@@ -340,7 +340,7 @@
         </div>
 
         <div id="bot-settings-settle" class="bot-field-grid" hidden>
-          <p class="settings-hint">Buys YES or NO when the ask is in the band (default 85–94¢), with enough time left. 90–94¢ entries hold to settlement (stop still on). Skips “rich” asks (≥95¢) and thin upside to 100. Soft filter: engine lean when Coinbase is ready. Late fallback can dip lower. Entry-tiered exits On = TP/stale/stuck by entry; Off = stop + hold to settle.</p>
+          <p class="settings-hint">Buys YES when ask is in the primary band (default 85–94¢). NO may enter from 80¢ (mid-tier) through the same max so downs in the 80s count. 90–94¢ hold to settlement (stop still on). Skips “rich” asks (≥95¢). Coinbase lean only breaks ties when both sides qualify. Late fallback can dip lower. Entry-tiered exits On = TP/stale/stuck by entry; Off = stop + hold to settle.</p>
           <label>Settle entry min (¢)
             <div class="slider-row">
               <input id="bot-settle-min" type="range" min="65" max="95" step="1" />

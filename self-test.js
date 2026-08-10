@@ -4730,7 +4730,7 @@ async function testBotTradingFlow() {
     checkEq(noFeedOpp && noFeedOpp.engineReady, false, 'Kalshi-only marks engineReady false');
     checkEq(noFeedOpp && noFeedOpp.priceCents, 88, 'Kalshi-only uses yes ask');
 
-    // Ready + lean against still blocks
+    // Ready + lean against: still take the in-band side (lean is preference, not veto)
     const leanNo = await kalshiOnlyBot._evaluateSymbolForSettle('HYPE', {
       HYPE: {
         ready: true,
@@ -4742,8 +4742,88 @@ async function testBotTradingFlow() {
         },
       },
     });
-    checkEq(leanNo, null, 'settle still blocks when spot lean disagrees');
-    check(/leans NO/i.test(kalshiOnlyBot.lastDecision || ''), 'lean block decision mentions leans NO');
+    check(leanNo, 'settle takes in-band ask even when spot lean disagrees');
+    checkEq(leanNo && leanNo.side, 'yes', 'only YES in band → YES despite lean NO');
+
+    // NO priced in band (YES cheap) + lean YES → still take NO
+    const downMarket = {
+      ticker: 'KXHYPE15M-DOWN',
+      status: 'open',
+      floor_strike: 40,
+      close_time: new Date(now + 8 * 60 * 1000).toISOString(),
+      yes_bid: 8,
+      yes_ask: 10,
+      no_bid: 90,
+      no_ask: 92,
+    };
+    const downBot = makeBot(mockClient(downMarket), {
+      symbol: 'HYPE',
+      strategyMode: 'settle',
+      settleEntryMinCents: 80,
+      settleEntryMaxCents: 94,
+      settleMinMinutesToOpen: 0.5,
+      settleMaxMinutesToOpen: 12,
+      settleStopLossCents: 40,
+      settleMinUpsideCents: 6,
+      settleRichAskFloorCents: 95,
+      minEntryCents: 1,
+    });
+    downBot.config.strategyMode = 'settle';
+    downBot.config.symbol = 'HYPE';
+    const downOpp = await downBot._evaluateSymbolForSettle('HYPE', {
+      HYPE: {
+        ready: true,
+        price: 40,
+        windows: {
+          w5: { probabilityUp: 60, probabilityDown: 40, confidence: 70 },
+          w10: { probabilityUp: 60, probabilityDown: 40, confidence: 70 },
+          w15: { probabilityUp: 60, probabilityDown: 40, confidence: 70 },
+        },
+      },
+    });
+    check(downOpp, 'settle takes NO when NO ask is in band');
+    checkEq(downOpp && downOpp.side, 'no', 'NO-in-band pick is NO even if spot leans YES');
+    checkEq(downOpp && downOpp.priceCents, 92, 'NO ask uses 100−yes_bid');
+
+    // NO in the 80s (below YES primary min 85) still qualifies
+    const no80Market = {
+      ticker: 'KXHYPE15M-NO80',
+      status: 'open',
+      floor_strike: 40,
+      close_time: new Date(now + 8 * 60 * 1000).toISOString(),
+      yes_bid: 17,
+      yes_ask: 19,
+      no_bid: 81,
+      no_ask: 83,
+    };
+    const no80Bot = makeBot(mockClient(no80Market), {
+      symbol: 'HYPE',
+      strategyMode: 'settle',
+      settleEntryMinCents: 85,
+      settleEntryMaxCents: 94,
+      settleNoEntryMinCents: 80,
+      settleMinMinutesToOpen: 0.5,
+      settleMaxMinutesToOpen: 12,
+      settleStopLossCents: 40,
+      settleMinUpsideCents: 6,
+      settleRichAskFloorCents: 95,
+      minEntryCents: 1,
+    });
+    no80Bot.config.strategyMode = 'settle';
+    const no80Opp = await no80Bot._evaluateSymbolForSettle('HYPE', {
+      HYPE: { ready: false, price: null },
+    });
+    check(no80Opp, 'settle allows NO in the 80s');
+    checkEq(no80Opp && no80Opp.side, 'no', '80s down pick is NO');
+    checkEq(no80Opp && no80Opp.priceCents, 83, 'NO 80s uses 100−yes_bid');
+    check(
+      !isSettleEntryPriceCents(83, no80Bot.config, 8, 'yes'),
+      'YES still blocked at 83 with primary min 85'
+    );
+    check(
+      isSettleEntryPriceCents(83, no80Bot.config, 8, 'no'),
+      'NO allowed at 83 with no-min 80'
+    );
 
     // Rank scan includes not-ready coins (not stuck on "Not ready")
     const rankBot = makeBot(
