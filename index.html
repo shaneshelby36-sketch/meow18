@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint">Pure engine windows: UP→YES, DOWN→NO. Minutes left pick the window (&gt;10m w5, 5–10m w10, ≤5m w5). Exit only when that window’s locked lean flips against you; otherwise hold to Kalshi settlement. No Edge/Settle stops, bands, or cooldowns.</p>
+          <p class="settings-hint">Pure engine windows: UP→YES, DOWN→NO. Minutes left pick the window (&gt;10m w5, 5–10m w10, ≤5m w5). If lean turns against you while flat/green (or confidence drops under the floor), scratch breakeven and wait. If already red when lean flips → model_lean_flip. Otherwise hold to Kalshi settlement.</p>
           <label>Min confidence
             <div class="slider-row">
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />

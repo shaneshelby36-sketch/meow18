@@ -3853,16 +3853,48 @@ class TradingBot {
       return;
     }
 
-    // Model: window lean only — flip when active locked direction disagrees; else hold to settle.
+    // Model: window lean + don't lose much.
+    // Flat/green + lean against (or confidence collapse) → scratch breakeven and wait.
+    // Underwater + lean against → model_lean_flip. Else hold to settle.
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
-      if (
+      const entry = Number(trade.entryPriceCents);
+      const bidOk =
+        heldSideBidCents != null &&
+        Number.isFinite(heldSideBidCents) &&
+        heldSideBidCents >= 1 &&
+        heldSideBidCents <= 99;
+      const flatOrGreen =
+        bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents >= entry;
+      const against =
         picked &&
         picked.direction &&
-        heldSideBidCents != null &&
-        modelDirectionAgainstHeld(picked.direction, trade.side)
-      ) {
+        modelDirectionAgainstHeld(picked.direction, trade.side);
+      const minConf = Number.isFinite(Number(this.config.modelMinConfidence))
+        ? Number(this.config.modelMinConfidence)
+        : 55;
+      const weakConf =
+        picked &&
+        picked.window &&
+        Number.isFinite(picked.window.confidence) &&
+        picked.window.confidence < minConf;
+
+      if (bidOk && against && flatOrGreen) {
+        const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
+        await this._closePosition(trade, beFill, 'breakeven', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+      if (bidOk && against) {
         await this._closePosition(trade, heldSideBidCents, 'model_lean_flip', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+      if (bidOk && flatOrGreen && weakConf) {
+        const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
+        await this._closePosition(trade, beFill, 'breakeven', {
           liveSellPriceCents: heldSideBidCents,
         });
       }

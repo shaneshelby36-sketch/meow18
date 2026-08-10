@@ -5378,7 +5378,7 @@ async function testModelStrategy() {
     check(/confidence/i.test(bot.lastDecision || ''), 'decision cites confidence');
   }
 
-  // Locked lean-flip exit (w5 locked DOWN while holding YES)
+  // Underwater + locked lean against → model_lean_flip (can't invent BE)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -5410,8 +5410,75 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, against);
-    checkEq(trade.status, 'closed', 'model lean flip closes');
-    checkEq(trade.exitReason, 'model_lean_flip', 'model lean flip reason');
+    checkEq(trade.status, 'closed', 'model lean flip closes when red');
+    checkEq(trade.exitReason, 'model_lean_flip', 'underwater lean flip reason');
+  }
+
+  // Flat/green + lean against → breakeven scratch (don't ride into a loss)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 56,
+        no_bid: 44,
+      }),
+      { strategyMode: 'model', modelMinConfidence: 55 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      windowCloseTime: now + 12 * 60 * 1000,
+    });
+    const against = {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(35, 70), tracking: { predictedDirection: 'DOWN' } },
+          w10: win(40, 70),
+          w15: win(45, 60),
+        },
+      },
+    };
+    await bot._manageOpenTrade(trade, against);
+    checkEq(trade.exitReason, 'breakeven', 'flat/green lean against → breakeven');
+    checkEq(trade.exitPriceCents, 55, 'paper BE books entry');
+  }
+
+  // Flat/green + confidence collapse → breakeven and wait
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 55,
+        no_bid: 45,
+      }),
+      { strategyMode: 'model', modelMinConfidence: 70 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      windowCloseTime: now + 12 * 60 * 1000,
+    });
+    const weak = {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(58, 40), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    };
+    await bot._manageOpenTrade(trade, weak);
+    checkEq(trade.exitReason, 'breakeven', 'weak confidence while flat → breakeven');
   }
 
   // Hold when lean still agrees — even if bid dumps (no hard stop)
