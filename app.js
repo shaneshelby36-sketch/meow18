@@ -1439,7 +1439,7 @@ function renderSettleExitTableNote(config) {
     config &&
     (config.settleVolatileExits === 'on' || config.settleVolatileExits === true);
   note.textContent = volatileOn
-    ? 'Volatile package ON (red Apply): no hold-to-settle; TP ≥95¢; stuck/stale still run. Stop-loss still applies. Green Apply restores normal hold/TP tiers.'
+    ? 'Volatile package ON (red Apply): entry 75–90¢; no hold-to-settle; TP ≥95¢; stale bank at ≤1:30 left; stuck still runs. Stop-loss still applies. Green Apply restores 80–94¢ and normal hold/TP tiers.'
     : 'Live from bot tiers. After a trade’s bid tags 90¢, stuck/stale turn off and it rides settlement even if price dips back under 90 (stop still applies). Tier TP (e.g. 96¢) can still bank if hit. Red-light volatile (when Applied) removes hold-to-settle and banks at ≥95¢ instead.';
 }
 
@@ -1821,8 +1821,11 @@ function renderSettleWindowRec(rec) {
   } else if (light === 'red') {
     const tp = rec.volatileTpFloorCents != null ? rec.volatileTpFloorCents : 95;
     const minLeft = rec.suggestedMinMinutes != null ? rec.suggestedMinMinutes : 2.5;
+    const stale = rec.volatileStaleMinutes != null ? rec.volatileStaleMinutes : 1.5;
+    const bandMin = rec.volatileEntryMinCents != null ? rec.volatileEntryMinCents : 75;
+    const bandMax = rec.volatileEntryMaxCents != null ? rec.volatileEntryMaxCents : 90;
     text.textContent =
-      `Red · suggest ${mins}m (volatile) · no hold-to-settle · TP ≥${tp}¢ · no opens ≤${minLeft}m` +
+      `Red · suggest ${mins}m (volatile) · entry ${bandMin}–${bandMax}¢ · no hold-to-settle · TP ≥${tp}¢ · stale ≤${stale}m · no opens ≤${minLeft}m` +
       ` · ${look}, n=${n}. ${rec.reason || ''}`;
   } else {
     text.textContent = `Neutral · ${rec.reason || 'Leave slider as-is.'} Apply volatile or stable anytime.`;
@@ -1865,10 +1868,22 @@ async function applySettleWindowRec(light) {
       feedback.style.color = 'var(--up)';
     }
     renderSettleWindowRec(data.recommendation);
-    const slider = document.getElementById('bot-settle-maxmin');
-    if (slider && data.config && data.config.settleMaxMinutesToOpen != null) {
-      slider.value = data.config.settleMaxMinutesToOpen;
-      updateSliderDisplay('bot-settle-maxmin');
+    if (data.config) {
+      const maxMin = document.getElementById('bot-settle-maxmin');
+      if (maxMin && data.config.settleMaxMinutesToOpen != null) {
+        maxMin.value = data.config.settleMaxMinutesToOpen;
+        updateSliderDisplay('bot-settle-maxmin');
+      }
+      const entryMin = document.getElementById('bot-settle-min');
+      if (entryMin && data.config.settleEntryMinCents != null) {
+        entryMin.value = data.config.settleEntryMinCents;
+        updateSliderDisplay('bot-settle-min');
+      }
+      const entryMax = document.getElementById('bot-settle-max');
+      if (entryMax && data.config.settleEntryMaxCents != null) {
+        entryMax.value = data.config.settleEntryMaxCents;
+        updateSliderDisplay('bot-settle-max');
+      }
     }
     renderSettleExitTableNote(data.config);
     refreshBotStatus();

@@ -429,8 +429,16 @@ const SETTLE_WINDOW_VOLATILE_MAX_MINUTES = 5.5;
 const SETTLE_WINDOW_STABLE_MIN_MINUTES = 0.5;
 /** Red Apply: stop new opens with ≤2:30 left. */
 const SETTLE_WINDOW_VOLATILE_MIN_MINUTES = 2.5;
+/** Red Apply: settle entry band. */
+const SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS = 75;
+const SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS = 90;
+/** Green Apply: restore default settle entry band. */
+const SETTLE_WINDOW_STABLE_ENTRY_MIN_CENTS = 80;
+const SETTLE_WINDOW_STABLE_ENTRY_MAX_CENTS = 94;
 /** Red Apply: bank at ≥ this bid (no hold-to-settle). */
 const SETTLE_VOLATILE_TP_FLOOR_CENTS = 95;
+/** Red Apply: stale-green bank when ≤ this many minutes left. */
+const SETTLE_VOLATILE_STALE_MINUTES = 1.5;
 const SETTLE_WINDOW_RETRO_SHORT_MS = 2 * 60 * 60 * 1000;
 const SETTLE_WINDOW_RETRO_LONG_MS = 12 * 60 * 60 * 1000;
 const SETTLE_WINDOW_RETRO_MIN_TRADES = 3;
@@ -496,6 +504,9 @@ function settleWindowPackageForLight(light) {
       settleMaxMinutesToOpen: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
       settleMinMinutesToOpen: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
       settleVolatileExits: 'on',
+      settleEntryMinCents: SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS,
+      settleEntryMaxCents: SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS,
+      settleNoEntryMinCents: SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS,
     };
   }
   if (L === 'green') {
@@ -504,6 +515,9 @@ function settleWindowPackageForLight(light) {
       settleMaxMinutesToOpen: SETTLE_WINDOW_STABLE_MAX_MINUTES,
       settleMinMinutesToOpen: SETTLE_WINDOW_STABLE_MIN_MINUTES,
       settleVolatileExits: 'off',
+      settleEntryMinCents: SETTLE_WINDOW_STABLE_ENTRY_MIN_CENTS,
+      settleEntryMaxCents: SETTLE_WINDOW_STABLE_ENTRY_MAX_CENTS,
+      settleNoEntryMinCents: SETTLE_WINDOW_STABLE_ENTRY_MIN_CENTS,
     };
   }
   return null;
@@ -542,6 +556,9 @@ function recommendSettleOpenWindow(trades, { now = Date.now(), currentMaxMinutes
       stableMinMinutes: SETTLE_WINDOW_STABLE_MIN_MINUTES,
       volatileMinMinutes: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
       volatileTpFloorCents: SETTLE_VOLATILE_TP_FLOOR_CENTS,
+      volatileStaleMinutes: SETTLE_VOLATILE_STALE_MINUTES,
+      volatileEntryMinCents: SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS,
+      volatileEntryMaxCents: SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS,
     };
   }
 
@@ -597,7 +614,9 @@ function recommendSettleOpenWindow(trades, { now = Date.now(), currentMaxMinutes
     suggestedMinMinutes = SETTLE_WINDOW_VOLATILE_MIN_MINUTES;
     suggestedVolatileExits = 'on';
     reason +=
-      ` Volatile package: no hold-to-settle, TP ≥${SETTLE_VOLATILE_TP_FLOOR_CENTS}¢, ` +
+      ` Volatile package: entry ${SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS}–${SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS}¢, ` +
+      `no hold-to-settle, TP ≥${SETTLE_VOLATILE_TP_FLOOR_CENTS}¢, ` +
+      `stale @ ≤${SETTLE_VOLATILE_STALE_MINUTES}m, ` +
       `no new opens ≤${SETTLE_WINDOW_VOLATILE_MIN_MINUTES}m.`;
   } else if (light === 'green') {
     suggestedMinMinutes = SETTLE_WINDOW_STABLE_MIN_MINUTES;
@@ -618,6 +637,9 @@ function recommendSettleOpenWindow(trades, { now = Date.now(), currentMaxMinutes
     stableMinMinutes: SETTLE_WINDOW_STABLE_MIN_MINUTES,
     volatileMinMinutes: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
     volatileTpFloorCents: SETTLE_VOLATILE_TP_FLOOR_CENTS,
+    volatileStaleMinutes: SETTLE_VOLATILE_STALE_MINUTES,
+    volatileEntryMinCents: SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS,
+    volatileEntryMaxCents: SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS,
   };
 }
 
@@ -713,12 +735,10 @@ function settleEffectiveExitPlan(entryPriceCents, config = {}) {
   const floor = SETTLE_VOLATILE_TP_FLOOR_CENTS;
   const targetCents =
     plan.targetCents == null ? floor : Math.max(plan.targetCents, floor);
-  const staleMinutesLeft =
-    plan.staleMinutesLeft != null ? plan.staleMinutesLeft : 2;
   return {
     ...plan,
     targetCents,
-    staleMinutesLeft,
+    staleMinutesLeft: SETTLE_VOLATILE_STALE_MINUTES,
     holdToSettle: false,
     volatile: true,
   };
@@ -1829,13 +1849,16 @@ class TradingBot {
       settleMaxMinutesToOpen: pkg.settleMaxMinutesToOpen,
       settleMinMinutesToOpen: pkg.settleMinMinutesToOpen,
       settleVolatileExits: pkg.settleVolatileExits,
+      settleEntryMinCents: pkg.settleEntryMinCents,
+      settleEntryMaxCents: pkg.settleEntryMaxCents,
+      settleNoEntryMinCents: pkg.settleNoEntryMinCents,
     };
     const result = this.updateConfig(patch);
     const manual = forced === 'red' || forced === 'green';
     const volatileBit =
       patch.settleVolatileExits === 'on'
-        ? ` volatile on (no hold-to-settle, TP ≥${SETTLE_VOLATILE_TP_FLOOR_CENTS}¢, min ${patch.settleMinMinutesToOpen}m).`
-        : ' volatile off (normal hold/TP rules).';
+        ? ` volatile on (entry ${patch.settleEntryMinCents}–${patch.settleEntryMaxCents}¢, no hold-to-settle, TP ≥${SETTLE_VOLATILE_TP_FLOOR_CENTS}¢, min ${patch.settleMinMinutesToOpen}m).`
+        : ` volatile off (entry ${patch.settleEntryMinCents}–${patch.settleEntryMaxCents}¢, normal hold/TP rules).`;
     const msg =
       `Applied settle open window ${chosen.toUpperCase()}` +
       (manual ? ' (manual)' : '') +
@@ -5664,5 +5687,10 @@ module.exports = {
   SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
   SETTLE_WINDOW_STABLE_MIN_MINUTES,
   SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
+  SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS,
+  SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS,
+  SETTLE_WINDOW_STABLE_ENTRY_MIN_CENTS,
+  SETTLE_WINDOW_STABLE_ENTRY_MAX_CENTS,
   SETTLE_VOLATILE_TP_FLOOR_CENTS,
+  SETTLE_VOLATILE_STALE_MINUTES,
 };
