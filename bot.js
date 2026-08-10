@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 15;
+const SETTINGS_DEFAULTS_VERSION = 16;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -523,7 +523,7 @@ const SETTLE_STOP_LOSS_MIN_CENTS = 8;
 function normalizeSettleStopLossCents(config) {
   if (!config || typeof config !== 'object') return config;
   let n = Number(config.settleStopLossCents);
-  if (!Number.isFinite(n)) n = 35;
+  if (!Number.isFinite(n)) n = 40;
   config.settleStopLossCents = Math.max(
     SETTLE_STOP_LOSS_MIN_CENTS,
     Math.min(40, Math.round(n))
@@ -1296,9 +1296,8 @@ class TradingBot {
       // (see settleExitPlan), else hold to official settlement.
       settleEntryMinCents: 85,
       settleEntryMaxCents: 94, // includes ≥90¢ hold-to-settle through 94¢
-      // Calibrated to recent live dumps (~28–36¢ common; 90→40 gaps still gap).
-      // Wider than 20 so reversible wicks that used to stop at −20 can recover.
-      settleStopLossCents: 35,
+      // Max allowed stop (40¢): ride reversible wicks; true 90→40 gaps still gap.
+      settleStopLossCents: 40,
       // Reject asks with less upside to 100 than this. Independent of stop. 0 = off.
       settleMinUpsideCents: 6, // allows 94¢ (6¢ to 100); 95¢+ still blocked
       settleMinMinutesToOpen: 0.5, // still need a little time; 0 = allow until last seconds
@@ -2191,6 +2190,19 @@ class TradingBot {
   async _recoverOrderFillsAfterCancel(orderId, { priorOrder = null, attempts = 3, delayMs = 400 } = {}) {
     let bestOrder = priorOrder;
     let bestFilled = this._orderFillCount(priorOrder);
+    // Create/IOC seed already final (remaining 0) — nothing to recover; GET often 404s.
+    if (priorOrder) {
+      const remaining = this._parseFpCount(
+        priorOrder.remaining_count_fp ??
+          priorOrder.remainingCountFp ??
+          priorOrder.remaining_count ??
+          priorOrder.remainingCount
+      );
+      if (remaining === 0) {
+        return { filled: bestFilled, order: bestOrder };
+      }
+    }
+    let sawNotFound = false;
     for (let i = 0; i < attempts; i += 1) {
       try {
         const snap = await this._fetchOrderSnapshot(orderId);
@@ -2216,6 +2228,18 @@ class TradingBot {
           }
         }
       } catch (err) {
+        const notFound =
+          Number(err && err.status) === 404 || /HTTP 404\b/.test(String(err && err.message));
+        if (notFound) {
+          // Canceled IOC / already-gone orders 404 on GET — not actionable.
+          if (!sawNotFound) {
+            sawNotFound = true;
+            console.warn(
+              `[bot] getOrder ${orderId} gone after cancel (404) — using create/seed fill count ${bestFilled}`
+            );
+          }
+          break;
+        }
         console.warn(`[bot] getOrder ${orderId} post-cancel recovery failed:`, err.message);
       }
       if (i < attempts - 1) await this._sleep(delayMs);
