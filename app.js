@@ -1383,9 +1383,6 @@ const SLIDER_UNITS = {
   'bot-takeprofit': (v) => `+${Math.round(v)}¢`,
   'bot-minentries': (v) => `${Math.round(v)}¢`,
   'bot-model-confidence': (v) => `${Math.round(v)}%`,
-  'bot-model-stoploss': (v) => (Number(v) <= 0 ? 'off' : `−${Math.round(v)}¢`),
-  'bot-model-takeprofit': (v) => (Number(v) <= 0 ? 'off' : `+${Math.round(v)}¢`),
-  'bot-model-maxstops': (v) => `${Math.round(v)}`,
   'bot-settle-min': (v) => `${Math.round(v)}¢`,
   'bot-settle-max': (v) => `${Math.round(v)}¢`,
   'bot-settle-stoploss': (v) => `−${Math.round(v)}¢`,
@@ -1531,9 +1528,6 @@ function wireSliderDisplays() {
     'bot-takeprofit',
     'bot-minentries',
     'bot-model-confidence',
-    'bot-model-stoploss',
-    'bot-model-takeprofit',
-    'bot-model-maxstops',
     'bot-settle-min',
     'bot-settle-max',
     'bot-settle-stoploss',
@@ -1641,9 +1635,6 @@ function wireBotConfigAutoSave() {
     'bot-takeprofit',
     'bot-minentries',
     'bot-model-confidence',
-    'bot-model-stoploss',
-    'bot-model-takeprofit',
-    'bot-model-maxstops',
     'bot-settle-min',
     'bot-settle-max',
     'bot-settle-stoploss',
@@ -1705,14 +1696,6 @@ async function loadBotConfigIntoForm() {
     document.getElementById('bot-minentries').value = c.minEntryCents != null ? c.minEntryCents : 40;
     const modelConf = document.getElementById('bot-model-confidence');
     if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 55;
-    const modelStop = document.getElementById('bot-model-stoploss');
-    if (modelStop) modelStop.value = c.modelStopLossCents != null ? c.modelStopLossCents : 0;
-    const modelTp = document.getElementById('bot-model-takeprofit');
-    if (modelTp) modelTp.value = c.modelTakeProfitCents != null ? c.modelTakeProfitCents : 0;
-    const modelMaxStops = document.getElementById('bot-model-maxstops');
-    if (modelMaxStops) {
-      modelMaxStops.value = c.modelMaxStopsPerSession != null ? c.modelMaxStopsPerSession : 2;
-    }
     const settleMin = document.getElementById('bot-settle-min');
     if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 80;
     const settleMax = document.getElementById('bot-settle-max');
@@ -1806,9 +1789,6 @@ async function loadBotConfigIntoForm() {
       'bot-takeprofit',
       'bot-minentries',
       'bot-model-confidence',
-      'bot-model-stoploss',
-      'bot-model-takeprofit',
-      'bot-model-maxstops',
       'bot-settle-min',
       'bot-settle-max',
       'bot-settle-stoploss',
@@ -1953,9 +1933,6 @@ async function saveBotConfig(opts = {}) {
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '55'),
-    modelStopLossCents: parseFloat(document.getElementById('bot-model-stoploss')?.value || '0'),
-    modelTakeProfitCents: parseFloat(document.getElementById('bot-model-takeprofit')?.value || '0'),
-    modelMaxStopsPerSession: parseFloat(document.getElementById('bot-model-maxstops')?.value || '2'),
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '80'),
     settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '94'),
     settleStopLossCents: Math.max(

@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 20;
+const SETTINGS_DEFAULTS_VERSION = 21;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -298,49 +298,11 @@ function pickModelWindow(assetPrediction, minutesRemaining) {
   return { key, window, direction: modelWindowDirection(window) };
 }
 
-/** Live lean of a window clearly against the held Kalshi side. */
-function modelLeanAgainstHeld(window, side) {
-  if (!window) return false;
-  const up = Number(window.probabilityUp);
-  const down = Number(window.probabilityDown);
-  if (Number.isFinite(up) && Number.isFinite(down)) {
-    if (side === 'yes') return down > up;
-    if (side === 'no') return up > down;
-    return false;
-  }
-  const dir = modelWindowDirection(window);
-  if (!dir) return false;
-  return (side === 'yes' && dir === 'DOWN') || (side === 'no' && dir === 'UP');
+/** True when engine direction disagrees with the held Kalshi side. */
+function modelDirectionAgainstHeld(direction, side) {
+  if (direction !== 'UP' && direction !== 'DOWN') return false;
+  return (side === 'yes' && direction === 'DOWN') || (side === 'no' && direction === 'UP');
 }
-
-/**
- * Count closed model stop_loss exits for this crypto in the same Kalshi session
- * (same ticker, else close-time within ~2 minutes).
- */
-function countModelSessionStopLosses(trades, { symbol, closeTime, ticker } = {}) {
-  const sym = String(symbol || '').toUpperCase();
-  if (!sym) return 0;
-  const wantTicker = ticker != null && String(ticker) !== '' ? String(ticker) : null;
-  const close = Number(closeTime);
-  let n = 0;
-  for (const t of trades || []) {
-    if (!t || String(t.strategy || '').toLowerCase() !== 'model') continue;
-    if (String(t.symbol || '').toUpperCase() !== sym) continue;
-    if (t.exitReason !== 'stop_loss') continue;
-    if (t.status && String(t.status) !== 'closed') continue;
-    if (wantTicker && t.ticker && String(t.ticker) === wantTicker) {
-      n += 1;
-      continue;
-    }
-    if (!wantTicker || !t.ticker) {
-      const wc = tradeWindowCloseMs(t);
-      if (Number.isFinite(close) && Number.isFinite(wc) && Math.abs(wc - close) <= 120_000) n += 1;
-    }
-  }
-  return n;
-}
-
-const MODEL_MAX_STOPS_PER_SESSION_DEFAULT = 2;
 
 /** Entry-tiered settle TP/stale exits (default on). Off → stop + hold to settlement only. */
 function isSettleTieredExitsEnabled(config = {}) {
@@ -938,10 +900,6 @@ const EDITABLE_NUMERIC_FIELDS = [
   'settleMinUpsideCents',
   'settleStuckHoldMinutes',
   'modelMinConfidence',
-  'modelStopLossCents',
-  'modelTakeProfitCents',
-  'modelMaxStopsPerSession',
-  'modelMinMinutesToOpen',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -1759,12 +1717,8 @@ class TradingBot {
       edgePreCloseMinutes: EDGE_PRE_CLOSE_MINUTES_DEFAULT,
       edgeBreakevenAfterMinutes: EDGE_BREAKEVEN_AFTER_MINUTES_DEFAULT,
       minMinutesToOpen: 3, // don't open when fewer than this many minutes remain in the window
-      // Model tab: follow locked window lean; optional hard SL/TP (0 = off).
+      // Model tab: window schedule + locked lean only; confidence floor before open.
       modelMinConfidence: 55,
-      modelStopLossCents: 0,
-      modelTakeProfitCents: 0,
-      modelMaxStopsPerSession: MODEL_MAX_STOPS_PER_SESSION_DEFAULT,
-      modelMinMinutesToOpen: 0.5,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
       stopRecoveryCents: 6,
@@ -3899,6 +3853,22 @@ class TradingBot {
       return;
     }
 
+    // Model: window lean only — flip when active locked direction disagrees; else hold to settle.
+    if (isModelTrade(trade)) {
+      const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
+      if (
+        picked &&
+        picked.direction &&
+        heldSideBidCents != null &&
+        modelDirectionAgainstHeld(picked.direction, trade.side)
+      ) {
+        await this._closePosition(trade, heldSideBidCents, 'model_lean_flip', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+      }
+      return;
+    }
+
     if (heldSideBidCents != null && stopLevel != null && heldSideBidCents <= stopLevel) {
       // Trigger on the live bid. Paper books the stop level (entry − drop).
       // Live sells at the real bid — markets don't owe you the stop price.
@@ -3906,47 +3876,12 @@ class TradingBot {
       const entry = Number(trade.entryPriceCents);
       const beStop =
         !isSettleTrade(trade) &&
-        !isModelTrade(trade) &&
         Number.isFinite(entry) &&
         stopLevel >= entry;
       const stopFill = this.config.mode === 'paper' ? stopLevel : heldSideBidCents;
       await this._closePosition(trade, stopFill, beStop ? 'breakeven' : 'stop_loss', {
         liveSellPriceCents: heldSideBidCents,
       });
-      return;
-    }
-
-    // Model strategy: optional hard SL already handled above; primary exit is
-    // active-window lean against the held side; optional TP; else hold.
-    if (isModelTrade(trade)) {
-      const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
-      if (
-        picked &&
-        picked.window &&
-        heldSideBidCents != null &&
-        modelLeanAgainstHeld(picked.window, trade.side)
-      ) {
-        await this._closePosition(trade, heldSideBidCents, 'model_lean_flip', {
-          liveSellPriceCents: heldSideBidCents,
-        });
-        return;
-      }
-      if (takeProfitHit) {
-        const tpFill = this.config.mode === 'paper' ? takeProfitLevel : heldSideBidCents;
-        await this._closePosition(trade, tpFill, 'take_profit', {
-          liveSellPriceCents: heldSideBidCents,
-        });
-        return;
-      }
-      if (nearCertainHit) {
-        const fill =
-          this.config.mode === 'paper'
-            ? Math.min(99, Math.max(nearCertainExitCents, heldSideBidCents))
-            : heldSideBidCents;
-        await this._closePosition(trade, fill, 'near_certain', {
-          liveSellPriceCents: heldSideBidCents,
-        });
-      }
       return;
     }
 
@@ -4186,11 +4121,8 @@ class TradingBot {
     const entry = Number(trade.entryPriceCents);
     if (!Number.isFinite(entry) || entry < 1) return null;
 
-    if (isModelTrade(trade)) {
-      const drop = Number(this.config.modelStopLossCents);
-      if (!Number.isFinite(drop) || drop <= 0) return null;
-      return Math.max(1, Math.round(entry - drop));
-    }
+    // Model holds to settle / lean-flip only — no hard stop.
+    if (isModelTrade(trade)) return null;
 
     if (!isSettleTrade(trade)) {
       const beAfter = Number(this.config.edgeBreakevenAfterMinutes);
@@ -4213,10 +4145,10 @@ class TradingBot {
   }
 
   _takeProfitLevelCents(trade) {
+    // Model does not take profit early — ride lean / settlement.
+    if (isModelTrade(trade)) return null;
     const entry = Number(trade.entryPriceCents);
-    const rise = isModelTrade(trade)
-      ? Number(this.config.modelTakeProfitCents)
-      : Number(this.config.takeProfitCents);
+    const rise = Number(this.config.takeProfitCents);
     if (!Number.isFinite(entry) || entry < 1 || !Number.isFinite(rise) || rise <= 0) return null;
     return Math.min(99, Math.round(entry + rise));
   }
@@ -4240,6 +4172,8 @@ class TradingBot {
     engineConfidence,
     strategy = 'edge',
     entryAttempts = null,
+    modelWindowKey = null,
+    modelDirection = null,
   }) {
     // A paper trade must obey the same price rules as a live order. Without
     // this guard an empty Kalshi quote could be stored as `null` and then
@@ -4248,45 +4182,49 @@ class TradingBot {
       this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: no valid Kalshi quote is available.`;
       return false;
     }
+    const isModel = strategy === 'model';
     const symKey = String(symbol || '').toUpperCase();
     // Never reopen a coin that stopped earlier in this same cycle (same-second knife-catch).
-    if (this._stoppedSymbolsThisCycle && this._stoppedSymbolsThisCycle.has(symKey)) {
+    // Model ignores Edge knife-catch locks — windows decide re-entry.
+    if (!isModel && this._stoppedSymbolsThisCycle && this._stoppedSymbolsThisCycle.has(symKey)) {
       this.lastDecision =
         `Skipped ${symbol}: stopped earlier this cycle — no same-turn reopen.`;
       return false;
     }
     // Hard same-side sit-out after stop (belt-and-suspenders vs evaluate-time gate).
-    const lastStop = this._lastStopLossTrade();
-    if (lastStop) {
-      const sitOut = checkPostStopSameSideCooldown({
-        lastStopTrade: lastStop,
-        forCandidateSymbol: symbol,
-        forCandidateSide: side,
-        cooldownMs: postStopSameSideCooldownMs(this.config),
-        now: Date.now(),
-      });
-      if (!sitOut.ok) {
-        this.lastDecision = sitOut.reason;
-        this._noteProtectionGate(sitOut.reason, { fromSymbol: symbol });
-        return false;
+    if (!isModel) {
+      const lastStop = this._lastStopLossTrade();
+      if (lastStop) {
+        const sitOut = checkPostStopSameSideCooldown({
+          lastStopTrade: lastStop,
+          forCandidateSymbol: symbol,
+          forCandidateSide: side,
+          cooldownMs: postStopSameSideCooldownMs(this.config),
+          now: Date.now(),
+        });
+        if (!sitOut.ok) {
+          this.lastDecision = sitOut.reason;
+          this._noteProtectionGate(sitOut.reason, { fromSymbol: symbol });
+          return false;
+        }
       }
-    }
-    // Same sit-out after settle_weak_switch (BNB 10:11 reopen loop).
-    const lastClosedAny = this._mostRecentClosedTrade();
-    if (lastClosedAny && lastClosedAny.exitReason === 'settle_weak_switch') {
-      const weakSit = checkSameSideExitCooldown({
-        lastTrade: lastClosedAny,
-        exitReasons: ['settle_weak_switch'],
-        forCandidateSymbol: symbol,
-        forCandidateSide: side,
-        cooldownMs: postStopSameSideCooldownMs(this.config),
-        now: Date.now(),
-        reasonVerb: 'weak-switched',
-      });
-      if (!weakSit.ok) {
-        this.lastDecision = weakSit.reason;
-        this._noteProtectionGate(weakSit.reason, { fromSymbol: symbol });
-        return false;
+      // Same sit-out after settle_weak_switch (BNB 10:11 reopen loop).
+      const lastClosedAny = this._mostRecentClosedTrade();
+      if (lastClosedAny && lastClosedAny.exitReason === 'settle_weak_switch') {
+        const weakSit = checkSameSideExitCooldown({
+          lastTrade: lastClosedAny,
+          exitReasons: ['settle_weak_switch'],
+          forCandidateSymbol: symbol,
+          forCandidateSide: side,
+          cooldownMs: postStopSameSideCooldownMs(this.config),
+          now: Date.now(),
+          reasonVerb: 'weak-switched',
+        });
+        if (!weakSit.ok) {
+          this.lastDecision = weakSit.reason;
+          this._noteProtectionGate(weakSit.reason, { fromSymbol: symbol });
+          return false;
+        }
       }
     }
     const closeAt = Number(closeTime);
@@ -4298,17 +4236,20 @@ class TradingBot {
     // Bonus 3rd while a hold has tagged 90¢ — half stake (not stacked with NEAR ½).
     const thirdSlot = isSettle && this.openTrades.length >= 2 && this._hasTouched90Open();
     const minutesLeft = (closeAt - Date.now()) / 60000;
-    const minMinutesToOpen = isSettle
-      ? Number.isFinite(Number(this.config.settleMinMinutesToOpen))
-        ? Number(this.config.settleMinMinutesToOpen)
-        : 0.5
-      : Number.isFinite(Number(this.config.minMinutesToOpen))
-        ? Number(this.config.minMinutesToOpen)
-        : 3;
-    if (minMinutesToOpen > 0 && minutesLeft < minMinutesToOpen) {
-      this.lastDecision =
-        `Skipped ${symbol}: only ${minutesLeft.toFixed(1)} min left (min ${minMinutesToOpen} to open).`;
-      return false;
+    // Model has no min-minutes gate — schedule already picks the active window.
+    if (!isModel) {
+      const minMinutesToOpen = isSettle
+        ? Number.isFinite(Number(this.config.settleMinMinutesToOpen))
+          ? Number(this.config.settleMinMinutesToOpen)
+          : 0.5
+        : Number.isFinite(Number(this.config.minMinutesToOpen))
+          ? Number(this.config.minMinutesToOpen)
+          : 3;
+      if (minMinutesToOpen > 0 && minutesLeft < minMinutesToOpen) {
+        this.lastDecision =
+          `Skipped ${symbol}: only ${minutesLeft.toFixed(1)} min left (min ${minMinutesToOpen} to open).`;
+        return false;
+      }
     }
     if (isSettle) {
       const maxMinutes = Number(this.config.settleMaxMinutesToOpen);
@@ -4334,7 +4275,7 @@ class TradingBot {
           ` (need <${richFloor}¢ and ≥${minUpside}¢ to 100) — trying other cryptos.`;
         return false;
       }
-    } else {
+    } else if (!isModel) {
       const minEntry = Number(this.config.minEntryCents);
       if (Number.isFinite(minEntry) && minEntry > 0 && priceCents < minEntry) {
         this.lastDecision =
@@ -4370,7 +4311,7 @@ class TradingBot {
     const trade = {
       id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
       mode: this.config.mode,
-      strategy: isSettle ? 'settle' : 'edge',
+      strategy: isSettle ? 'settle' : isModel ? 'model' : 'edge',
       symbol,
       ticker,
       side, // 'yes' | 'no'
@@ -4385,6 +4326,12 @@ class TradingBot {
       status: 'open',
       // Settle: peak held bid for weak-ticket lean-switch (confirm at 80¢).
       ...(isSettle ? { peakHeldBidCents: Math.round(priceCents) } : {}),
+      ...(isModel
+        ? {
+            modelWindowKey: modelWindowKey || null,
+            modelDirection: modelDirection || null,
+          }
+        : {}),
     };
 
     if (this.config.mode === 'live') {
@@ -4855,7 +4802,10 @@ class TradingBot {
 
     // One open is fine; a second only if something already held is green.
     // A 3rd settle open is allowed while any hold has tagged 90¢ (half stake).
-    if (this.openTrades.length >= 1) {
+    // Model skips the green gate — windows decide; maxOpenPositions still caps.
+    const settleMode = isSettleStrategyMode(this.config);
+    const modelMode = isModelStrategyMode(this.config);
+    if (this.openTrades.length >= 1 && !modelMode) {
       const extra = await this._canOpenAdditionalPosition();
       if (!extra.ok) {
         this.lastDecision = extra.reason;
@@ -4866,10 +4816,9 @@ class TradingBot {
     // After a stop, don't stack a second leg while the wound is still fresh —
     // briefly cap at 1 open (postStopMaxOneMinutes, default 1.5m), then
     // normal maxOpenPositions applies again. Other gates still apply.
-    const preferOtherThan = this._lastStopLossSymbol();
-    const settleMode = isSettleStrategyMode(this.config);
-    const modelMode = isModelStrategyMode(this.config);
-    const maxOneActive = isPostStopMaxOneActive(this._lastStopLossTrade(), this.config);
+    // Model ignores post-stop max-1 — no Edge protection rules.
+    const preferOtherThan = modelMode ? null : this._lastStopLossSymbol();
+    const maxOneActive = !modelMode && isPostStopMaxOneActive(this._lastStopLossTrade(), this.config);
     if (preferOtherThan && this.openTrades.length >= 1 && maxOneActive) {
       const mins = Number(this.config.postStopMaxOneMinutes);
       const minsLabel = Number.isFinite(mins) && mins > 0 ? mins : POST_STOP_MAX_ONE_DEFAULT_MINUTES;
@@ -4900,15 +4849,10 @@ class TradingBot {
 
     if (modelMode) {
       opportunity =
-        this.config.symbol === 'AUTO' || scanAllAfterStop
-          ? await this._findBestModelOpportunity(predictions, { preferOtherThan })
+        this.config.symbol === 'AUTO'
+          ? await this._findBestModelOpportunity(predictions)
           : await this._evaluateSymbolForModel(this.config.symbol, predictions);
       if (!opportunity) return;
-      if (preferOtherThan && opportunity.symbol !== preferOtherThan) {
-        this.lastDecision =
-          `Post-stop: chose ${opportunity.symbol} over recently stopped ${preferOtherThan} ` +
-          `(checking other cryptos first).`;
-      }
       await this._openPosition({
         symbol: opportunity.symbol,
         ticker: opportunity.market.ticker,
@@ -4920,6 +4864,8 @@ class TradingBot {
           opportunity.side === 'yes' ? opportunity.window.probabilityUp : opportunity.window.probabilityDown,
         engineConfidence: opportunity.window.confidence,
         strategy: 'model',
+        modelWindowKey: opportunity.windowKey,
+        modelDirection: opportunity.direction,
       });
       return;
     }
@@ -5318,9 +5264,8 @@ class TradingBot {
   }
 
   /**
-   * Model mode: side from active window direction (UP→YES, DOWN→NO) on the
-   * minutes-left schedule (w5 → w10 → w5). Blocks after max stop_loss exits
-   * per crypto in this Kalshi session.
+   * Model mode: side from active window locked direction (UP→YES, DOWN→NO).
+   * No Edge/Settle protection gates — windows + confidence floor only.
    */
   async _evaluateSymbolForModel(symbol, predictions) {
     if (!isKalshiTradeEnabled(symbol, this.config)) {
@@ -5375,31 +5320,6 @@ class TradingBot {
     }
 
     const minutesRemaining = Math.max(0.1, (closeTime - now) / 60000);
-    const minMinutesToOpen = Number.isFinite(Number(this.config.modelMinMinutesToOpen))
-      ? Number(this.config.modelMinMinutesToOpen)
-      : 0.5;
-    if (minMinutesToOpen > 0 && minutesRemaining < minMinutesToOpen) {
-      this.lastDecision =
-        `Waiting: ${symbol} model — only ${minutesRemaining.toFixed(1)} min left (need ≥ ${minMinutesToOpen}).`;
-      return null;
-    }
-
-    const maxStopsRaw = Number(this.config.modelMaxStopsPerSession);
-    const maxStops =
-      Number.isFinite(maxStopsRaw) && maxStopsRaw > 0
-        ? Math.floor(maxStopsRaw)
-        : MODEL_MAX_STOPS_PER_SESSION_DEFAULT;
-    const sessionStops = countModelSessionStopLosses(this.ledger.trades, {
-      symbol,
-      closeTime,
-      ticker: market.ticker,
-    });
-    if (sessionStops >= maxStops) {
-      this.lastDecision =
-        `Waiting: ${symbol} model — ${sessionStops} stop-loss exits this session (max ${maxStops}); no new entries until next window.`;
-      return null;
-    }
-
     const picked = pickModelWindow(assetPrediction, minutesRemaining);
     if (!picked || !picked.window || !picked.direction) {
       this.lastDecision = `Waiting: ${symbol} has no usable model window lean.`;
@@ -5408,7 +5328,7 @@ class TradingBot {
     const { window, direction, key: windowKey } = picked;
     const minConf = Number.isFinite(Number(this.config.modelMinConfidence))
       ? Number(this.config.modelMinConfidence)
-      : Number(this.config.minConfidence) || 55;
+      : 55;
     if (!Number.isFinite(window.confidence) || window.confidence < minConf) {
       const confidence = Number.isFinite(window.confidence) ? window.confidence : 'unavailable';
       this.lastDecision =
@@ -5435,31 +5355,6 @@ class TradingBot {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
       return null;
     }
-    if (this._hasRecentEntryMiss(symbol, closeTime, side)) {
-      this.lastDecision =
-        `Waiting: ${symbol} ${side.toUpperCase()} fill-miss cool-down (~${Math.round(ENTRY_MISS_COOLDOWN_MS / 1000)}s) — trying other cryptos/sides.`;
-      return null;
-    }
-    const maxEntry = Number(this.config.maxEntryCents);
-    if (Number.isFinite(maxEntry) && maxEntry > 0 && priceCents > maxEntry) {
-      this.lastDecision =
-        `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — above max entry ${maxEntry}¢.`;
-      return null;
-    }
-
-    const recoveryCheck = await this._stoppedCoinRecoveryGate(
-      symbol,
-      side,
-      priceCents,
-      window,
-      predictions
-    );
-    if (!recoveryCheck.ok) {
-      this.lastDecision = recoveryCheck.reason;
-      this._noteProtectionGate(recoveryCheck.reason, { fromSymbol: symbol });
-      return null;
-    }
-    this._noteProtectionGate(null, { fromSymbol: symbol });
 
     const leanStrength = Math.abs(Number(window.probabilityUp) - 50) || 1;
     return {
@@ -5475,29 +5370,17 @@ class TradingBot {
     };
   }
 
-  async _findBestModelOpportunity(predictions, { preferOtherThan = null } = {}) {
-    const cooling = this._entryMissCooldownSymbols();
+  async _findBestModelOpportunity(predictions) {
     const candidates = tradeableKalshiSymbols(this.config).filter(
       (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
     );
-    if (candidates.length === 0) {
-      if (cooling.length) {
-        this.lastDecision =
-          `Waiting: recent fill misses on ${cooling.join(', ')} — cooling ~${Math.round(ENTRY_MISS_COOLDOWN_MS / 1000)}s before retry.`;
-      }
-      return null;
-    }
+    if (candidates.length === 0) return null;
     const evaluations = await Promise.all(
       candidates.map((sym) => this._evaluateSymbolForModel(sym, predictions))
     );
     const valid = evaluations.filter(Boolean);
     if (valid.length === 0) return null;
     valid.sort((a, b) => {
-      if (preferOtherThan) {
-        const aPen = a.symbol === preferOtherThan ? 1 : 0;
-        const bPen = b.symbol === preferOtherThan ? 1 : 0;
-        if (aPen !== bPen) return aPen - bPen;
-      }
       if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
       return liquidityPriority(b.symbol) - liquidityPriority(a.symbol);
     });
@@ -6135,9 +6018,7 @@ module.exports = {
   pickModelWindowKey,
   pickModelWindow,
   modelWindowDirection,
-  modelLeanAgainstHeld,
-  countModelSessionStopLosses,
-  MODEL_MAX_STOPS_PER_SESSION_DEFAULT,
+  modelDirectionAgainstHeld,
   isSettleTieredExitsEnabled,
   settleExitPlan,
   settleExitTiersForDashboard,
