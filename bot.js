@@ -344,6 +344,23 @@ const SETTLE_TOUCHED90_HOLD_MINUTES = 3.5;
 /** Settle weak-ticket confirm: once held bid tags this, lean-switch exit turns off. */
 const SETTLE_WEAK_CONFIRM_CENTS = 80;
 
+/** After a live IOC miss, skip that coin+side this long before retrying (default 7s). */
+const ENTRY_MISS_COOLDOWN_MS = 7_000;
+
+function entryMissKey(symbol, side = null) {
+  const sym = String(symbol || '').toUpperCase();
+  if (!sym) return null;
+  const s = String(side || '').toLowerCase();
+  if (s === 'yes' || s === 'no') return `${sym}:${s}`;
+  // No side → legacy whole-coin key (tests / clear-all helpers).
+  return sym;
+}
+
+function isYesNoSide(side) {
+  const s = String(side || '').toLowerCase();
+  return s === 'yes' || s === 'no';
+}
+
 /** Human label for post-stop review (trade log / activity). */
 function stopVerdictLabel(verdict) {
   const v = String(verdict || '');
@@ -2721,7 +2738,7 @@ class TradingBot {
       trade.exitPriceCents = bookedExit;
       trade.exitReason = reason;
       // Clear miss cooldown/streak for this coin once we're done with the ticket.
-      this._clearEntryMiss(trade.symbol);
+      this._clearEntryMiss(trade.symbol, trade.side);
       if (reason === 'stop_loss' && trade.symbol) {
         if (!this._stoppedSymbolsThisCycle) this._stoppedSymbolsThisCycle = new Set();
         this._stoppedSymbolsThisCycle.add(String(trade.symbol).toUpperCase());
@@ -3796,9 +3813,9 @@ class TradingBot {
             !isSettleEntryPriceCents(workingPrice, this.config, minutesLeft, side)
           ) {
             if (attempt === maxEntryAttempts - 1) {
-              this._noteEntryMiss(symbol, null, closeAt);
+              this._noteEntryMiss(symbol, null, closeAt, side);
               this.lastError =
-                `Skipped ${symbol} live entry: live ask ${freshAsk != null ? freshAsk + '¢' : 'n/a'} can't cross inside settle band ` +
+                `Skipped ${symbol} ${String(side).toUpperCase()} live entry: live ask ${freshAsk != null ? freshAsk + '¢' : 'n/a'} can't cross inside settle band ` +
                 `(would need ${workingPrice}¢). Focusing on other cryptos.`;
               this.lastDecision = this.lastError;
               this._logActivity(this.lastDecision, {
@@ -3895,16 +3912,16 @@ class TradingBot {
       }
 
       if (filled < 1) {
-        const miss = this._noteEntryMiss(symbol, null, closeAt);
-        const coolMs = Number(miss.cooldownMs) || 30_000;
+        const miss = this._noteEntryMiss(symbol, null, closeAt, side);
+        const coolMs = Number(miss.cooldownMs) || ENTRY_MISS_COOLDOWN_MS;
         const coolLabel =
           coolMs < 60_000
             ? `~${Math.max(1, Math.round(coolMs / 1000))}s`
             : `~${Math.max(1, Math.round(coolMs / 60000))}m`;
         this.lastError =
-          `Live entry on ${symbol} did not fill` +
+          `Live entry on ${symbol} ${String(side).toUpperCase()} did not fill` +
           (lastErr ? ` (${lastErr.message})` : '') +
-          ` — skipping this coin ${coolLabel} (miss #${miss.streak}); focusing on other cryptos.`;
+          ` — skipping this ${String(side).toUpperCase()} ${coolLabel} (miss #${miss.streak}); other cryptos/sides still open.`;
         this.lastDecision = this.lastError;
         this._logActivity(this.lastDecision, {
           kind: 'open',
@@ -3915,7 +3932,7 @@ class TradingBot {
         console.error('[bot]', this.lastError);
         return false;
       }
-      this._clearEntryMiss(symbol);
+      this._clearEntryMiss(symbol, side);
       if (fill && fill.recovered) {
         console.warn(
           `[bot] entry fill recovery on ${symbol}: order ${orderId} filled ${filled}/${trade.contracts} after timeout/cancel — ledgered`
@@ -3946,7 +3963,7 @@ class TradingBot {
       }
       trade.entryFeesCents = this._orderFeesCents(fill && fill.order);
       trade.liveOrderId = orderId;
-      this._clearEntryMiss(symbol);
+      this._clearEntryMiss(symbol, side);
     }
 
     // Serialize ledger commit so parallel settle dual-entry can't clobber
@@ -4038,96 +4055,147 @@ class TradingBot {
   }
 
   /**
-   * After a live fill miss, hard-skip this coin briefly (default 30s) so we
+   * After a live fill miss, hard-skip that coin+side briefly (default 7s) so we
    * don't spam the same thin book every cycle — then retry. Flat cooldown
    * (no escalating ladder). Streak still tracks misses for ranking demotion.
+   * YES miss does not block NO on the same coin (and vice versa).
    * Streak + cooldown reset when that coin's session ends (close time), on a
-   * successful fill, or when any open on that coin closes/settles.
+   * successful fill of that side, or when any open on that coin closes/settles.
    */
-  _noteEntryMiss(symbol, cooldownMs = null, sessionCloseMs = null) {
-    if (!symbol) return;
-    const sym = String(symbol).toUpperCase();
-    this._expireEntryMissIfSessionEnded(sym);
+  _noteEntryMiss(symbol, cooldownMs = null, sessionCloseMs = null, side = null) {
+    if (!symbol) return { streak: 0, cooldownMs: 0, sessionCloseMs: null };
+    const key = entryMissKey(symbol, side);
+    if (!key) return { streak: 0, cooldownMs: 0, sessionCloseMs: null };
+    this._expireEntryMissIfSessionEnded(symbol, Date.now(), null, side);
     if (!this._entryMissStreak) this._entryMissStreak = Object.create(null);
     if (!this._entryMissUntil) this._entryMissUntil = Object.create(null);
     if (!this._entryMissSessionClose) this._entryMissSessionClose = Object.create(null);
-    const streak = (this._entryMissStreak[sym] || 0) + 1;
-    this._entryMissStreak[sym] = streak;
+    const streak = (this._entryMissStreak[key] || 0) + 1;
+    this._entryMissStreak[key] = streak;
     const ms =
-      Number.isFinite(cooldownMs) && cooldownMs > 0 ? cooldownMs : 30_000;
-    this._entryMissUntil[sym] = Date.now() + ms;
+      Number.isFinite(cooldownMs) && cooldownMs > 0 ? cooldownMs : ENTRY_MISS_COOLDOWN_MS;
+    this._entryMissUntil[key] = Date.now() + ms;
     const close = Number(sessionCloseMs);
     if (Number.isFinite(close) && close > 0) {
-      this._entryMissSessionClose[sym] = close;
+      this._entryMissSessionClose[key] = close;
     }
-    return { streak, cooldownMs: ms, sessionCloseMs: this._entryMissSessionClose[sym] };
+    return { streak, cooldownMs: ms, sessionCloseMs: this._entryMissSessionClose[key] };
   }
 
-  _clearEntryMiss(symbol) {
+  _clearEntryMiss(symbol, side = null) {
     if (!symbol) return;
     const sym = String(symbol).toUpperCase();
-    if (this._entryMissUntil) delete this._entryMissUntil[sym];
-    if (this._entryMissStreak) delete this._entryMissStreak[sym];
-    if (this._entryMissSessionClose) delete this._entryMissSessionClose[sym];
+    if (!this._entryMissUntil && !this._entryMissStreak && !this._entryMissSessionClose) return;
+    const keys = isYesNoSide(side) ? [entryMissKey(sym, side)] : [sym, `${sym}:yes`, `${sym}:no`];
+    for (const key of keys) {
+      if (!key) continue;
+      if (this._entryMissUntil) delete this._entryMissUntil[key];
+      if (this._entryMissStreak) delete this._entryMissStreak[key];
+      if (this._entryMissSessionClose) delete this._entryMissSessionClose[key];
+    }
   }
 
   /**
    * Drop miss streak/cooldown when the Kalshi session that caused the miss
    * has ended, or when we see a different session close time (new window).
    */
-  _expireEntryMissIfSessionEnded(symbol, now = Date.now(), currentSessionCloseMs = null) {
+  _expireEntryMissIfSessionEnded(symbol, now = Date.now(), currentSessionCloseMs = null, side = null) {
     if (!symbol) return false;
     const sym = String(symbol).toUpperCase();
-    const stored = this._entryMissSessionClose && Number(this._entryMissSessionClose[sym]);
-    if (Number.isFinite(stored) && stored > 0 && now >= stored) {
-      this._clearEntryMiss(sym);
+    const keys = isYesNoSide(side) ? [entryMissKey(sym, side)] : [sym, `${sym}:yes`, `${sym}:no`];
+    let cleared = false;
+    for (const key of keys) {
+      if (!key) continue;
+      const stored = this._entryMissSessionClose && Number(this._entryMissSessionClose[key]);
+      if (Number.isFinite(stored) && stored > 0 && now >= stored) {
+        if (this._entryMissUntil) delete this._entryMissUntil[key];
+        if (this._entryMissStreak) delete this._entryMissStreak[key];
+        if (this._entryMissSessionClose) delete this._entryMissSessionClose[key];
+        cleared = true;
+        continue;
+      }
+      const cur = Number(currentSessionCloseMs);
+      if (
+        Number.isFinite(stored) &&
+        stored > 0 &&
+        Number.isFinite(cur) &&
+        cur > 0 &&
+        cur !== stored
+      ) {
+        if (this._entryMissUntil) delete this._entryMissUntil[key];
+        if (this._entryMissStreak) delete this._entryMissStreak[key];
+        if (this._entryMissSessionClose) delete this._entryMissSessionClose[key];
+        cleared = true;
+      }
+    }
+    return cleared;
+  }
+
+  _entryMissCooldownMs(symbol, side = null) {
+    this._expireEntryMissIfSessionEnded(symbol, Date.now(), null, side);
+    if (!this._entryMissUntil || !symbol) return 0;
+    const key = entryMissKey(symbol, side);
+    if (!key) return 0;
+    const until = this._entryMissUntil[key];
+    if (!Number.isFinite(until)) return 0;
+    return Math.max(0, until - Date.now());
+  }
+
+  _hasRecentEntryMiss(symbol, currentSessionCloseMs = null, side = null) {
+    this._expireEntryMissIfSessionEnded(symbol, Date.now(), currentSessionCloseMs, side);
+    if (!this._entryMissUntil || !symbol) return false;
+    // Side-specific: only that YES/NO is cooling.
+    if (isYesNoSide(side)) {
+      const key = entryMissKey(symbol, side);
+      const until = this._entryMissUntil[key];
+      if (!Number.isFinite(until)) return false;
+      if (Date.now() >= until) {
+        delete this._entryMissUntil[key];
+        return false;
+      }
       return true;
     }
-    const cur = Number(currentSessionCloseMs);
-    if (
-      Number.isFinite(stored) &&
-      stored > 0 &&
-      Number.isFinite(cur) &&
-      cur > 0 &&
-      cur !== stored
-    ) {
-      this._clearEntryMiss(sym);
+    // No side: true if either side (or legacy whole-coin key) is cooling.
+    const sym = String(symbol).toUpperCase();
+    for (const key of [sym, `${sym}:yes`, `${sym}:no`]) {
+      const until = this._entryMissUntil[key];
+      if (!Number.isFinite(until)) continue;
+      if (Date.now() >= until) {
+        delete this._entryMissUntil[key];
+        continue;
+      }
       return true;
     }
     return false;
   }
 
-  _entryMissCooldownMs(symbol) {
-    this._expireEntryMissIfSessionEnded(symbol);
-    if (!this._entryMissUntil || !symbol) return 0;
-    const until = this._entryMissUntil[String(symbol).toUpperCase()];
-    if (!Number.isFinite(until)) return 0;
-    return Math.max(0, until - Date.now());
-  }
-
-  _hasRecentEntryMiss(symbol, currentSessionCloseMs = null) {
-    this._expireEntryMissIfSessionEnded(symbol, Date.now(), currentSessionCloseMs);
-    if (!this._entryMissUntil || !symbol) return false;
-    const until = this._entryMissUntil[String(symbol).toUpperCase()];
-    if (!Number.isFinite(until)) return false;
-    if (Date.now() >= until) {
-      // Cooldown elapsed mid-session — unlock retries (streak kept for ranking).
-      delete this._entryMissUntil[String(symbol).toUpperCase()];
-      return false;
+  _entryMissStreakFor(symbol, side = null) {
+    if (!this._entryMissStreak || !symbol) return 0;
+    if (isYesNoSide(side)) {
+      return this._entryMissStreak[entryMissKey(symbol, side)] || 0;
     }
-    return true;
+    const sym = String(symbol).toUpperCase();
+    return (
+      (this._entryMissStreak[sym] || 0) +
+      (this._entryMissStreak[`${sym}:yes`] || 0) +
+      (this._entryMissStreak[`${sym}:no`] || 0)
+    );
   }
 
   _entryMissCooldownSymbols() {
     if (!this._entryMissUntil) return [];
     const now = Date.now();
     const out = [];
-    for (const sym of Object.keys(this._entryMissUntil)) {
+    for (const key of Object.keys(this._entryMissUntil)) {
+      const sym = String(key).split(':')[0];
       this._expireEntryMissIfSessionEnded(sym, now);
     }
-    for (const [sym, until] of Object.entries(this._entryMissUntil || {})) {
-      if (Number.isFinite(until) && until > now) out.push(sym);
-      else if (this._entryMissUntil) delete this._entryMissUntil[sym];
+    for (const [key, until] of Object.entries(this._entryMissUntil || {})) {
+      if (Number.isFinite(until) && until > now) {
+        // Show "HYPE YES" when side-keyed so Decision makes NO-vs-YES clear.
+        const parts = String(key).split(':');
+        out.push(parts.length === 2 ? `${parts[0]} ${parts[1].toUpperCase()}` : parts[0]);
+      } else if (this._entryMissUntil) delete this._entryMissUntil[key];
     }
     return out;
   }
@@ -4555,6 +4623,11 @@ class TradingBot {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
       return null;
     }
+    if (this._hasRecentEntryMiss(symbol, closeTime, side)) {
+      this.lastDecision =
+        `Waiting: ${symbol} ${side.toUpperCase()} fill-miss cool-down (~${Math.round(ENTRY_MISS_COOLDOWN_MS / 1000)}s) — trying other cryptos/sides.`;
+      return null;
+    }
     const minEntry = Number(this.config.minEntryCents);
     if (Number.isFinite(minEntry) && minEntry > 0 && priceCents < minEntry) {
       this.lastDecision =
@@ -4713,12 +4786,23 @@ class TradingBot {
       });
     }
     // YES uses primary min; NO may start lower (default 80¢) so downs in the 80s qualify.
+    // Fill-miss cool-down is per side — YES miss must not block NO (and vice versa).
     const collect = (yesMinCents, noMinCents, maxCents) => {
       const out = [];
-      if (yesAskOk && yesAsk >= yesMinCents && yesAsk <= maxCents) {
+      if (
+        yesAskOk &&
+        yesAsk >= yesMinCents &&
+        yesAsk <= maxCents &&
+        !this._hasRecentEntryMiss(symbol, closeTime, 'yes')
+      ) {
         out.push({ side: 'yes', priceCents: yesAsk });
       }
-      if (noAskOk && noAsk >= noMinCents && noAsk <= maxCents) {
+      if (
+        noAskOk &&
+        noAsk >= noMinCents &&
+        noAsk <= maxCents &&
+        !this._hasRecentEntryMiss(symbol, closeTime, 'no')
+      ) {
         out.push({ side: 'no', priceCents: noAsk });
       }
       return out;
@@ -4867,13 +4951,11 @@ class TradingBot {
     const allTradeable = tradeableKalshiSymbols(this.config);
     const noSpotLean = allTradeable.filter((sym) => !predictions[sym] || !predictions[sym].ready);
     // Settle scans every tradeable Kalshi series — Coinbase ready is optional (Kalshi-only).
-    const candidates = allTradeable.filter(
-      (sym) => !this._hasOpenOnSymbol(sym) && !this._hasRecentEntryMiss(sym)
-    );
+    const candidates = allTradeable.filter((sym) => !this._hasOpenOnSymbol(sym));
     if (candidates.length === 0) {
       if (cooling.length) {
         this.lastDecision =
-          `Waiting: fill-miss cool-down on ${cooling.join(', ')} — not pinging those.`;
+          `Waiting: fill-miss cool-down on ${cooling.join(', ')} — not pinging those sides (~${Math.round(ENTRY_MISS_COOLDOWN_MS / 1000)}s).`;
       } else {
         this.lastDecision = `Waiting: no tradeable coins available for settle scan.`;
       }
@@ -4951,8 +5033,8 @@ class TradingBot {
         if (aPen !== bPen) return aPen - bPen;
       }
       // Prefer coins with fewer recent fill-miss streaks, then ask score / liquidity.
-      const aMiss = (this._entryMissStreak && this._entryMissStreak[a.symbol]) || 0;
-      const bMiss = (this._entryMissStreak && this._entryMissStreak[b.symbol]) || 0;
+      const aMiss = this._entryMissStreakFor(a.symbol, a.side);
+      const bMiss = this._entryMissStreakFor(b.symbol, b.side);
       if (aMiss !== bMiss) return aMiss - bMiss;
       // When scores tie, prefer a Coinbase lean over pure Kalshi-only.
       const aLean = a.engineReady ? 1 : 0;
@@ -5031,15 +5113,12 @@ class TradingBot {
   async _findBestOpportunity(predictions, { preferOtherThan = null } = {}) {
     const cooling = this._entryMissCooldownSymbols();
     const candidates = tradeableKalshiSymbols(this.config).filter(
-      (sym) =>
-        predictions[sym] &&
-        !this._hasOpenOnSymbol(sym) &&
-        !this._hasRecentEntryMiss(sym)
+      (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
     );
     if (candidates.length === 0) {
       if (cooling.length) {
         this.lastDecision =
-          `Waiting: recent fill misses on ${cooling.join(', ')} — cooling ~30s before retry.`;
+          `Waiting: recent fill misses on ${cooling.join(', ')} — cooling ~${Math.round(ENTRY_MISS_COOLDOWN_MS / 1000)}s before retry.`;
       }
       return null;
     }

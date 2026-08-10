@@ -3438,35 +3438,41 @@ async function testBotTradingFlow() {
     checkEq(opened, false, 'unfilled entry returns false');
     checkEq(retryBot.openTrades.length, 0, 'unfilled entry leaves no trade');
     checkEq(entryOrders, 2, 'unfilled entry retries IOC up to 2 times');
-    check(retryBot._hasRecentEntryMiss('ETH'), 'fill miss demotes ETH briefly');
-    check(/skipping this coin|focusing on other/i.test(retryBot.lastError || ''), 'miss message mentions skip/focus');
+    check(retryBot._hasRecentEntryMiss('ETH', null, 'yes'), 'fill miss demotes ETH YES briefly');
+    check(!retryBot._hasRecentEntryMiss('ETH', null, 'no'), 'ETH NO still allowed after YES miss');
+    check(/skipping this YES|other cryptos\/sides/i.test(retryBot.lastError || ''), 'miss message mentions side skip');
     check(/miss #1/i.test(retryBot.lastError || ''), 'first miss labeled #1');
-    check(/~30s/i.test(retryBot.lastError || ''), 'first miss cools ~30s');
+    check(/~7s/i.test(retryBot.lastError || ''), 'first miss cools ~7s');
     const firstOnly = makeBot(mockClient({}), { mode: 'live', liveAuthorized: true });
-    const m0 = firstOnly._noteEntryMiss('SOL');
-    checkEq(m0.cooldownMs, 30_000, 'first miss cools 30s');
-    const m1 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000);
+    const m0 = firstOnly._noteEntryMiss('SOL', null, null, 'yes');
+    checkEq(m0.cooldownMs, 7_000, 'first miss cools 7s');
+    const m1 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000, 'yes');
     check(m1.streak >= 2, 'second miss increments streak');
-    checkEq(m1.cooldownMs, 30_000, 'second miss still cools 30s');
-    const m2 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000);
-    checkEq(m2.cooldownMs, 30_000, 'third miss still cools 30s');
-    const m3 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000);
-    checkEq(m3.cooldownMs, 30_000, 'fourth miss still cools 30s');
+    checkEq(m1.cooldownMs, 7_000, 'second miss still cools 7s');
+    const m2 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000, 'yes');
+    checkEq(m2.cooldownMs, 7_000, 'third miss still cools 7s');
+    const m3 = retryBot._noteEntryMiss('ETH', null, Date.now() + 600_000, 'yes');
+    checkEq(m3.cooldownMs, 7_000, 'fourth miss still cools 7s');
     // Session end (or new window) clears streak + cooldown
     const sessionBot = makeBot(mockClient({}), { mode: 'live', liveAuthorized: true });
     const sessionClose = Date.now() + 60_000;
-    sessionBot._noteEntryMiss('BNB', null, sessionClose);
-    sessionBot._noteEntryMiss('BNB', null, sessionClose);
-    checkEq(sessionBot._entryMissStreak.BNB, 2, 'streak is 2 mid-session');
+    sessionBot._noteEntryMiss('BNB', null, sessionClose, 'yes');
+    sessionBot._noteEntryMiss('BNB', null, sessionClose, 'yes');
+    checkEq(sessionBot._entryMissStreak['BNB:yes'], 2, 'streak is 2 mid-session');
     check(
-      sessionBot._expireEntryMissIfSessionEnded('BNB', sessionClose + 1),
+      sessionBot._expireEntryMissIfSessionEnded('BNB', sessionClose + 1, null, 'yes'),
       'expire returns true after session close'
     );
-    check(!sessionBot._hasRecentEntryMiss('BNB'), 'no cooldown after session end');
-    checkEq(sessionBot._entryMissStreak.BNB, undefined, 'streak cleared after session end');
-    const mFresh = sessionBot._noteEntryMiss('BNB', null, Date.now() + 600_000);
+    check(!sessionBot._hasRecentEntryMiss('BNB', null, 'yes'), 'no cooldown after session end');
+    checkEq(sessionBot._entryMissStreak['BNB:yes'], undefined, 'streak cleared after session end');
+    const mFresh = sessionBot._noteEntryMiss('BNB', null, Date.now() + 600_000, 'no');
     checkEq(mFresh.streak, 1, 'next session starts at miss #1 again');
-    checkEq(mFresh.cooldownMs, 30_000, 'next session first miss is 30s again');
+    checkEq(mFresh.cooldownMs, 7_000, 'next session first miss is 7s again');
+    // YES miss must not block NO on same coin
+    const sideBot = makeBot(mockClient({}), { mode: 'live', liveAuthorized: true });
+    sideBot._noteEntryMiss('HYPE', null, Date.now() + 600_000, 'yes');
+    check(sideBot._hasRecentEntryMiss('HYPE', null, 'yes'), 'HYPE YES cooling');
+    check(!sideBot._hasRecentEntryMiss('HYPE', null, 'no'), 'HYPE NO free after YES miss');
   }
 
   // Live entry: all attempts miss → no trade (single attempt)
