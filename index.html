@@ -383,7 +383,7 @@
                 <tr><td colspan="3" class="settle-exit-table-loading">Loading…</td></tr>
               </tbody>
             </table>
-            <p class="field-hint" id="settle-exit-table-note">Live from bot tiers. After a trade’s bid tags 90¢, stuck/stale turn off and it rides settlement even if price dips back under 90 (stop still applies). Tier TP (e.g. 96¢) can still bank if hit. Red-light volatile (when Applied) removes hold-to-settle and banks at ≥95¢ instead.</p>
+            <p class="field-hint" id="settle-exit-table-note">Live from bot tiers. After a trade’s bid tags 90¢, stuck/stale turn off and it rides settlement even if price dips back under 90 (stop still applies). Tier TP (e.g. 96¢) can still bank if hit.</p>
           </div>
           <label>Stuck exit after (min parked)
             <div class="slider-row">
@@ -408,15 +408,15 @@
               <span class="settle-window-light" id="settle-window-light" aria-hidden="true"></span>
               <span class="settle-window-rec-text" id="settle-window-rec-text">Retrospect: gathering settle history…</span>
               <div class="settle-window-apply-row">
-                <button type="button" class="settle-window-apply settle-window-apply-volatile" id="settle-window-apply-volatile">
-                  Apply volatile
+                <button type="button" class="settle-window-apply settle-window-apply-volatile" id="settle-window-apply-edge">
+                  Apply edge
                 </button>
-                <button type="button" class="settle-window-apply settle-window-apply-stable" id="settle-window-apply-stable">
-                  Apply stable
+                <button type="button" class="settle-window-apply settle-window-apply-stable" id="settle-window-apply-settle">
+                  Apply settle
                 </button>
               </div>
             </div>
-            <span class="field-hint">Won’t open too early in the window (default 8.5). Green/red retrospect suggests 8m (stable) or 5.5m (volatile) from the last 2–12h of settle trades. You can Apply volatile or Apply stable anytime — even while the light is still gathering. Volatile: entry 75–90¢, no hold-to-settle, TP ≥95¢, stale bank at ≤1:30 left, stop new opens at ≤2:30. Stable: entry 80–94¢, normal hold/TP rules and 0.5m min.</span>
+            <span class="field-hint">Won’t open too early in the window (default 8.5). Green/red light scores live ~15m Coinbase action: red = choppy/volatile → edge; green = calmer and one-sided → settle. Apply either anytime (auto-switch later). Edge: max entry 95¢; after 3m hold stop moves to breakeven; cash out in the last 5 min if loss ≤ $0.75 on the ticket.</span>
           </label>
           <label>Settle same-side sit-out after stop (min)
             <div class="slider-row">

@@ -109,7 +109,15 @@ const bot = KALSHI_ENABLED
         settleLateEntryMinutes: parseFloat(process.env.KALSHI_SETTLE_LATE_ENTRY_MINUTES || '3.5'),
         settleLateEntryMinCents: parseFloat(process.env.KALSHI_SETTLE_LATE_ENTRY_MIN_CENTS || '70'),
         settleTieredExits: process.env.KALSHI_SETTLE_TIERED_EXITS || 'on',
-        settleVolatileExits: process.env.KALSHI_SETTLE_VOLATILE_EXITS || 'off',
+        maxEntryCents: parseInt(process.env.KALSHI_MAX_ENTRY_CENTS || '95', 10),
+        edgePreCloseSmallLossCents: parseInt(
+          process.env.KALSHI_EDGE_PRE_CLOSE_SMALL_LOSS_CENTS || '75',
+          10
+        ),
+        edgePreCloseMinutes: parseFloat(process.env.KALSHI_EDGE_PRE_CLOSE_MINUTES || '5'),
+        edgeBreakevenAfterMinutes: parseFloat(
+          process.env.KALSHI_EDGE_BREAKEVEN_AFTER_MINUTES || '3'
+        ),
         stakeDollars: parseFloat(process.env.KALSHI_STAKE_DOLLARS || '10'),
         maxOpenPositions: parseInt(process.env.KALSHI_MAX_OPEN_POSITIONS || '2', 10),
         skimMode: process.env.KALSHI_SKIM_MODE || 'insurance',
@@ -160,6 +168,19 @@ for (const productId of PRODUCTS) {
     book: new OrderBook(productId),
     lastTradeAt: null,
     feedStatus: 'connecting',
+  };
+}
+
+// Strategy light uses live ~15m Coinbase candles (volatile/chop → edge, calm one-sided → settle).
+if (bot) {
+  bot.getMarketCandles = () => {
+    const out = {};
+    for (const [sym, s] of Object.entries(state)) {
+      if (s && s.series && Array.isArray(s.series.candles)) {
+        out[sym] = s.series.candles;
+      }
+    }
+    return out;
   };
 }
 
@@ -512,12 +533,10 @@ app.get("/", (req, res) => {
       return;
     }
     const body = req.body || {};
-    const light = body.light != null ? body.light : body.package;
-    // Accept package: 'volatile'|'stable' as aliases for red|green.
-    let force = light;
+    let force = body.light != null ? body.light : body.package;
     const pkg = String(force || '').toLowerCase();
-    if (pkg === 'volatile') force = 'red';
-    if (pkg === 'stable') force = 'green';
+    if (pkg === 'volatile' || pkg === 'edge') force = 'red';
+    if (pkg === 'stable' || pkg === 'settle') force = 'green';
     const result = bot.applySettleWindowRecommendation(
       force ? { light: force } : {}
     );

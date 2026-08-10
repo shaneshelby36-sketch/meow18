@@ -1142,10 +1142,12 @@ body[data-view-mode="bot"] .asset-picker {
 .settle-window-apply:not(:disabled):hover {
   border-color: color-mix(in srgb, var(--text) 35%, var(--line));
 }
-.settle-window-rec[data-light='red'] .settle-window-apply-volatile {
+.settle-window-rec[data-light='red'] .settle-window-apply-volatile,
+.settle-window-rec[data-light='red'] #settle-window-apply-edge.is-suggested {
   border-color: color-mix(in srgb, #e03131 55%, var(--line));
 }
-.settle-window-rec[data-light='green'] .settle-window-apply-stable {
+.settle-window-rec[data-light='green'] .settle-window-apply-stable,
+.settle-window-rec[data-light='green'] #settle-window-apply-settle.is-suggested {
   border-color: color-mix(in srgb, #2f9e44 55%, var(--line));
 }
 

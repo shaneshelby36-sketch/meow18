@@ -1435,12 +1435,8 @@ function renderSettleExitTable(tiers) {
 function renderSettleExitTableNote(config) {
   const note = document.getElementById('settle-exit-table-note');
   if (!note) return;
-  const volatileOn =
-    config &&
-    (config.settleVolatileExits === 'on' || config.settleVolatileExits === true);
-  note.textContent = volatileOn
-    ? 'Volatile package ON (red Apply): entry 75–90¢; no hold-to-settle; TP ≥95¢; stale bank at ≤1:30 left; stuck still runs. Stop-loss still applies. Green Apply restores 80–94¢ and normal hold/TP tiers.'
-    : 'Live from bot tiers. After a trade’s bid tags 90¢, stuck/stale turn off and it rides settlement even if price dips back under 90 (stop still applies). Tier TP (e.g. 96¢) can still bank if hit. Red-light volatile (when Applied) removes hold-to-settle and banks at ≥95¢ instead.';
+  note.textContent =
+    'Live from bot tiers. After a trade’s bid tags 90¢, stuck/stale turn off and it rides settlement even if price dips back under 90 (stop still applies). Tier TP (e.g. 96¢) can still bank if hit.';
 }
 
 function syncSettleExitTableEnabled() {
@@ -1801,53 +1797,68 @@ async function loadBotConfigIntoForm() {
 function renderSettleWindowRec(rec) {
   const wrap = document.getElementById('settle-window-rec');
   const text = document.getElementById('settle-window-rec-text');
-  const btnVolatile = document.getElementById('settle-window-apply-volatile');
-  const btnStable = document.getElementById('settle-window-apply-stable');
+  const btnEdge = document.getElementById('settle-window-apply-edge');
+  const btnSettle = document.getElementById('settle-window-apply-settle');
   if (!wrap || !text) return;
-  if (btnVolatile) btnVolatile.disabled = false;
-  if (btnStable) btnStable.disabled = false;
+  if (btnEdge) btnEdge.disabled = false;
+  if (btnSettle) btnSettle.disabled = false;
   if (!rec || typeof rec !== 'object') {
     wrap.dataset.light = 'neutral';
-    text.textContent = 'Retrospect: waiting for settle history… Apply volatile or stable anytime.';
+    text.textContent = 'Retrospect: waiting for settle history… Apply edge or settle anytime.';
     return;
   }
   const light = rec.light === 'green' || rec.light === 'red' ? rec.light : 'neutral';
   wrap.dataset.light = light;
-  const mins = rec.suggestedMaxMinutes;
-  const look = rec.lookbackHours != null ? `${rec.lookbackHours}h` : '—';
-  const n = rec.stats && rec.stats.sampleSize != null ? rec.stats.sampleSize : 0;
+  const look =
+    rec.lookbackHours != null
+      ? `${rec.lookbackHours}h`
+      : rec.regime && rec.regime.ready
+        ? '15m'
+        : '—';
+  const n =
+    rec.stats && rec.stats.sampleSize != null
+      ? rec.stats.sampleSize
+      : rec.regime && rec.regime.symbolCount != null
+        ? rec.regime.symbolCount
+        : 0;
+  const mode = rec.suggestedMode || (light === 'red' ? 'edge' : light === 'green' ? 'settle' : null);
   if (light === 'green') {
-    text.textContent = `Green · suggest ${mins}m (stable) · ${look}, n=${n}. ${rec.reason || ''}`;
+    const r = rec.regime;
+    const rangeBit =
+      r && r.medianRangePct != null
+        ? ` · 15m range ${Number(r.medianRangePct).toFixed(2)}%`
+        : '';
+    text.textContent = `Green · suggest settle${rangeBit} · ${look}, n=${n}. ${rec.reason || ''}`;
   } else if (light === 'red') {
-    const tp = rec.volatileTpFloorCents != null ? rec.volatileTpFloorCents : 95;
-    const minLeft = rec.suggestedMinMinutes != null ? rec.suggestedMinMinutes : 2.5;
-    const stale = rec.volatileStaleMinutes != null ? rec.volatileStaleMinutes : 1.5;
-    const bandMin = rec.volatileEntryMinCents != null ? rec.volatileEntryMinCents : 75;
-    const bandMax = rec.volatileEntryMaxCents != null ? rec.volatileEntryMaxCents : 90;
-    text.textContent =
-      `Red · suggest ${mins}m (volatile) · entry ${bandMin}–${bandMax}¢ · no hold-to-settle · TP ≥${tp}¢ · stale ≤${stale}m · no opens ≤${minLeft}m` +
-      ` · ${look}, n=${n}. ${rec.reason || ''}`;
+    const r = rec.regime;
+    const rangeBit =
+      r && r.medianRangePct != null
+        ? ` · 15m range ${Number(r.medianRangePct).toFixed(2)}%`
+        : '';
+    text.textContent = `Red · suggest edge${rangeBit} · ${look}, n=${n}. ${rec.reason || ''}`;
   } else {
-    text.textContent = `Neutral · ${rec.reason || 'Leave slider as-is.'} Apply volatile or stable anytime.`;
+    text.textContent = `Neutral · ${rec.reason || 'Leave mode as-is.'} Apply edge or settle anytime.`;
   }
+  if (btnEdge) btnEdge.classList.toggle('is-suggested', mode === 'edge');
+  if (btnSettle) btnSettle.classList.toggle('is-suggested', mode === 'settle');
 }
 
 async function applySettleWindowRec(light) {
   const { engineUrl } = loadSettings();
   const feedback = document.getElementById('bot-settings-feedback');
-  const btnVolatile = document.getElementById('settle-window-apply-volatile');
-  const btnStable = document.getElementById('settle-window-apply-stable');
+  const btnEdge = document.getElementById('settle-window-apply-edge');
+  const btnSettle = document.getElementById('settle-window-apply-settle');
   if (isBotSettingsLocked()) {
     if (feedback) {
-      feedback.textContent = 'Settings are locked — unlock before applying the settle window.';
+      feedback.textContent = 'Settings are locked — unlock before applying strategy mode.';
       feedback.style.color = 'var(--wait)';
     }
     return;
   }
-  const force = light === 'red' || light === 'green' ? light : null;
+  const force = light === 'red' || light === 'green' || light === 'edge' || light === 'settle' ? light : null;
   if (!force) return;
-  if (btnVolatile) btnVolatile.disabled = true;
-  if (btnStable) btnStable.disabled = true;
+  if (btnEdge) btnEdge.disabled = true;
+  if (btnSettle) btnSettle.disabled = true;
   try {
     const res = await fetch(`${engineUrl}/api/bot/settle-window-rec/apply`, {
       method: 'POST',
@@ -1857,33 +1868,19 @@ async function applySettleWindowRec(light) {
     const data = await res.json();
     if (!res.ok || !data.ok) {
       if (feedback) {
-        feedback.textContent = data.message || 'Could not apply settle window package.';
+        feedback.textContent = data.message || 'Could not apply strategy mode.';
         feedback.style.color = 'var(--wait)';
       }
       renderSettleWindowRec(data.recommendation);
       return;
     }
     if (feedback) {
-      feedback.textContent = data.message || 'Settle open window applied.';
+      feedback.textContent = data.message || 'Strategy mode applied.';
       feedback.style.color = 'var(--up)';
     }
     renderSettleWindowRec(data.recommendation);
-    if (data.config) {
-      const maxMin = document.getElementById('bot-settle-maxmin');
-      if (maxMin && data.config.settleMaxMinutesToOpen != null) {
-        maxMin.value = data.config.settleMaxMinutesToOpen;
-        updateSliderDisplay('bot-settle-maxmin');
-      }
-      const entryMin = document.getElementById('bot-settle-min');
-      if (entryMin && data.config.settleEntryMinCents != null) {
-        entryMin.value = data.config.settleEntryMinCents;
-        updateSliderDisplay('bot-settle-min');
-      }
-      const entryMax = document.getElementById('bot-settle-max');
-      if (entryMax && data.config.settleEntryMaxCents != null) {
-        entryMax.value = data.config.settleEntryMaxCents;
-        updateSliderDisplay('bot-settle-max');
-      }
+    if (data.config && data.config.strategyMode) {
+      setBotStrategyTab(data.config.strategyMode);
     }
     renderSettleExitTableNote(data.config);
     refreshBotStatus();
@@ -1893,8 +1890,8 @@ async function applySettleWindowRec(light) {
       feedback.style.color = 'var(--down)';
     }
   } finally {
-    if (btnVolatile) btnVolatile.disabled = false;
-    if (btnStable) btnStable.disabled = false;
+    if (btnEdge) btnEdge.disabled = false;
+    if (btnSettle) btnSettle.disabled = false;
   }
 }
 
@@ -2334,13 +2331,13 @@ function wireBotUI() {
     loadBotConfigIntoForm();
   });
   document.getElementById('bot-settings-save').addEventListener('click', () => saveBotConfig());
-  const settleWindowApplyVolatile = document.getElementById('settle-window-apply-volatile');
-  if (settleWindowApplyVolatile) {
-    settleWindowApplyVolatile.addEventListener('click', () => applySettleWindowRec('red'));
+  const settleWindowApplyEdge = document.getElementById('settle-window-apply-edge');
+  if (settleWindowApplyEdge) {
+    settleWindowApplyEdge.addEventListener('click', () => applySettleWindowRec('edge'));
   }
-  const settleWindowApplyStable = document.getElementById('settle-window-apply-stable');
-  if (settleWindowApplyStable) {
-    settleWindowApplyStable.addEventListener('click', () => applySettleWindowRec('green'));
+  const settleWindowApplySettle = document.getElementById('settle-window-apply-settle');
+  if (settleWindowApplySettle) {
+    settleWindowApplySettle.addEventListener('click', () => applySettleWindowRec('settle'));
   }
   document.getElementById('bot-running-toggle').addEventListener('click', () => {
     const isRunning = document.getElementById('bot-running-toggle').textContent !== 'Start bot';

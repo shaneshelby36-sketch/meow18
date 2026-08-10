@@ -267,17 +267,6 @@ function isSettleTieredExitsEnabled(config = {}) {
 }
 
 /**
- * Red-light volatile package (Apply only): no hold-to-settle, TP ≥95¢.
- * Default off — green Apply clears it.
- */
-function isSettleVolatileExitsEnabled(config = {}) {
-  const v = config.settleVolatileExits;
-  if (v === true || v === 1 || v === '1') return true;
-  const s = String(v == null ? 'off' : v).toLowerCase();
-  return s === 'on' || s === 'true' || s === 'yes';
-}
-
-/**
  * Single source of truth for settle entry → TP / stale-green table.
  * Dashboard reads this via /api/bot/config; settleExitPlan uses the same rows.
  * Edit here when changing tiers — UI updates automatically on next config load.
@@ -421,29 +410,20 @@ function classifyStopVerdictFromBids({
   return null;
 }
 
-/** Stable settle open ceiling (minutes left) when retrospect is green. */
-const SETTLE_WINDOW_STABLE_MAX_MINUTES = 8;
-/** Volatile settle open ceiling when retrospect is red. */
-const SETTLE_WINDOW_VOLATILE_MAX_MINUTES = 5.5;
-/** Green Apply restores this min-minutes-left gate (default). */
-const SETTLE_WINDOW_STABLE_MIN_MINUTES = 0.5;
-/** Red Apply: stop new opens with ≤2:30 left. */
-const SETTLE_WINDOW_VOLATILE_MIN_MINUTES = 2.5;
-/** Red Apply: settle entry band. */
-const SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS = 75;
-const SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS = 90;
-/** Green Apply: restore default settle entry band. */
-const SETTLE_WINDOW_STABLE_ENTRY_MIN_CENTS = 80;
-const SETTLE_WINDOW_STABLE_ENTRY_MAX_CENTS = 94;
-/** Red Apply: bank at ≥ this bid (no hold-to-settle). */
-const SETTLE_VOLATILE_TP_FLOOR_CENTS = 95;
-/** Red Apply: stale-green bank when ≤ this many minutes left. */
-const SETTLE_VOLATILE_STALE_MINUTES = 1.5;
-const SETTLE_WINDOW_RETRO_SHORT_MS = 2 * 60 * 60 * 1000;
-const SETTLE_WINDOW_RETRO_LONG_MS = 12 * 60 * 60 * 1000;
-const SETTLE_WINDOW_RETRO_MIN_TRADES = 3;
-/** Split late vs mid-window opens around the volatile ceiling. */
-const SETTLE_WINDOW_LATE_CUTOFF_MINUTES = 5.5;
+/** Retrospect lookback for strategy-mode light (red=edge / green=settle). */
+const STRATEGY_RETRO_SHORT_MS = 2 * 60 * 60 * 1000;
+const STRATEGY_RETRO_LONG_MS = 12 * 60 * 60 * 1000;
+const STRATEGY_RETRO_MIN_TRADES = 3;
+/** Sample bucketing only (not applied as open-window knobs). */
+const STRATEGY_RETRO_LATE_CUTOFF_MINUTES = 5.5;
+const STRATEGY_RETRO_MID_CEILING_MINUTES = 8.5;
+/** Edge: never buy above this ask (¢). */
+const EDGE_MAX_ENTRY_DEFAULT_CENTS = 95;
+/** Edge: final-N-minute cash-out allows up to this much position PnL loss (¢). */
+const EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS = 75;
+const EDGE_PRE_CLOSE_MINUTES_DEFAULT = 5;
+/** Edge: after this many minutes held, stop rises to breakeven (entry). 0 = off. */
+const EDGE_BREAKEVEN_AFTER_MINUTES_DEFAULT = 3;
 
 function settleMinutesLeftAtOpen(trade) {
   const opened = Number(trade && trade.openedAt);
@@ -473,8 +453,8 @@ function summarizeSettleWindowSample(trades) {
     if (reason === 'stop_loss' || reason === 'settle_weak_switch') stopLike += 1;
     const mins = settleMinutesLeftAtOpen(t);
     if (mins == null) continue;
-    if (mins <= SETTLE_WINDOW_LATE_CUTOFF_MINUTES) late.push(pnl);
-    else if (mins <= SETTLE_WINDOW_STABLE_MAX_MINUTES + 0.5) mid.push(pnl);
+    if (mins <= STRATEGY_RETRO_LATE_CUTOFF_MINUTES) late.push(pnl);
+    else if (mins <= STRATEGY_RETRO_MID_CEILING_MINUTES) mid.push(pnl);
   }
   const n = trades.length;
   const avg = (arr) => (arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : null);
@@ -493,153 +473,275 @@ function summarizeSettleWindowSample(trades) {
 }
 
 /**
- * Config patch for a settle open-window package (red volatile / green stable).
- * Used by Apply — including manual force when retrospect is still neutral.
+ * Map retrospect light → strategy mode (red=edge, green=settle).
  */
-function settleWindowPackageForLight(light) {
+function strategyModeForLight(light) {
   const L = String(light || '').toLowerCase();
-  if (L === 'red') {
-    return {
-      light: 'red',
-      settleMaxMinutesToOpen: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
-      settleMinMinutesToOpen: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
-      settleVolatileExits: 'on',
-      settleEntryMinCents: SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS,
-      settleEntryMaxCents: SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS,
-      settleNoEntryMinCents: SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS,
-    };
-  }
-  if (L === 'green') {
-    return {
-      light: 'green',
-      settleMaxMinutesToOpen: SETTLE_WINDOW_STABLE_MAX_MINUTES,
-      settleMinMinutesToOpen: SETTLE_WINDOW_STABLE_MIN_MINUTES,
-      settleVolatileExits: 'off',
-      settleEntryMinCents: SETTLE_WINDOW_STABLE_ENTRY_MIN_CENTS,
-      settleEntryMaxCents: SETTLE_WINDOW_STABLE_ENTRY_MAX_CENTS,
-      settleNoEntryMinCents: SETTLE_WINDOW_STABLE_ENTRY_MIN_CENTS,
-    };
-  }
+  if (L === 'red' || L === 'edge') return 'edge';
+  if (L === 'green' || L === 'settle') return 'settle';
   return null;
 }
 
+/** Minutes of 1m candles used for live regime scoring. */
+const MARKET_REGIME_WINDOW_MINUTES = 15;
+/** Median 15m range % above this → choppy/active → prefer edge. */
+const MARKET_REGIME_EDGE_RANGE_PCT = 0.35;
+/** Path efficiency at/below this (net/range) → two-way chop → edge. */
+const MARKET_REGIME_EDGE_EFFICIENCY_MAX = 0.4;
+/** Median 15m range % at/below this → quiet → prefer settle (with one-sidedness). */
+const MARKET_REGIME_SETTLE_RANGE_PCT = 0.22;
+/** Path efficiency at/above this → one-sided → settle. */
+const MARKET_REGIME_SETTLE_EFFICIENCY_MIN = 0.55;
+const MARKET_REGIME_MIN_SYMBOLS = 2;
+
 /**
- * Retrospect settle open-window: green → prefer 8m ceiling, red → 5.5m.
- * Prefers last 2h when enough settle closes; else expands to 12h.
- * Does not auto-apply — caller must press Apply (or force light manually).
+ * Score one symbol's last ~15 one-minute candles.
+ * rangePct = (high−low)/mid · 100
+ * efficiency = |close−open| / (high−low)  (1 = one-sided, ~0 = round-trip chop)
  */
-function recommendSettleOpenWindow(trades, { now = Date.now(), currentMaxMinutes = null } = {}) {
+function scoreSymbolFifteenMinuteWindow(candles, { now = Date.now() } = {}) {
+  const rows = (Array.isArray(candles) ? candles : []).filter(
+    (c) => c && Number.isFinite(Number(c.high)) && Number.isFinite(Number(c.low))
+  );
+  if (rows.length < 8) return null;
+  const cutoff = Number(now) - MARKET_REGIME_WINDOW_MINUTES * 60 * 1000;
+  const window = rows.filter((c) => {
+    const t = Number(c.time);
+    return !Number.isFinite(t) || t >= cutoff;
+  });
+  const use = window.length >= 8 ? window : rows.slice(-MARKET_REGIME_WINDOW_MINUTES);
+  if (use.length < 8) return null;
+
+  let high = -Infinity;
+  let low = Infinity;
+  for (const c of use) {
+    high = Math.max(high, Number(c.high));
+    low = Math.min(low, Number(c.low));
+  }
+  const open = Number(use[0].open != null ? use[0].open : use[0].close);
+  const close = Number(use[use.length - 1].close);
+  if (![high, low, open, close].every((x) => Number.isFinite(x) && x > 0)) return null;
+  if (high < low) return null;
+
+  const mid = (high + low) / 2;
+  const range = high - low;
+  const rangePct = mid > 0 ? (range / mid) * 100 : 0;
+  const netPct = mid > 0 ? (Math.abs(close - open) / mid) * 100 : 0;
+  const efficiency = range > 0 ? Math.min(1, Math.abs(close - open) / range) : 1;
+
+  // Minute-close direction flips — extra chop signal.
+  let flips = 0;
+  let prevSign = 0;
+  for (let i = 1; i < use.length; i += 1) {
+    const a = Number(use[i - 1].close);
+    const b = Number(use[i].close);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a === 0) continue;
+    const sign = Math.sign(b - a);
+    if (sign !== 0 && prevSign !== 0 && sign !== prevSign) flips += 1;
+    if (sign !== 0) prevSign = sign;
+  }
+  const flipRate = use.length > 1 ? flips / (use.length - 1) : 0;
+
+  return {
+    rangePct: +rangePct.toFixed(4),
+    netPct: +netPct.toFixed(4),
+    efficiency: +efficiency.toFixed(4),
+    flipRate: +flipRate.toFixed(4),
+    candleCount: use.length,
+  };
+}
+
+function median(nums) {
+  const a = (nums || []).filter((n) => Number.isFinite(n)).slice().sort((x, y) => x - y);
+  if (!a.length) return null;
+  const mid = Math.floor(a.length / 2);
+  return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
+}
+
+/**
+ * Live Coinbase regime across symbols → red/edge (volatile/chop) or green/settle (calm + one-sided).
+ */
+function scoreMarketRegime(candlesBySymbol, { now = Date.now() } = {}) {
+  const perSymbol = {};
+  const ranges = [];
+  const effs = [];
+  const flips = [];
+  for (const [sym, candles] of Object.entries(candlesBySymbol || {})) {
+    const scored = scoreSymbolFifteenMinuteWindow(candles, { now });
+    if (!scored) continue;
+    perSymbol[sym] = scored;
+    ranges.push(scored.rangePct);
+    effs.push(scored.efficiency);
+    flips.push(scored.flipRate);
+  }
+  const n = ranges.length;
+  if (n < MARKET_REGIME_MIN_SYMBOLS) {
+    return {
+      ready: false,
+      light: 'neutral',
+      suggestedMode: null,
+      reason: `Need ≥${MARKET_REGIME_MIN_SYMBOLS} symbols with ~15m candle history (have ${n}).`,
+      symbolCount: n,
+      perSymbol,
+      medianRangePct: null,
+      medianEfficiency: null,
+      medianFlipRate: null,
+    };
+  }
+
+  const medianRangePct = +median(ranges).toFixed(4);
+  const medianEfficiency = +median(effs).toFixed(4);
+  const medianFlipRate = +median(flips).toFixed(4);
+
+  let light = 'neutral';
+  let reason = '';
+
+  const volatile =
+    medianRangePct >= MARKET_REGIME_EDGE_RANGE_PCT ||
+    medianEfficiency <= MARKET_REGIME_EDGE_EFFICIENCY_MAX ||
+    medianFlipRate >= 0.45;
+  const calmOneSided =
+    medianRangePct <= MARKET_REGIME_SETTLE_RANGE_PCT &&
+    medianEfficiency >= MARKET_REGIME_SETTLE_EFFICIENCY_MIN;
+
+  if (volatile && !calmOneSided) {
+    light = 'red';
+    reason =
+      `Markets look active/choppy over the last ${MARKET_REGIME_WINDOW_MINUTES}m ` +
+      `(median range ${medianRangePct.toFixed(2)}%, path efficiency ${medianEfficiency.toFixed(2)}) → prefer edge.`;
+  } else if (calmOneSided && !volatile) {
+    light = 'green';
+    reason =
+      `Markets look calm and one-sided over the last ${MARKET_REGIME_WINDOW_MINUTES}m ` +
+      `(median range ${medianRangePct.toFixed(2)}%, path efficiency ${medianEfficiency.toFixed(2)}) → prefer settle.`;
+  } else if (volatile && calmOneSided) {
+    // Conflicting signals — lean edge if range is elevated.
+    if (medianRangePct >= MARKET_REGIME_EDGE_RANGE_PCT) {
+      light = 'red';
+      reason =
+        `Mixed regime but range is elevated (${medianRangePct.toFixed(2)}%) → prefer edge.`;
+    } else {
+      light = 'green';
+      reason =
+        `Mixed regime but path is one-sided (efficiency ${medianEfficiency.toFixed(2)}) → prefer settle.`;
+    }
+  } else {
+    reason =
+      `Mixed 15m regime (range ${medianRangePct.toFixed(2)}%, efficiency ${medianEfficiency.toFixed(2)}) — leave mode as-is.`;
+  }
+
+  return {
+    ready: true,
+    light,
+    suggestedMode: strategyModeForLight(light),
+    reason,
+    symbolCount: n,
+    perSymbol,
+    medianRangePct,
+    medianEfficiency,
+    medianFlipRate,
+  };
+}
+
+/**
+ * Retrospect strategy-mode light: prefer live 15m market regime (volatile→edge,
+ * calm one-sided→settle). Falls back to recent settle-trade health when candles
+ * are thin or regime is mixed.
+ */
+function recommendSettleOpenWindow(
+  trades,
+  { now = Date.now(), currentMode = null, candlesBySymbol = null } = {}
+) {
+  const modeNow = String(currentMode || '').toLowerCase();
+  const currentStrategyMode = modeNow === 'edge' || modeNow === 'settle' ? modeNow : null;
+
+  const regime = candlesBySymbol ? scoreMarketRegime(candlesBySymbol, { now }) : null;
+  if (regime && regime.ready && (regime.light === 'red' || regime.light === 'green')) {
+    return {
+      light: regime.light,
+      suggestedMode: regime.suggestedMode,
+      currentStrategyMode,
+      lookbackHours: null,
+      reason: regime.reason,
+      stats: null,
+      regime,
+    };
+  }
+
   const all = (Array.isArray(trades) ? trades : []).filter(isSettleClosedTrade);
   const pickSince = (ms) => all.filter((t) => Number(t.closedAt) >= now - ms);
   let lookbackHours = 2;
-  let sample = pickSince(SETTLE_WINDOW_RETRO_SHORT_MS);
-  if (sample.length < SETTLE_WINDOW_RETRO_MIN_TRADES) {
+  let sample = pickSince(STRATEGY_RETRO_SHORT_MS);
+  if (sample.length < STRATEGY_RETRO_MIN_TRADES) {
     lookbackHours = 12;
-    sample = pickSince(SETTLE_WINDOW_RETRO_LONG_MS);
+    sample = pickSince(STRATEGY_RETRO_LONG_MS);
   }
   const stats = summarizeSettleWindowSample(sample);
-  const current = Number(currentMaxMinutes);
-  const currentMax = Number.isFinite(current) ? current : null;
 
-  if (stats.sampleSize < SETTLE_WINDOW_RETRO_MIN_TRADES) {
+  if (stats.sampleSize < STRATEGY_RETRO_MIN_TRADES) {
+    const baseReason =
+      regime && regime.reason
+        ? `${regime.reason} Also need ≥${STRATEGY_RETRO_MIN_TRADES} closed settle trades for trade-book fallback (have ${stats.sampleSize}).`
+        : `Need ≥${STRATEGY_RETRO_MIN_TRADES} closed settle trades in the last ${lookbackHours}h (have ${stats.sampleSize}).`;
     return {
       light: 'neutral',
-      suggestedMaxMinutes: null,
-      suggestedMinMinutes: null,
-      suggestedVolatileExits: null,
-      currentMaxMinutes: currentMax,
+      suggestedMode: null,
+      currentStrategyMode,
       lookbackHours,
-      reason: `Need ≥${SETTLE_WINDOW_RETRO_MIN_TRADES} closed settle trades in the last ${lookbackHours}h (have ${stats.sampleSize}).`,
+      reason: baseReason,
       stats,
-      stableMaxMinutes: SETTLE_WINDOW_STABLE_MAX_MINUTES,
-      volatileMaxMinutes: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
-      stableMinMinutes: SETTLE_WINDOW_STABLE_MIN_MINUTES,
-      volatileMinMinutes: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
-      volatileTpFloorCents: SETTLE_VOLATILE_TP_FLOOR_CENTS,
-      volatileStaleMinutes: SETTLE_VOLATILE_STALE_MINUTES,
-      volatileEntryMinCents: SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS,
-      volatileEntryMaxCents: SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS,
+      regime,
     };
   }
 
   let light = 'neutral';
-  let suggestedMaxMinutes = null;
   let reason = '';
 
-  // Prefer mid-vs-late counterfactual when we have both buckets.
   if (stats.midCount >= 2 && stats.lateCount >= 2) {
     const midAvg = stats.midAvgPnlCents;
     const lateAvg = stats.lateAvgPnlCents;
     if (midAvg != null && lateAvg != null && midAvg > lateAvg + 5) {
       light = 'green';
-      suggestedMaxMinutes = SETTLE_WINDOW_STABLE_MAX_MINUTES;
       reason =
-        `Mid-window opens (≤${SETTLE_WINDOW_STABLE_MAX_MINUTES}m) beat late opens over ${lookbackHours}h ` +
-        `(avg $${(midAvg / 100).toFixed(2)} vs $${(lateAvg / 100).toFixed(2)}).`;
+        `Settle trade-book: mid-window opens beat late over ${lookbackHours}h ` +
+        `(avg $${(midAvg / 100).toFixed(2)} vs $${(lateAvg / 100).toFixed(2)}) → prefer settle.`;
     } else if (midAvg != null && lateAvg != null && lateAvg > midAvg + 5) {
       light = 'red';
-      suggestedMaxMinutes = SETTLE_WINDOW_VOLATILE_MAX_MINUTES;
       reason =
-        `Late opens beat mid-window over ${lookbackHours}h ` +
-        `(avg $${(lateAvg / 100).toFixed(2)} vs $${(midAvg / 100).toFixed(2)}) — keep a shorter ceiling.`;
+        `Settle trade-book: late opens beat mid-window over ${lookbackHours}h ` +
+        `(avg $${(lateAvg / 100).toFixed(2)} vs $${(midAvg / 100).toFixed(2)}) → prefer edge.`;
     }
   }
 
-  // Fallback: overall recent health.
   if (light === 'neutral') {
     const stopRate = stats.stopLikeRatePct != null ? stats.stopLikeRatePct : 0;
     const net = stats.netPnlCents;
     if (net < 0 || stopRate >= 45) {
       light = 'red';
-      suggestedMaxMinutes = SETTLE_WINDOW_VOLATILE_MAX_MINUTES;
       reason =
-        `Recent settle book is rough over ${lookbackHours}h ` +
-        `(net $${(net / 100).toFixed(2)}, stop/weak ${stopRate.toFixed(0)}%) → prefer ${SETTLE_WINDOW_VOLATILE_MAX_MINUTES}m.`;
+        `Settle trade-book is rough over ${lookbackHours}h ` +
+        `(net $${(net / 100).toFixed(2)}, stop/weak ${stopRate.toFixed(0)}%) → prefer edge.`;
     } else if (net > 0 && (stats.winRatePct == null || stats.winRatePct >= 55) && stopRate < 40) {
       light = 'green';
-      suggestedMaxMinutes = SETTLE_WINDOW_STABLE_MAX_MINUTES;
       reason =
-        `Recent settle book is healthy over ${lookbackHours}h ` +
-        `(net $${(net / 100).toFixed(2)}, win ${stats.winRatePct ?? '—'}%) → prefer ${SETTLE_WINDOW_STABLE_MAX_MINUTES}m.`;
+        `Settle trade-book is healthy over ${lookbackHours}h ` +
+        `(net $${(net / 100).toFixed(2)}, win ${stats.winRatePct ?? '—'}%) → prefer settle.`;
     } else {
       reason =
-        `Mixed settle results over ${lookbackHours}h (net $${(net / 100).toFixed(2)}, ` +
-        `stop/weak ${stopRate.toFixed(0)}%) — leave the slider as-is.`;
+        (regime && regime.reason ? `${regime.reason} ` : '') +
+        `Settle trade-book mixed over ${lookbackHours}h (net $${(net / 100).toFixed(2)}, ` +
+        `stop/weak ${stopRate.toFixed(0)}%) — leave mode as-is.`;
     }
-  }
-
-  let suggestedMinMinutes = null;
-  let suggestedVolatileExits = null;
-  if (light === 'red') {
-    suggestedMinMinutes = SETTLE_WINDOW_VOLATILE_MIN_MINUTES;
-    suggestedVolatileExits = 'on';
-    reason +=
-      ` Volatile package: entry ${SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS}–${SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS}¢, ` +
-      `no hold-to-settle, TP ≥${SETTLE_VOLATILE_TP_FLOOR_CENTS}¢, ` +
-      `stale @ ≤${SETTLE_VOLATILE_STALE_MINUTES}m, ` +
-      `no new opens ≤${SETTLE_WINDOW_VOLATILE_MIN_MINUTES}m.`;
-  } else if (light === 'green') {
-    suggestedMinMinutes = SETTLE_WINDOW_STABLE_MIN_MINUTES;
-    suggestedVolatileExits = 'off';
   }
 
   return {
     light,
-    suggestedMaxMinutes,
-    suggestedMinMinutes,
-    suggestedVolatileExits,
-    currentMaxMinutes: currentMax,
+    suggestedMode: strategyModeForLight(light),
+    currentStrategyMode,
     lookbackHours,
     reason,
     stats,
-    stableMaxMinutes: SETTLE_WINDOW_STABLE_MAX_MINUTES,
-    volatileMaxMinutes: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
-    stableMinMinutes: SETTLE_WINDOW_STABLE_MIN_MINUTES,
-    volatileMinMinutes: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
-    volatileTpFloorCents: SETTLE_VOLATILE_TP_FLOOR_CENTS,
-    volatileStaleMinutes: SETTLE_VOLATILE_STALE_MINUTES,
-    volatileEntryMinCents: SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS,
-    volatileEntryMaxCents: SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS,
+    regime,
   };
 }
 
@@ -717,33 +819,6 @@ function settleExitPlan(entryPriceCents) {
   };
 }
 
-/**
- * Exit plan with red-light volatile overrides: TP floor 95¢, no hold-to-settle.
- */
-function settleEffectiveExitPlan(entryPriceCents, config = {}) {
-  const plan = settleExitPlan(entryPriceCents);
-  if (plan.tier === 'invalid') {
-    return { ...plan, holdToSettle: false, volatile: false };
-  }
-  if (!isSettleVolatileExitsEnabled(config)) {
-    return {
-      ...plan,
-      holdToSettle: plan.tier === 'hold',
-      volatile: false,
-    };
-  }
-  const floor = SETTLE_VOLATILE_TP_FLOOR_CENTS;
-  const targetCents =
-    plan.targetCents == null ? floor : Math.max(plan.targetCents, floor);
-  return {
-    ...plan,
-    targetCents,
-    staleMinutesLeft: SETTLE_VOLATILE_STALE_MINUTES,
-    holdToSettle: false,
-    volatile: true,
-  };
-}
-
 // Settings that can be safely edited at runtime (via the API/dashboard)
 // without a restart. Deliberately excludes `mode` — switching paper/live
 // stays an env-var + restart decision, so a UI can never silently flip on
@@ -755,6 +830,10 @@ const EDITABLE_NUMERIC_FIELDS = [
   'takeProfitCents',
   'nearCertainExitCents',
   'minEntryCents',
+  'maxEntryCents',
+  'edgePreCloseSmallLossCents',
+  'edgePreCloseMinutes',
+  'edgeBreakevenAfterMinutes',
   'minMinutesToOpen',
   'stopRecoveryCents',
   'stopRecoveryMaxMinutes',
@@ -1380,7 +1459,6 @@ const EDITABLE_STRING_FIELDS = {
   },
   strategyMode: (v) => (['edge', 'settle'].includes(String(v || '').toLowerCase()) ? String(v).toLowerCase() : null),
   settleTieredExits: (v) => parseOnOffField(v, true),
-  settleVolatileExits: (v) => parseOnOffField(v, false),
   halfStakeNear: (v) => parseOnOffField(v, true),
   secondOpenRequiresGreen: (v) => parseOnOffField(v, true),
   tradeDoge: (v) => parseOnOffField(v, false),
@@ -1586,6 +1664,10 @@ class TradingBot {
       takeProfitCents: 15, // exit if held bid rises this many cents above entry (see final-5 override)
       nearCertainExitCents: 97, // if held bid reaches this, bank it — don't wait on settlement for the last few ¢
       minEntryCents: 40, // never buy a side cheaper than this — blocks longshot lottery tickets
+      maxEntryCents: EDGE_MAX_ENTRY_DEFAULT_CENTS, // edge: never buy richer than this
+      edgePreCloseSmallLossCents: EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS,
+      edgePreCloseMinutes: EDGE_PRE_CLOSE_MINUTES_DEFAULT,
+      edgeBreakevenAfterMinutes: EDGE_BREAKEVEN_AFTER_MINUTES_DEFAULT,
       minMinutesToOpen: 3, // don't open when fewer than this many minutes remain in the window
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
@@ -1623,8 +1705,6 @@ class TradingBot {
       settleLateEntryMinCents: 70,
       // Entry-tiered TP/stale (settleExitPlan). 'off' = stop + hold to settlement only.
       settleTieredExits: 'on',
-      // Red-light Apply: no hold-to-settle + TP ≥95¢. Green Apply clears.
-      settleVolatileExits: 'off',
       // After this many minutes parked flat (±1¢) or small-green (+2..+5¢ under target), exit.
       // 0 = off. Does not apply to ≥90¢ hold-to-settle tier.
       settleStuckHoldMinutes: 3,
@@ -1798,13 +1878,12 @@ class TradingBot {
   }
 
   /**
-   * Green/red settle open-window suggestion from recent closed settle trades.
+   * Red/green strategy-mode suggestion from recent closed settle trades.
    * Does not change config — use applySettleWindowRecommendation().
    */
   getSettleWindowRecommendation({ now = Date.now() } = {}) {
     const permanentLog = loadTradeLog();
     const ledgerClosed = (this.ledger.trades || []).filter((t) => t && t.status === 'closed');
-    // Prefer permanent log (survives rotation); merge ledger ids not already present.
     const byId = new Map();
     for (const t of permanentLog) {
       if (t && t.id) byId.set(t.id, t);
@@ -1812,61 +1891,60 @@ class TradingBot {
     for (const t of ledgerClosed) {
       if (t && t.id && !byId.has(t.id)) byId.set(t.id, t);
     }
+    let candlesBySymbol = null;
+    if (typeof this.getMarketCandles === 'function') {
+      try {
+        candlesBySymbol = this.getMarketCandles();
+      } catch (err) {
+        console.warn('[bot] getMarketCandles failed:', err.message);
+      }
+    }
     return recommendSettleOpenWindow([...byId.values()], {
       now,
-      currentMaxMinutes: this.config.settleMaxMinutesToOpen,
+      currentMode: this.config.strategyMode,
+      candlesBySymbol,
     });
   }
 
   /**
-   * Apply green/red open-window + volatile package.
-   * Pass `{ light: 'red'|'green' }` to force that package even when retrospect is neutral.
-   * Without force, uses the current recommendation when it is green/red.
+   * Apply red→edge / green→settle.
+   * Pass `{ light: 'red'|'green'|'edge'|'settle' }` to force even when neutral.
    */
   applySettleWindowRecommendation({ light: forceLight = null } = {}) {
     const rec = this.getSettleWindowRecommendation();
     const forced = String(forceLight || '').toLowerCase();
-    const chosen =
+    const chosenLight =
       forced === 'red' || forced === 'green'
         ? forced
-        : rec.light === 'green' || rec.light === 'red'
-          ? rec.light
-          : null;
-    if (!chosen) {
+        : forced === 'edge'
+          ? 'red'
+          : forced === 'settle'
+            ? 'green'
+            : rec.light === 'green' || rec.light === 'red'
+              ? rec.light
+              : null;
+    if (!chosenLight) {
       return {
         ok: false,
         message:
           rec.reason ||
-          'No green/red suggestion — use Apply volatile or Apply stable to force.',
+          'No green/red suggestion — use Apply edge or Apply settle to force.',
         recommendation: rec,
       };
     }
-    const pkg = settleWindowPackageForLight(chosen);
-    if (!pkg) {
-      return { ok: false, message: 'Unknown settle window package.', recommendation: rec };
+    const mode = strategyModeForLight(chosenLight);
+    if (!mode) {
+      return { ok: false, message: 'Unknown strategy mode.', recommendation: rec };
     }
-    const patch = {
-      settleMaxMinutesToOpen: pkg.settleMaxMinutesToOpen,
-      settleMinMinutesToOpen: pkg.settleMinMinutesToOpen,
-      settleVolatileExits: pkg.settleVolatileExits,
-      settleEntryMinCents: pkg.settleEntryMinCents,
-      settleEntryMaxCents: pkg.settleEntryMaxCents,
-      settleNoEntryMinCents: pkg.settleNoEntryMinCents,
-    };
-    const result = this.updateConfig(patch);
-    const manual = forced === 'red' || forced === 'green';
-    const volatileBit =
-      patch.settleVolatileExits === 'on'
-        ? ` volatile on (entry ${patch.settleEntryMinCents}–${patch.settleEntryMaxCents}¢, no hold-to-settle, TP ≥${SETTLE_VOLATILE_TP_FLOOR_CENTS}¢, min ${patch.settleMinMinutesToOpen}m).`
-        : ` volatile off (entry ${patch.settleEntryMinCents}–${patch.settleEntryMaxCents}¢, normal hold/TP rules).`;
+    const result = this.updateConfig({ strategyMode: mode });
+    const manual = forced === 'red' || forced === 'green' || forced === 'edge' || forced === 'settle';
     const msg =
-      `Applied settle open window ${chosen.toUpperCase()}` +
+      `Applied strategy ${chosenLight.toUpperCase()} → ${mode}` +
       (manual ? ' (manual)' : '') +
-      ` → ${patch.settleMaxMinutesToOpen} min.` +
-      volatileBit +
+      '.' +
       (rec.reason ? ` ${rec.reason}` : '');
     this.lastDecision = msg;
-    this._logActivity(msg, { kind: 'settle-window' });
+    this._logActivity(msg, { kind: 'strategy-mode' });
     this._persist();
     return {
       ok: true,
@@ -1875,7 +1953,8 @@ class TradingBot {
       applied: result.applied,
       config: this.config,
       forced: manual,
-      light: chosen,
+      light: chosenLight,
+      strategyMode: mode,
     };
   }
 
@@ -2546,7 +2625,14 @@ class TradingBot {
       return chosen;
     };
 
-    const profitReasons = new Set(['take_profit', 'pre_close_bank', 'near_certain', 'settle_stale', 'settle_stuck']);
+    const profitReasons = new Set([
+      'take_profit',
+      'pre_close_bank',
+      'pre_close_small_loss',
+      'near_certain',
+      'settle_stale',
+      'settle_stuck',
+    ]);
     if (profitReasons.has(reason)) {
       const impliedLoss = entry - exit;
       if (impliedLoss > 15 && sellLimit >= entry) {
@@ -3668,7 +3754,7 @@ class TradingBot {
     const w15AgainstUs = w15 && (heldIsYes ? w15.probabilityDown : w15.probabilityUp) >= REVERSAL_THRESHOLD_PCT;
     const strongReversalSignal = w10AgainstUs && w15AgainstUs;
 
-    const stopLevel = this._stopLevelCents(trade);
+    const stopLevel = this._stopLevelCents(trade, now);
     const takeProfitLevel = this._takeProfitLevelCents(trade);
     // ~97¢ = market basically sure — don't sit for settlement lag over 3¢.
     const nearCertainExitCents = Number.isFinite(Number(this.config.nearCertainExitCents))
@@ -3720,8 +3806,14 @@ class TradingBot {
     if (heldSideBidCents != null && stopLevel != null && heldSideBidCents <= stopLevel) {
       // Trigger on the live bid. Paper books the stop level (entry − drop).
       // Live sells at the real bid — markets don't owe you the stop price.
+      // Edge hold-timer BE stop: treat as breakeven when stop has risen to entry.
+      const entry = Number(trade.entryPriceCents);
+      const beStop =
+        !isSettleTrade(trade) &&
+        Number.isFinite(entry) &&
+        stopLevel >= entry;
       const stopFill = this.config.mode === 'paper' ? stopLevel : heldSideBidCents;
-      await this._closePosition(trade, stopFill, 'stop_loss', {
+      await this._closePosition(trade, stopFill, beStop ? 'breakeven' : 'stop_loss', {
         liveSellPriceCents: heldSideBidCents,
       });
       return;
@@ -3753,7 +3845,7 @@ class TradingBot {
       }
 
       if (!isSettleTieredExitsEnabled(this.config)) return;
-      const plan = settleEffectiveExitPlan(trade.entryPriceCents, this.config);
+      const plan = settleExitPlan(trade.entryPriceCents);
       const entry = Number(trade.entryPriceCents);
       const bidOk =
         heldSideBidCents != null &&
@@ -3763,16 +3855,14 @@ class TradingBot {
 
       // Once bid tags 90¢ and ≤3:30 left → hold to settle (ignore TP/stuck/stale).
       // Stop-loss above still applies. With >3:30 left after tagging 90, tier exits may bank.
-      // Red-light volatile package disables all hold-to-settle shortcuts.
       if (bidOk && heldSideBidCents >= 90) {
         trade.settleTouched90 = true;
       }
       const holdToSettleAfter90 =
-        !plan.volatile &&
         trade.settleTouched90 === true &&
         Number.isFinite(minutesRemaining) &&
         minutesRemaining <= SETTLE_TOUCHED90_HOLD_MINUTES;
-      const skipEarlyExits = plan.holdToSettle || holdToSettleAfter90;
+      const skipEarlyExits = plan.tier === 'hold' || holdToSettleAfter90;
 
       // Tier TP when not in the post-90 hold window (and not a ≥90 hold-tier entry).
       if (
@@ -3887,6 +3977,30 @@ class TradingBot {
       await this._closePosition(trade, heldSideBidCents, 'pre_close_bank', {
         liveSellPriceCents: heldSideBidCents,
       });
+    } else if (
+      (() => {
+        const preMins = Number(this.config.edgePreCloseMinutes);
+        const maxLoss = Number(this.config.edgePreCloseSmallLossCents);
+        const minsOk = Number.isFinite(preMins) && preMins > 0 && minutesRemaining <= preMins;
+        const lossCap = Number.isFinite(maxLoss) && maxLoss > 0 ? maxLoss : 0;
+        if (!minsOk || lossCap <= 0) return false;
+        if (
+          heldSideBidCents == null ||
+          !Number.isFinite(heldSideBidCents) ||
+          !Number.isFinite(trade.entryPriceCents)
+        ) {
+          return false;
+        }
+        const contracts = Math.max(0, Math.floor(Number(trade.contracts) || 0));
+        if (contracts < 1) return false;
+        const estPnl = (heldSideBidCents - trade.entryPriceCents) * contracts;
+        return estPnl >= -lossCap;
+      })()
+    ) {
+      // Final minutes: cash out flat/green/tiny-red up to $0.75 position loss.
+      await this._closePosition(trade, heldSideBidCents, 'pre_close_small_loss', {
+        liveSellPriceCents: heldSideBidCents,
+      });
     } else if (canExitEven) {
       await this._closePosition(trade, heldSideBidCents, 'breakeven', {
         liveSellPriceCents: heldSideBidCents,
@@ -3935,13 +4049,29 @@ class TradingBot {
    * Stop / take-profit are relative to this trade's entry:
    *   stop level = max(1, entry − stopLossCents)
    *   TP level   = min(99, entry + takeProfitCents)
+   * Edge: after edgeBreakevenAfterMinutes held, stop rises to entry (breakeven).
    */
-  _stopLevelCents(trade) {
+  _stopLevelCents(trade, now = Date.now()) {
     const entry = Number(trade.entryPriceCents);
+    if (!Number.isFinite(entry) || entry < 1) return null;
+
+    if (!isSettleTrade(trade)) {
+      const beAfter = Number(this.config.edgeBreakevenAfterMinutes);
+      const openedAt = Number(trade.openedAt);
+      if (
+        Number.isFinite(beAfter) &&
+        beAfter > 0 &&
+        Number.isFinite(openedAt) &&
+        now - openedAt >= beAfter * 60 * 1000
+      ) {
+        return Math.round(entry);
+      }
+    }
+
     const drop = isSettleTrade(trade)
       ? Number(this.config.settleStopLossCents)
       : Number(this.config.stopLossCents);
-    if (!Number.isFinite(entry) || entry < 1 || !Number.isFinite(drop) || drop <= 0) return null;
+    if (!Number.isFinite(drop) || drop <= 0) return null;
     return Math.max(1, Math.round(entry - drop));
   }
 
@@ -4984,6 +5114,12 @@ class TradingBot {
         `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — below min entry ${minEntry}¢ (skipping longshots even if confidence is high).`;
       return null;
     }
+    const maxEntry = Number(this.config.maxEntryCents);
+    if (Number.isFinite(maxEntry) && maxEntry > 0 && priceCents > maxEntry) {
+      this.lastDecision =
+        `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — above max entry ${maxEntry}¢.`;
+      return null;
+    }
 
     // Post-stop: peers calm + stopped-coin bounce (knife-catch only same-coin).
     const recoveryCheck = await this._stoppedCoinRecoveryGate(
@@ -5222,7 +5358,7 @@ class TradingBot {
     // Don't open if we're already inside this entry's stale window — would
     // churn: enter → immediately green → settle_stale → reopen (see BTC 7:25–7:27).
     if (isSettleTieredExitsEnabled(this.config)) {
-      const entryPlan = settleEffectiveExitPlan(pick.priceCents, this.config);
+      const entryPlan = settleExitPlan(pick.priceCents);
       if (
         entryPlan.staleMinutesLeft != null &&
         minutesRemaining <= entryPlan.staleMinutesLeft
@@ -5642,9 +5778,7 @@ module.exports = {
   isSettleStrategyMode,
   isSettleTrade,
   isSettleTieredExitsEnabled,
-  isSettleVolatileExitsEnabled,
   settleExitPlan,
-  settleEffectiveExitPlan,
   settleExitTiersForDashboard,
   SETTLE_EXIT_TIERS,
   settleStuckHoldMs,
@@ -5682,15 +5816,12 @@ module.exports = {
   classifyStopVerdictFromBids,
   buildHourlyPnlBuckets,
   recommendSettleOpenWindow,
-  settleWindowPackageForLight,
-  SETTLE_WINDOW_STABLE_MAX_MINUTES,
-  SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
-  SETTLE_WINDOW_STABLE_MIN_MINUTES,
-  SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
-  SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS,
-  SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS,
-  SETTLE_WINDOW_STABLE_ENTRY_MIN_CENTS,
-  SETTLE_WINDOW_STABLE_ENTRY_MAX_CENTS,
-  SETTLE_VOLATILE_TP_FLOOR_CENTS,
-  SETTLE_VOLATILE_STALE_MINUTES,
+  strategyModeForLight,
+  scoreSymbolFifteenMinuteWindow,
+  scoreMarketRegime,
+  EDGE_MAX_ENTRY_DEFAULT_CENTS,
+  EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS,
+  EDGE_PRE_CLOSE_MINUTES_DEFAULT,
+  EDGE_BREAKEVEN_AFTER_MINUTES_DEFAULT,
+  MARKET_REGIME_WINDOW_MINUTES,
 };

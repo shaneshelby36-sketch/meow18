@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, isSettleVolatileExitsEnabled, settleExitPlan, settleEffectiveExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, SETTLE_WINDOW_STABLE_MAX_MINUTES, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, SETTLE_WINDOW_STABLE_MIN_MINUTES, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS, SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS, SETTLE_WINDOW_STABLE_ENTRY_MIN_CENTS, SETTLE_WINDOW_STABLE_ENTRY_MAX_CENTS, SETTLE_VOLATILE_TP_FLOOR_CENTS, SETTLE_VOLATILE_STALE_MINUTES, stopVerdictLabel } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -1150,61 +1150,96 @@ async function testBotExits() {
     checkEq(trade.status, 'open', 'settle ≥90¢ holds toward settlement');
   }
 
-  // Volatile package: ≥90 entry banks at ≥95 (no hold-to-settle)
+  // Edge: ≤5m cash-out when position PnL loss ≤ $0.75
   {
     const now = Date.now();
     const bot = makeBot(
       mockClient({
         status: 'open',
-        close_time: new Date(now + 2 * 60 * 1000).toISOString(),
-        yes_bid: 95,
-        no_bid: 5,
+        close_time: new Date(now + 3 * 60 * 1000).toISOString(),
+        yes_bid: 48,
+        no_bid: 52,
       }),
       {
-        settleStopLossCents: 50,
-        settleTieredExits: 'on',
-        settleVolatileExits: 'on',
-        settleStuckHoldMinutes: 0,
+        strategyMode: 'edge',
+        stopLossCents: 40,
+        edgePreCloseSmallLossCents: 75,
+        edgePreCloseMinutes: 5,
       }
     );
     const trade = openTrade(bot, {
-      strategy: 'settle',
+      strategy: 'edge',
       side: 'yes',
-      entryPriceCents: 91,
-      settleTouched90: true,
-      windowCloseTime: now + 2 * 60 * 1000,
+      entryPriceCents: 50,
+      contracts: 10,
+      windowCloseTime: now + 3 * 60 * 1000,
       openedAt: now - 60 * 1000,
     });
+    // (48-50)*10 = -20¢ ≥ -75 → cash out
     await bot._manageOpenTrade(trade, predictions(3000));
-    checkEq(trade.exitReason, 'take_profit', 'volatile ≥90 entry TPs at ≥95¢');
+    checkEq(trade.exitReason, 'pre_close_small_loss', 'edge cash-out on ≤$0.75 loss in final 5m');
   }
 
-  // Volatile package: mid-tier target raised to 95 (was 94)
+  // Edge: deeper than $0.75 loss does not use pre_close_small_loss
   {
     const now = Date.now();
     const bot = makeBot(
       mockClient({
         status: 'open',
-        close_time: new Date(now + 8 * 60 * 1000).toISOString(),
-        yes_bid: 95,
-        no_bid: 5,
+        close_time: new Date(now + 3 * 60 * 1000).toISOString(),
+        yes_bid: 40,
+        no_bid: 60,
       }),
       {
-        settleStopLossCents: 50,
-        settleTieredExits: 'on',
-        settleVolatileExits: 'on',
-        settleStuckHoldMinutes: 0,
+        strategyMode: 'edge',
+        stopLossCents: 40,
+        takeProfitCents: 40,
+        edgePreCloseSmallLossCents: 75,
+        edgePreCloseMinutes: 5,
+        minConfidence: 99,
       }
     );
     const trade = openTrade(bot, {
-      strategy: 'settle',
+      strategy: 'edge',
       side: 'yes',
-      entryPriceCents: 82,
-      windowCloseTime: now + 8 * 60 * 1000,
+      entryPriceCents: 50,
+      contracts: 10,
+      windowCloseTime: now + 3 * 60 * 1000,
       openedAt: now - 60 * 1000,
     });
+    // (40-50)*10 = -100¢ < -75 → stay unless stop
     await bot._manageOpenTrade(trade, predictions(3000));
-    checkEq(trade.exitReason, 'take_profit', 'volatile mid tier TPs at 95¢ floor');
+    checkEq(trade.status, 'open', 'edge keeps ticket when loss > $0.75 in final 5m');
+  }
+
+  // Edge: after 3m hold, stop rises to breakeven
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 50,
+        no_bid: 50,
+      }),
+      {
+        strategyMode: 'edge',
+        stopLossCents: 23,
+        edgeBreakevenAfterMinutes: 3,
+        takeProfitCents: 40,
+        minConfidence: 99,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'edge',
+      side: 'yes',
+      entryPriceCents: 55,
+      contracts: 10,
+      windowCloseTime: now + 10 * 60 * 1000,
+      openedAt: now - 4 * 60 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.exitReason, 'breakeven', 'edge BE stop after 3m hold exits at/under entry');
   }
 
   // Settle weak ticket: peak <80 + strong lean against → settle_weak_switch
@@ -4430,9 +4465,9 @@ async function testBotTradingFlow() {
       windowCloseTime: now - agoMin * 60_000,
       closedAt: now - agoMin * 60_000,
     });
-    const thin = recommendSettleOpenWindow([mk(4, 50, 'settled')], { now, currentMaxMinutes: 5 });
+    const thin = recommendSettleOpenWindow([mk(4, 50, 'settled')], { now, currentMode: 'settle' });
     checkEq(thin.light, 'neutral', 'settle window rec neutral with too few trades');
-    checkEq(thin.suggestedMaxMinutes, null, 'neutral has no apply target');
+    checkEq(thin.suggestedMode, null, 'neutral has no mode target');
 
     const healthy = recommendSettleOpenWindow(
       [
@@ -4441,12 +4476,10 @@ async function testBotTradingFlow() {
         mk(5, 60, 'settled', 40),
         mk(4, 40, 'near_certain', 50),
       ],
-      { now, currentMaxMinutes: 5 }
+      { now, currentMode: 'settle' }
     );
-    checkEq(healthy.light, 'green', 'healthy recent settle book → green 8m');
-    checkEq(healthy.suggestedMaxMinutes, SETTLE_WINDOW_STABLE_MAX_MINUTES, 'green suggests 8m');
-    checkEq(healthy.suggestedMinMinutes, SETTLE_WINDOW_STABLE_MIN_MINUTES, 'green suggests 0.5m min');
-    checkEq(healthy.suggestedVolatileExits, 'off', 'green clears volatile package');
+    checkEq(healthy.light, 'green', 'healthy recent settle book → green settle');
+    checkEq(healthy.suggestedMode, 'settle', 'green suggests settle mode');
 
     const rough = recommendSettleOpenWindow(
       [
@@ -4455,13 +4488,11 @@ async function testBotTradingFlow() {
         mk(5, -90, 'stop_loss', 25),
         mk(4, 30, 'settle_stuck', 35),
       ],
-      { now, currentMaxMinutes: 8 }
+      { now, currentMode: 'settle' }
     );
-    checkEq(rough.light, 'red', 'rough recent settle book → red 5.5m');
-    checkEq(rough.suggestedMaxMinutes, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, 'red suggests 5.5m');
-    checkEq(rough.suggestedMinMinutes, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, 'red suggests 2.5m min');
-    checkEq(rough.suggestedVolatileExits, 'on', 'red enables volatile package');
-    check(/no hold-to-settle/i.test(rough.reason || ''), 'red reason mentions volatile package');
+    checkEq(rough.light, 'red', 'rough recent settle book → red edge');
+    checkEq(rough.suggestedMode, 'edge', 'red suggests edge mode');
+    check(/prefer edge/i.test(rough.reason || ''), 'red reason mentions edge');
 
     const midBetter = recommendSettleOpenWindow(
       [
@@ -4470,106 +4501,104 @@ async function testBotTradingFlow() {
         mk(4, -100, 'stop_loss', 30),
         mk(3.5, -80, 'stop_loss', 40),
       ],
-      { now, currentMaxMinutes: 5 }
+      { now, currentMode: 'edge' }
     );
     checkEq(midBetter.light, 'green', 'mid-window avg beats late → green');
+    checkEq(midBetter.suggestedMode, 'settle', 'mid-better suggests settle');
   }
 
-  check(!isSettleVolatileExitsEnabled({}), 'volatile exits default off');
-  check(isSettleVolatileExitsEnabled({ settleVolatileExits: 'on' }), 'volatile exits on');
+  // Live 15m candle regime: choppy → edge, calm one-sided → settle
   {
-    const normal = settleEffectiveExitPlan(91, {});
-    checkEq(normal.holdToSettle, true, '≥90 hold-to-settle when volatile off');
-    checkEq(normal.targetCents, null, '≥90 has no TP when volatile off');
-    const vol = settleEffectiveExitPlan(91, { settleVolatileExits: 'on' });
-    checkEq(vol.holdToSettle, false, 'volatile disables hold-to-settle');
-    checkEq(vol.targetCents, SETTLE_VOLATILE_TP_FLOOR_CENTS, 'volatile ≥90 TP floor 95');
-    checkEq(vol.staleMinutesLeft, SETTLE_VOLATILE_STALE_MINUTES, 'volatile stale @ 1.5m');
-    const mid = settleEffectiveExitPlan(82, { settleVolatileExits: 'on' });
-    checkEq(mid.targetCents, 95, 'volatile raises mid TP 94→95');
-    checkEq(mid.staleMinutesLeft, SETTLE_VOLATILE_STALE_MINUTES, 'volatile mid stale forced to 1.5m');
-    const high = settleEffectiveExitPlan(87, { settleVolatileExits: 'on' });
-    checkEq(high.targetCents, 96, 'volatile keeps high TP 96 (≥ floor)');
-    checkEq(high.staleMinutesLeft, SETTLE_VOLATILE_STALE_MINUTES, 'volatile high stale forced to 1.5m');
+    const now = Date.now();
+    const mkWindow = ({ open, trendPerBar, noise = 0, bars = 15 }) => {
+      const out = [];
+      let px = open;
+      for (let i = 0; i < bars; i += 1) {
+        const next = px + trendPerBar + (i % 2 === 0 ? noise : -noise);
+        const high = Math.max(px, next) + Math.abs(noise) * 0.25;
+        const low = Math.min(px, next) - Math.abs(noise) * 0.25;
+        out.push({
+          time: now - (bars - i) * 60_000,
+          open: px,
+          high,
+          low,
+          close: next,
+          volume: 1,
+        });
+        px = next;
+      }
+      return out;
+    };
+    const choppy = {
+      BTC: mkWindow({ open: 100000, trendPerBar: 5, noise: 400, bars: 15 }),
+      ETH: mkWindow({ open: 3500, trendPerBar: -2, noise: 25, bars: 15 }),
+      SOL: mkWindow({ open: 150, trendPerBar: 0.2, noise: 2.5, bars: 15 }),
+    };
+    const chopScore = scoreMarketRegime(choppy, { now });
+    check(chopScore.ready, 'choppy regime ready');
+    checkEq(chopScore.light, 'red', 'choppy 15m → red/edge');
+    checkEq(chopScore.suggestedMode, 'edge', 'choppy suggests edge');
+
+    const calm = {
+      BTC: mkWindow({ open: 100000, trendPerBar: 8, noise: 0.5, bars: 15 }),
+      ETH: mkWindow({ open: 3500, trendPerBar: 0.4, noise: 0.05, bars: 15 }),
+      SOL: mkWindow({ open: 150, trendPerBar: 0.02, noise: 0.002, bars: 15 }),
+    };
+    const calmScore = scoreMarketRegime(calm, { now });
+    check(calmScore.ready, 'calm regime ready');
+    checkEq(calmScore.light, 'green', 'calm one-sided 15m → green/settle');
+    checkEq(calmScore.suggestedMode, 'settle', 'calm suggests settle');
+
+    const fromCandles = recommendSettleOpenWindow([], {
+      now,
+      currentMode: 'settle',
+      candlesBySymbol: choppy,
+    });
+    checkEq(fromCandles.light, 'red', 'recommend prefers candle regime over empty trade book');
+    checkEq(fromCandles.suggestedMode, 'edge', 'candle regime suggests edge');
+  }
+
+  checkEq(strategyModeForLight('red'), 'edge', 'red maps to edge');
+  checkEq(strategyModeForLight('green'), 'settle', 'green maps to settle');
+  checkEq(EDGE_MAX_ENTRY_DEFAULT_CENTS, 95, 'edge max entry default 95');
+  checkEq(EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, 75, 'edge pre-close loss default 75¢');
+  checkEq(EDGE_PRE_CLOSE_MINUTES_DEFAULT, 5, 'edge pre-close minutes default 5');
+  {
+    const bot = makeBot(mockClient(null), { strategyMode: 'settle' });
+    bot.getSettleWindowRecommendation = () => ({
+      light: 'red',
+      suggestedMode: 'edge',
+      reason: 'rough',
+    });
+    const applied = bot.applySettleWindowRecommendation();
+    check(applied.ok, 'red apply ok');
+    checkEq(bot.config.strategyMode, 'edge', 'red apply → edge');
+
+    bot.getSettleWindowRecommendation = () => ({
+      light: 'green',
+      suggestedMode: 'settle',
+      reason: 'healthy',
+    });
+    const green = bot.applySettleWindowRecommendation();
+    check(green.ok, 'green apply ok');
+    checkEq(bot.config.strategyMode, 'settle', 'green apply → settle');
   }
   {
     const bot = makeBot(mockClient(null), { strategyMode: 'settle' });
-    let n = 0;
-    bot.getSettleWindowRecommendation = () => {
-      n += 1;
-      if (n === 1) {
-        return {
-          light: 'red',
-          suggestedMaxMinutes: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
-          suggestedMinMinutes: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
-          suggestedVolatileExits: 'on',
-          reason: 'rough',
-        };
-      }
-      return {
-        light: 'red',
-        suggestedMaxMinutes: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
-        suggestedMinMinutes: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
-        suggestedVolatileExits: 'on',
-        reason: 'rough',
-      };
-    };
-    const applied = bot.applySettleWindowRecommendation();
-    check(applied.ok, 'red apply ok');
-    checkEq(bot.config.settleMaxMinutesToOpen, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, 'red apply max 5.5');
-    checkEq(bot.config.settleMinMinutesToOpen, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, 'red apply min 2.5');
-    checkEq(bot.config.settleVolatileExits, 'on', 'red apply volatile on');
-    checkEq(bot.config.settleEntryMinCents, SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS, 'red apply entry min 75');
-    checkEq(bot.config.settleEntryMaxCents, SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS, 'red apply entry max 90');
-
-    n = 0;
-    bot.getSettleWindowRecommendation = () => {
-      n += 1;
-      return {
-        light: 'green',
-        suggestedMaxMinutes: SETTLE_WINDOW_STABLE_MAX_MINUTES,
-        suggestedMinMinutes: SETTLE_WINDOW_STABLE_MIN_MINUTES,
-        suggestedVolatileExits: 'off',
-        reason: 'healthy',
-      };
-    };
-    const green = bot.applySettleWindowRecommendation();
-    check(green.ok, 'green apply ok');
-    checkEq(bot.config.settleMaxMinutesToOpen, SETTLE_WINDOW_STABLE_MAX_MINUTES, 'green apply max 8');
-    checkEq(bot.config.settleMinMinutesToOpen, SETTLE_WINDOW_STABLE_MIN_MINUTES, 'green apply min 0.5');
-    checkEq(bot.config.settleVolatileExits, 'off', 'green apply volatile off');
-    checkEq(bot.config.settleEntryMinCents, SETTLE_WINDOW_STABLE_ENTRY_MIN_CENTS, 'green apply entry min 80');
-    checkEq(bot.config.settleEntryMaxCents, SETTLE_WINDOW_STABLE_ENTRY_MAX_CENTS, 'green apply entry max 94');
-  }
-  {
-    const bot = makeBot(mockClient(null), {
-      strategyMode: 'settle',
-      settleMaxMinutesToOpen: 8.5,
-      settleMinMinutesToOpen: 0.5,
-      settleVolatileExits: 'off',
-    });
     bot.getSettleWindowRecommendation = () => ({
       light: 'neutral',
-      suggestedMaxMinutes: null,
-      suggestedMinMinutes: null,
-      suggestedVolatileExits: null,
+      suggestedMode: null,
       reason: 'Need more trades',
     });
     const blocked = bot.applySettleWindowRecommendation();
     check(!blocked.ok, 'neutral without force cannot apply');
-    const forced = bot.applySettleWindowRecommendation({ light: 'red' });
-    check(forced.ok, 'manual red apply ok while neutral');
+    const forced = bot.applySettleWindowRecommendation({ light: 'edge' });
+    check(forced.ok, 'manual edge apply ok while neutral');
     check(forced.forced === true, 'manual apply marked forced');
-    checkEq(bot.config.settleMaxMinutesToOpen, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, 'manual red max');
-    checkEq(bot.config.settleMinMinutesToOpen, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, 'manual red min');
-    checkEq(bot.config.settleVolatileExits, 'on', 'manual red volatile on');
-    checkEq(bot.config.settleEntryMinCents, SETTLE_WINDOW_VOLATILE_ENTRY_MIN_CENTS, 'manual red entry min 75');
-    checkEq(bot.config.settleEntryMaxCents, SETTLE_WINDOW_VOLATILE_ENTRY_MAX_CENTS, 'manual red entry max 90');
-    const stable = bot.applySettleWindowRecommendation({ light: 'green' });
-    check(stable.ok, 'manual green apply ok while neutral');
-    checkEq(bot.config.settleVolatileExits, 'off', 'manual green clears volatile');
-    checkEq(bot.config.settleEntryMinCents, SETTLE_WINDOW_STABLE_ENTRY_MIN_CENTS, 'manual green entry min 80');
-    checkEq(bot.config.settleEntryMaxCents, SETTLE_WINDOW_STABLE_ENTRY_MAX_CENTS, 'manual green entry max 94');
+    checkEq(bot.config.strategyMode, 'edge', 'manual edge → edge');
+    const settle = bot.applySettleWindowRecommendation({ light: 'settle' });
+    check(settle.ok, 'manual settle apply ok while neutral');
+    checkEq(bot.config.strategyMode, 'settle', 'manual settle → settle');
   }
 
   checkEq(settleEntryBand({}).min, 80, 'settle band default min 80');
@@ -4629,6 +4658,22 @@ async function testBotTradingFlow() {
       settleBot._stopLevelCents({ strategy: 'edge', entryPriceCents: 55 }),
       32,
       'edge stop still uses stopLossCents'
+    );
+    checkEq(
+      settleBot._stopLevelCents(
+        { strategy: 'edge', entryPriceCents: 55, openedAt: Date.now() - 4 * 60 * 1000 },
+        Date.now()
+      ),
+      55,
+      'edge stop rises to breakeven after 3m hold'
+    );
+    checkEq(
+      settleBot._stopLevelCents(
+        { strategy: 'edge', entryPriceCents: 55, openedAt: Date.now() - 60 * 1000 },
+        Date.now()
+      ),
+      32,
+      'edge stop stays wide before 3m hold'
     );
     checkEq(
       settleBot._sanityCheckEntryFillCents(59, 81),
