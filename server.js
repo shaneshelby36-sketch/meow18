@@ -83,13 +83,21 @@ const bot = KALSHI_ENABLED
       kalshiClient,
       config: {
         symbol: (process.env.KALSHI_SYMBOL || 'AUTO').toUpperCase(),
-        strategyMode: (process.env.KALSHI_STRATEGY_MODE || 'settle').toLowerCase() === 'edge' ? 'edge' : 'settle',
+        strategyMode: (() => {
+          const m = (process.env.KALSHI_STRATEGY_MODE || 'settle').toLowerCase();
+          return m === 'edge' || m === 'model' ? m : 'settle';
+        })(),
         edgeThresholdPct: parseFloat(process.env.KALSHI_EDGE_THRESHOLD_PCT || '1'),
         minConfidence: parseFloat(process.env.KALSHI_MIN_CONFIDENCE || '55'),
         stopLossCents: parseInt(process.env.KALSHI_STOP_LOSS_CENTS || '23', 10),
         takeProfitCents: parseInt(process.env.KALSHI_TAKE_PROFIT_CENTS || '15', 10),
         minEntryCents: parseInt(process.env.KALSHI_MIN_ENTRY_CENTS || '40', 10),
         minMinutesToOpen: parseFloat(process.env.KALSHI_MIN_MINUTES_TO_OPEN || '3'),
+        modelMinConfidence: parseFloat(process.env.KALSHI_MODEL_MIN_CONFIDENCE || '55'),
+        modelStopLossCents: parseInt(process.env.KALSHI_MODEL_STOP_LOSS_CENTS || '0', 10),
+        modelTakeProfitCents: parseInt(process.env.KALSHI_MODEL_TAKE_PROFIT_CENTS || '0', 10),
+        modelMaxStopsPerSession: parseInt(process.env.KALSHI_MODEL_MAX_STOPS_PER_SESSION || '2', 10),
+        modelMinMinutesToOpen: parseFloat(process.env.KALSHI_MODEL_MIN_MINUTES_TO_OPEN || '0.5'),
         stopRecoveryCents: parseInt(process.env.KALSHI_STOP_RECOVERY_CENTS || '6', 10),
         stopRecoveryMaxMinutes: parseFloat(process.env.KALSHI_STOP_RECOVERY_MAX_MINUTES || '15'),
         peerCascadeMaxMinutes: parseFloat(process.env.KALSHI_PEER_CASCADE_MAX_MINUTES || '3'),

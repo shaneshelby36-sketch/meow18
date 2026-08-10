@@ -255,6 +255,7 @@
         <div class="bot-strategy-tabs" role="tablist" aria-label="Strategy">
           <button type="button" class="bot-strategy-tab" data-strategy="edge" id="bot-tab-edge">Edge</button>
           <button type="button" class="bot-strategy-tab active" data-strategy="settle" id="bot-tab-settle">Settle (80–94¢)</button>
+          <button type="button" class="bot-strategy-tab" data-strategy="model" id="bot-tab-model">Model</button>
         </div>
         <input type="hidden" id="bot-strategy-mode" value="settle" />
 
@@ -336,6 +337,38 @@
               <span class="slider-value" id="bot-minentries-value">—</span>
             </div>
             <span class="field-hint">Never buy a side cheaper than this, even with high confidence. Blocks longshot tickets (e.g. 7¢ NO fades) that blow up dollar P&amp;L. Also won't open with under 3 minutes left in the window (avoids freeze-into-settle).</span>
+          </label>
+        </div>
+
+        <div id="bot-settings-model" class="bot-field-grid" hidden>
+          <p class="settings-hint">Follows the engine’s locked UP/DOWN call: UP→YES, DOWN→NO. Window by minutes left: &gt;10m uses w5, 5–10m uses w10, ≤5m uses w5 again. Exits when that window’s lean flips against you. Optional hard stop/TP (0 = off). After 2 stop-losses on a coin in the same Kalshi session, no new model entries on that coin until the next window.</p>
+          <label>Min confidence
+            <div class="slider-row">
+              <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />
+              <span class="slider-value" id="bot-model-confidence-value">—</span>
+            </div>
+            <span class="field-hint">Active window must clear this before opening.</span>
+          </label>
+          <label>Hard stop-loss (¢ below entry)
+            <div class="slider-row">
+              <input id="bot-model-stoploss" type="range" min="0" max="40" step="1" />
+              <span class="slider-value" id="bot-model-stoploss-value">—</span>
+            </div>
+            <span class="field-hint">0 = off (lean-flip exits only). Counts toward the per-crypto session stop cap when it fires.</span>
+          </label>
+          <label>Take-profit (¢ above entry)
+            <div class="slider-row">
+              <input id="bot-model-takeprofit" type="range" min="0" max="40" step="1" />
+              <span class="slider-value" id="bot-model-takeprofit-value">—</span>
+            </div>
+            <span class="field-hint">0 = off. Optional bank when the held bid rises this far.</span>
+          </label>
+          <label>Max stop-losses per crypto / session
+            <div class="slider-row">
+              <input id="bot-model-maxstops" type="range" min="1" max="5" step="1" />
+              <span class="slider-value" id="bot-model-maxstops-value">—</span>
+            </div>
+            <span class="field-hint">Default 2. After this many hard stops on a coin in the current 15m window, block new model entries on that coin until the next session.</span>
           </label>
         </div>
 

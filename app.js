@@ -750,7 +750,7 @@ async function refreshBotStatus() {
       return;
     }
     const mode = data.config.mode;
-    modeLine.textContent = `Mode: ${mode === 'live' ? 'LIVE (real orders)' : 'Paper (simulated)'} · ${data.config.strategyMode === 'settle' ? 'Settle' : 'Edge'} · Trading ${data.config.symbol}`;
+    modeLine.textContent = `Mode: ${mode === 'live' ? 'LIVE (real orders)' : 'Paper (simulated)'} · ${strategyModeLabel(data.config.strategyMode)} · Trading ${data.config.symbol}`;
     updateModeButtons(mode, data.config.liveAuthorized);
 
     const chips = [];
@@ -852,7 +852,7 @@ function renderBotDashboard(data) {
   updateBotRuntimeDisplays();
 
   const mode = data.config.mode === 'live' ? 'LIVE' : 'PAPER';
-  state.textContent = `${mode} · ${data.config.strategyMode === 'settle' ? 'Settle' : 'Edge'} · ${data.config.symbol || '—'} · ${formatSkimLabel(data.config)} · ${data.lastDecision || ''}`;
+  state.textContent = `${mode} · ${strategyModeLabel(data.config.strategyMode)} · ${data.config.symbol || '—'} · ${formatSkimLabel(data.config)} · ${data.lastDecision || ''}`;
   const capital = data.capital || {};
   const openCount = (data.openTrades || []).length;
   stats.innerHTML = [
@@ -928,7 +928,7 @@ function buildOpenPositionsHtml(openTrades) {
       const stake = Number.isFinite(t.stakeDollars) ? `$${Number(t.stakeDollars).toFixed(2)}` : '—';
       const contracts = Number.isFinite(t.contracts) ? t.contracts : '—';
       const conf = Number.isFinite(t.engineConfidence) ? `${t.engineConfidence}%` : '—';
-      const strategy = t.strategy === 'settle' ? 'Settle' : 'Edge';
+      const strategy = strategyModeLabel(t.strategy);
       return `
         <div class="bot-position-row">
           <div class="bot-position-main">
@@ -1382,6 +1382,10 @@ const SLIDER_UNITS = {
   'bot-stoprecovery': (v) => (Number(v) <= 0 ? 'off' : `+${Math.round(v)}¢`),
   'bot-takeprofit': (v) => `+${Math.round(v)}¢`,
   'bot-minentries': (v) => `${Math.round(v)}¢`,
+  'bot-model-confidence': (v) => `${Math.round(v)}%`,
+  'bot-model-stoploss': (v) => (Number(v) <= 0 ? 'off' : `−${Math.round(v)}¢`),
+  'bot-model-takeprofit': (v) => (Number(v) <= 0 ? 'off' : `+${Math.round(v)}¢`),
+  'bot-model-maxstops': (v) => `${Math.round(v)}`,
   'bot-settle-min': (v) => `${Math.round(v)}¢`,
   'bot-settle-max': (v) => `${Math.round(v)}¢`,
   'bot-settle-stoploss': (v) => `−${Math.round(v)}¢`,
@@ -1395,8 +1399,16 @@ const SLIDER_UNITS = {
   'bot-paper-balance': (v) => `$${Math.round(v)}`,
 };
 
+function strategyModeLabel(mode) {
+  const m = String(mode || '').toLowerCase();
+  if (m === 'settle') return 'Settle';
+  if (m === 'model') return 'Model';
+  return 'Edge';
+}
+
 function setBotStrategyTab(mode) {
-  const strategy = mode === 'settle' ? 'settle' : 'edge';
+  const raw = String(mode || '').toLowerCase();
+  const strategy = raw === 'settle' || raw === 'model' ? raw : 'edge';
   const hidden = document.getElementById('bot-strategy-mode');
   if (hidden) hidden.value = strategy;
   document.querySelectorAll('.bot-strategy-tab').forEach((btn) => {
@@ -1404,8 +1416,10 @@ function setBotStrategyTab(mode) {
   });
   const edgePanel = document.getElementById('bot-settings-edge');
   const settlePanel = document.getElementById('bot-settings-settle');
-  if (edgePanel) edgePanel.hidden = strategy === 'settle';
+  const modelPanel = document.getElementById('bot-settings-model');
+  if (edgePanel) edgePanel.hidden = strategy !== 'edge';
   if (settlePanel) settlePanel.hidden = strategy !== 'settle';
+  if (modelPanel) modelPanel.hidden = strategy !== 'model';
   syncSettleExitTableEnabled();
 }
 
@@ -1516,6 +1530,10 @@ function wireSliderDisplays() {
     'bot-stoprecovery',
     'bot-takeprofit',
     'bot-minentries',
+    'bot-model-confidence',
+    'bot-model-stoploss',
+    'bot-model-takeprofit',
+    'bot-model-maxstops',
     'bot-settle-min',
     'bot-settle-max',
     'bot-settle-stoploss',
@@ -1622,6 +1640,10 @@ function wireBotConfigAutoSave() {
     'bot-stoprecovery',
     'bot-takeprofit',
     'bot-minentries',
+    'bot-model-confidence',
+    'bot-model-stoploss',
+    'bot-model-takeprofit',
+    'bot-model-maxstops',
     'bot-settle-min',
     'bot-settle-max',
     'bot-settle-stoploss',
@@ -1681,6 +1703,16 @@ async function loadBotConfigIntoForm() {
     if (stopRecEl) stopRecEl.value = c.stopRecoveryCents != null ? c.stopRecoveryCents : 6;
     document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 15;
     document.getElementById('bot-minentries').value = c.minEntryCents != null ? c.minEntryCents : 40;
+    const modelConf = document.getElementById('bot-model-confidence');
+    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 55;
+    const modelStop = document.getElementById('bot-model-stoploss');
+    if (modelStop) modelStop.value = c.modelStopLossCents != null ? c.modelStopLossCents : 0;
+    const modelTp = document.getElementById('bot-model-takeprofit');
+    if (modelTp) modelTp.value = c.modelTakeProfitCents != null ? c.modelTakeProfitCents : 0;
+    const modelMaxStops = document.getElementById('bot-model-maxstops');
+    if (modelMaxStops) {
+      modelMaxStops.value = c.modelMaxStopsPerSession != null ? c.modelMaxStopsPerSession : 2;
+    }
     const settleMin = document.getElementById('bot-settle-min');
     if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 80;
     const settleMax = document.getElementById('bot-settle-max');
@@ -1773,6 +1805,10 @@ async function loadBotConfigIntoForm() {
       'bot-stoprecovery',
       'bot-takeprofit',
       'bot-minentries',
+      'bot-model-confidence',
+      'bot-model-stoploss',
+      'bot-model-takeprofit',
+      'bot-model-maxstops',
       'bot-settle-min',
       'bot-settle-max',
       'bot-settle-stoploss',
@@ -1916,6 +1952,10 @@ async function saveBotConfig(opts = {}) {
     stopRecoveryCents: parseFloat(document.getElementById('bot-stoprecovery').value),
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
+    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '55'),
+    modelStopLossCents: parseFloat(document.getElementById('bot-model-stoploss')?.value || '0'),
+    modelTakeProfitCents: parseFloat(document.getElementById('bot-model-takeprofit')?.value || '0'),
+    modelMaxStopsPerSession: parseFloat(document.getElementById('bot-model-maxstops')?.value || '2'),
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '80'),
     settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '94'),
     settleStopLossCents: Math.max(
