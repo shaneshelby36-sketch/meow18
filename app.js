@@ -979,26 +979,43 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
           : '';
       const conf = Number.isFinite(t.engineConfidence) ? ` · conf ${t.engineConfidence}%` : '';
       let stopNote = '';
+      let stopCopy = '';
       if (t.exitReason === 'stop_loss') {
         if (t.stopVerdictPending || t.stopVerdict === 'pending') {
           stopNote = `<span class="bot-log-sub stop-verdict pending">Stop review: checking whether this prevented more loss or missed a bounce…</span>`;
+          stopCopy = 'Stop review pending';
         } else if (t.stopVerdict === 'prevented_loss') {
-          stopNote = `<span class="bot-log-sub stop-verdict helped">${escapeHtml(
-            t.stopVerdictDetail || 'Stop helped — prevented further loss'
-          )}</span>`;
+          const detail = t.stopVerdictDetail || 'Stop helped — prevented further loss';
+          stopNote = `<span class="bot-log-sub stop-verdict helped">${escapeHtml(detail)}</span>`;
+          stopCopy = detail;
         } else if (t.stopVerdict === 'missed_opportunity') {
-          stopNote = `<span class="bot-log-sub stop-verdict missed">${escapeHtml(
-            t.stopVerdictDetail || 'Missed opportunity — would have recovered'
-          )}</span>`;
+          const detail = t.stopVerdictDetail || 'Missed opportunity — would have recovered';
+          stopNote = `<span class="bot-log-sub stop-verdict missed">${escapeHtml(detail)}</span>`;
+          stopCopy = detail;
         } else if (t.stopVerdict === 'mixed') {
-          stopNote = `<span class="bot-log-sub stop-verdict mixed">${escapeHtml(
-            t.stopVerdictDetail || 'Stop outcome unclear'
-          )}</span>`;
+          const detail = t.stopVerdictDetail || 'Stop outcome unclear';
+          stopNote = `<span class="bot-log-sub stop-verdict mixed">${escapeHtml(detail)}</span>`;
+          stopCopy = detail;
         }
       }
       const rowId = escapeHtml(t.id || `${t.symbol || 'x'}-${t.openedAt || ''}-${t.closedAt || ''}`);
+      const copyLine = [
+        formatTradeTime(t.closedAt || t.openedAt),
+        `${t.symbol || '?'} ${side}`,
+        status,
+        `${entry}${t.status === 'closed' ? ` → ${exit}` : ''}`,
+        Number.isFinite(t.stakeDollars) ? `$${Number(t.stakeDollars).toFixed(2)}` : null,
+        conf ? conf.replace(/^\s·\s/, '') : null,
+        fees ? fees.replace(/^\s·\s/, '') : null,
+        skim ? skim.replace(/^\s·\s/, '') : null,
+        `opened ${formatTradeTime(t.openedAt)}${t.mode ? ` · ${t.mode}` : ''}`,
+        stopCopy || null,
+        pnl != null ? formatMoneyCents(pnl, { signed: true }) : t.status === 'open' ? 'open' : null,
+      ]
+        .filter(Boolean)
+        .join(' · ');
       return `
-        <div class="bot-log-row kind-${t.status === 'open' ? 'open' : 'close'}" data-log-id="${rowId}">
+        <div class="bot-log-row kind-${t.status === 'open' ? 'open' : 'close'}" data-log-id="${rowId}" data-copy-line="${escapeHtml(copyLine)}">
           <span class="bot-log-time">${formatTradeTime(t.closedAt || t.openedAt)}</span>
           <span class="bot-log-msg">
             <strong>${t.symbol || '?'} ${side}</strong>
@@ -1136,7 +1153,11 @@ function bindTradeLogUi() {
   if (!copyBtn || !list) return;
   copyBtn.onclick = () => {
     const text = Array.from(list.querySelectorAll('.bot-log-row'))
-      .map((row) => row.innerText.replace(/\s+/g, ' ').trim())
+      .map((row) => {
+        const fromAttr = row.getAttribute('data-copy-line');
+        if (fromAttr && fromAttr.trim()) return fromAttr.trim();
+        return row.innerText.replace(/\s+/g, ' ').trim();
+      })
       .filter(Boolean)
       .join('\n');
     if (!text) return;
@@ -1657,8 +1678,8 @@ async function loadBotConfigIntoForm() {
     if (settleMax) settleMax.value = c.settleEntryMaxCents != null ? c.settleEntryMaxCents : 94;
     const settleStop = document.getElementById('bot-settle-stoploss');
     if (settleStop) {
-      const raw = c.settleStopLossCents != null ? Number(c.settleStopLossCents) : 20;
-      settleStop.value = Math.max(8, Number.isFinite(raw) ? raw : 20);
+      const raw = c.settleStopLossCents != null ? Number(c.settleStopLossCents) : 35;
+      settleStop.value = Math.max(8, Math.min(40, Number.isFinite(raw) ? raw : 35));
     }
     const settleMaxMin = document.getElementById('bot-settle-maxmin');
     if (settleMaxMin) settleMaxMin.value = c.settleMaxMinutesToOpen != null ? c.settleMaxMinutesToOpen : 12;
@@ -1789,7 +1810,7 @@ async function saveBotConfig(opts = {}) {
     settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '94'),
     settleStopLossCents: Math.max(
       8,
-      parseFloat(document.getElementById('bot-settle-stoploss')?.value || '20') || 20
+      Math.min(40, parseFloat(document.getElementById('bot-settle-stoploss')?.value || '35') || 35)
     ),
     settleMaxMinutesToOpen: parseFloat(document.getElementById('bot-settle-maxmin')?.value || '12'),
     settlePostStopSameSideCooldownMinutes: parseFloat(

@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 13;
+const SETTINGS_DEFAULTS_VERSION = 15;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -523,7 +523,7 @@ const SETTLE_STOP_LOSS_MIN_CENTS = 8;
 function normalizeSettleStopLossCents(config) {
   if (!config || typeof config !== 'object') return config;
   let n = Number(config.settleStopLossCents);
-  if (!Number.isFinite(n)) n = 20;
+  if (!Number.isFinite(n)) n = 35;
   config.settleStopLossCents = Math.max(
     SETTLE_STOP_LOSS_MIN_CENTS,
     Math.min(40, Math.round(n))
@@ -1296,8 +1296,9 @@ class TradingBot {
       // (see settleExitPlan), else hold to official settlement.
       settleEntryMinCents: 85,
       settleEntryMaxCents: 94, // includes ≥90¢ hold-to-settle through 94¢
-      // Wide vs 8¢: Kalshi mid-band often wicks 10–15¢ without thesis death.
-      settleStopLossCents: 20,
+      // Calibrated to recent live dumps (~28–36¢ common; 90→40 gaps still gap).
+      // Wider than 20 so reversible wicks that used to stop at −20 can recover.
+      settleStopLossCents: 35,
       // Reject asks with less upside to 100 than this. Independent of stop. 0 = off.
       settleMinUpsideCents: 6, // allows 94¢ (6¢ to 100); 95¢+ still blocked
       settleMinMinutesToOpen: 0.5, // still need a little time; 0 = allow until last seconds
@@ -3724,12 +3725,12 @@ class TradingBot {
         trade.entryPriceCents = workingPrice;
         trade.stakeDollars = +(attemptCost / 100).toFixed(2);
 
-        try {
-          const order = await this.client.createOrder({
-            ticker,
-            side,
-            action: 'buy',
-            count: trade.contracts,
+      try {
+        const order = await this.client.createOrder({
+          ticker,
+          side,
+          action: 'buy',
+          count: trade.contracts,
             priceCents: workingPrice,
             timeInForce: 'immediate_or_cancel',
           });
@@ -3768,7 +3769,7 @@ class TradingBot {
           console.warn(
             `[bot] Live entry try ${attempt + 1}/${maxEntryAttempts} on ${symbol} did not fill @ ${workingPrice}¢ (IOC; ask ${freshAsk}¢)`
           );
-        } catch (err) {
+      } catch (err) {
           lastErr = err;
           console.error(`[bot] Live entry try ${attempt + 1}/${maxEntryAttempts} failed:`, err.message);
         }
@@ -3854,11 +3855,11 @@ class TradingBot {
           this.lastDecision =
             `Insufficient paper funds at commit: $${(capital.paperAvailableCents / 100).toFixed(2)} spendable.`;
           return false;
-        }
       }
+    }
 
-      this.ledger.trades.unshift(trade);
-      if (this.ledger.trades.length > 200) this.ledger.trades.length = 200;
+    this.ledger.trades.unshift(trade);
+    if (this.ledger.trades.length > 200) this.ledger.trades.length = 200;
       this._noteProtectionGate(false); // open implies gate no longer blocking
       if (isSettle) {
         const minsLeftNow = (closeAt - Date.now()) / 60000;
@@ -3912,7 +3913,7 @@ class TradingBot {
         engineConfidence: trade.engineConfidence,
         status: 'open',
       });
-      this._persist();
+    this._persist();
       return true;
     });
   }
