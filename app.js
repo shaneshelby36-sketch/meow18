@@ -1432,6 +1432,17 @@ function renderSettleExitTable(tiers) {
   syncSettleExitTableEnabled();
 }
 
+function renderSettleExitTableNote(config) {
+  const note = document.getElementById('settle-exit-table-note');
+  if (!note) return;
+  const volatileOn =
+    config &&
+    (config.settleVolatileExits === 'on' || config.settleVolatileExits === true);
+  note.textContent = volatileOn
+    ? 'Volatile package ON (red Apply): no hold-to-settle; TP ≥95¢; stuck/stale still run. Stop-loss still applies. Green Apply restores normal hold/TP tiers.'
+    : 'Live from bot tiers. After a trade’s bid tags 90¢, stuck/stale turn off and it rides settlement even if price dips back under 90 (stop still applies). Tier TP (e.g. 96¢) can still bank if hit. Red-light volatile (when Applied) removes hold-to-settle and banks at ≥95¢ instead.';
+}
+
 function syncSettleExitTableEnabled() {
   const wrap = document.getElementById('settle-exit-table-wrap');
   const tiered = document.getElementById('bot-settle-tiered');
@@ -1660,6 +1671,7 @@ async function loadBotConfigIntoForm() {
     const data = await res.json();
     const c = data.config;
     renderSettleExitTable(data.settleExitTiers);
+    renderSettleExitTableNote(c);
     document.getElementById('bot-symbol').value = c.symbol;
     setBotStrategyTab(c.strategyMode || 'settle');
     const backtestSymbol = document.getElementById('backtest-symbol');
@@ -1808,7 +1820,11 @@ function renderSettleWindowRec(rec) {
     btn.disabled = false;
     btn.textContent = `Apply ${mins} min`;
   } else if (light === 'red') {
-    text.textContent = `Red · suggest ${mins}m (volatile) · ${look}, n=${n}. ${rec.reason || ''}`;
+    const tp = rec.volatileTpFloorCents != null ? rec.volatileTpFloorCents : 95;
+    const minLeft = rec.suggestedMinMinutes != null ? rec.suggestedMinMinutes : 1.5;
+    text.textContent =
+      `Red · suggest ${mins}m (volatile) · no hold-to-settle · TP ≥${tp}¢ · no opens ≤${minLeft}m` +
+      ` · ${look}, n=${n}. ${rec.reason || ''}`;
     btn.disabled = false;
     btn.textContent = `Apply ${mins} min`;
   } else {
@@ -1855,6 +1871,7 @@ async function applySettleWindowRec() {
       slider.value = data.config.settleMaxMinutesToOpen;
       updateSliderDisplay('bot-settle-maxmin');
     }
+    renderSettleExitTableNote(data.config);
     refreshBotStatus();
   } catch (err) {
     if (feedback) {

@@ -267,6 +267,17 @@ function isSettleTieredExitsEnabled(config = {}) {
 }
 
 /**
+ * Red-light volatile package (Apply only): no hold-to-settle, TP ≥95¢.
+ * Default off — green Apply clears it.
+ */
+function isSettleVolatileExitsEnabled(config = {}) {
+  const v = config.settleVolatileExits;
+  if (v === true || v === 1 || v === '1') return true;
+  const s = String(v == null ? 'off' : v).toLowerCase();
+  return s === 'on' || s === 'true' || s === 'yes';
+}
+
+/**
  * Single source of truth for settle entry → TP / stale-green table.
  * Dashboard reads this via /api/bot/config; settleExitPlan uses the same rows.
  * Edit here when changing tiers — UI updates automatically on next config load.
@@ -414,6 +425,12 @@ function classifyStopVerdictFromBids({
 const SETTLE_WINDOW_STABLE_MAX_MINUTES = 8;
 /** Volatile settle open ceiling when retrospect is red. */
 const SETTLE_WINDOW_VOLATILE_MAX_MINUTES = 5.5;
+/** Green Apply restores this min-minutes-left gate (default). */
+const SETTLE_WINDOW_STABLE_MIN_MINUTES = 0.5;
+/** Red Apply: stop new opens with ≤1:30 left. */
+const SETTLE_WINDOW_VOLATILE_MIN_MINUTES = 1.5;
+/** Red Apply: bank at ≥ this bid (no hold-to-settle). */
+const SETTLE_VOLATILE_TP_FLOOR_CENTS = 95;
 const SETTLE_WINDOW_RETRO_SHORT_MS = 2 * 60 * 60 * 1000;
 const SETTLE_WINDOW_RETRO_LONG_MS = 12 * 60 * 60 * 1000;
 const SETTLE_WINDOW_RETRO_MIN_TRADES = 3;
@@ -489,12 +506,17 @@ function recommendSettleOpenWindow(trades, { now = Date.now(), currentMaxMinutes
     return {
       light: 'neutral',
       suggestedMaxMinutes: null,
+      suggestedMinMinutes: null,
+      suggestedVolatileExits: null,
       currentMaxMinutes: currentMax,
       lookbackHours,
       reason: `Need ≥${SETTLE_WINDOW_RETRO_MIN_TRADES} closed settle trades in the last ${lookbackHours}h (have ${stats.sampleSize}).`,
       stats,
       stableMaxMinutes: SETTLE_WINDOW_STABLE_MAX_MINUTES,
       volatileMaxMinutes: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
+      stableMinMinutes: SETTLE_WINDOW_STABLE_MIN_MINUTES,
+      volatileMinMinutes: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
+      volatileTpFloorCents: SETTLE_VOLATILE_TP_FLOOR_CENTS,
     };
   }
 
@@ -544,15 +566,33 @@ function recommendSettleOpenWindow(trades, { now = Date.now(), currentMaxMinutes
     }
   }
 
+  let suggestedMinMinutes = null;
+  let suggestedVolatileExits = null;
+  if (light === 'red') {
+    suggestedMinMinutes = SETTLE_WINDOW_VOLATILE_MIN_MINUTES;
+    suggestedVolatileExits = 'on';
+    reason +=
+      ` Volatile package: no hold-to-settle, TP ≥${SETTLE_VOLATILE_TP_FLOOR_CENTS}¢, ` +
+      `no new opens ≤${SETTLE_WINDOW_VOLATILE_MIN_MINUTES}m.`;
+  } else if (light === 'green') {
+    suggestedMinMinutes = SETTLE_WINDOW_STABLE_MIN_MINUTES;
+    suggestedVolatileExits = 'off';
+  }
+
   return {
     light,
     suggestedMaxMinutes,
+    suggestedMinMinutes,
+    suggestedVolatileExits,
     currentMaxMinutes: currentMax,
     lookbackHours,
     reason,
     stats,
     stableMaxMinutes: SETTLE_WINDOW_STABLE_MAX_MINUTES,
     volatileMaxMinutes: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
+    stableMinMinutes: SETTLE_WINDOW_STABLE_MIN_MINUTES,
+    volatileMinMinutes: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
+    volatileTpFloorCents: SETTLE_VOLATILE_TP_FLOOR_CENTS,
   };
 }
 
@@ -627,6 +667,35 @@ function settleExitPlan(entryPriceCents) {
     staleMinutesLeft: late.staleMinutesLeft,
     tier: late.tier,
     entry,
+  };
+}
+
+/**
+ * Exit plan with red-light volatile overrides: TP floor 95¢, no hold-to-settle.
+ */
+function settleEffectiveExitPlan(entryPriceCents, config = {}) {
+  const plan = settleExitPlan(entryPriceCents);
+  if (plan.tier === 'invalid') {
+    return { ...plan, holdToSettle: false, volatile: false };
+  }
+  if (!isSettleVolatileExitsEnabled(config)) {
+    return {
+      ...plan,
+      holdToSettle: plan.tier === 'hold',
+      volatile: false,
+    };
+  }
+  const floor = SETTLE_VOLATILE_TP_FLOOR_CENTS;
+  const targetCents =
+    plan.targetCents == null ? floor : Math.max(plan.targetCents, floor);
+  const staleMinutesLeft =
+    plan.staleMinutesLeft != null ? plan.staleMinutesLeft : 2;
+  return {
+    ...plan,
+    targetCents,
+    staleMinutesLeft,
+    holdToSettle: false,
+    volatile: true,
   };
 }
 
@@ -1266,6 +1335,7 @@ const EDITABLE_STRING_FIELDS = {
   },
   strategyMode: (v) => (['edge', 'settle'].includes(String(v || '').toLowerCase()) ? String(v).toLowerCase() : null),
   settleTieredExits: (v) => parseOnOffField(v, true),
+  settleVolatileExits: (v) => parseOnOffField(v, false),
   halfStakeNear: (v) => parseOnOffField(v, true),
   secondOpenRequiresGreen: (v) => parseOnOffField(v, true),
   tradeDoge: (v) => parseOnOffField(v, false),
@@ -1508,6 +1578,8 @@ class TradingBot {
       settleLateEntryMinCents: 70,
       // Entry-tiered TP/stale (settleExitPlan). 'off' = stop + hold to settlement only.
       settleTieredExits: 'on',
+      // Red-light Apply: no hold-to-settle + TP ≥95¢. Green Apply clears.
+      settleVolatileExits: 'off',
       // After this many minutes parked flat (±1¢) or small-green (+2..+5¢ under target), exit.
       // 0 = off. Does not apply to ≥90¢ hold-to-settle tier.
       settleStuckHoldMinutes: 3,
@@ -1702,7 +1774,7 @@ class TradingBot {
   }
 
   /**
-   * Apply the current green/red suggestion to settleMaxMinutesToOpen (button press).
+   * Apply green/red suggestion: open-window max + volatile package (min / exits).
    */
   applySettleWindowRecommendation() {
     const rec = this.getSettleWindowRecommendation();
@@ -1712,9 +1784,24 @@ class TradingBot {
     if (!Number.isFinite(Number(rec.suggestedMaxMinutes))) {
       return { ok: false, message: 'Suggestion has no target minutes.', recommendation: rec };
     }
-    const result = this.updateConfig({ settleMaxMinutesToOpen: rec.suggestedMaxMinutes });
+    const patch = { settleMaxMinutesToOpen: rec.suggestedMaxMinutes };
+    if (Number.isFinite(Number(rec.suggestedMinMinutes))) {
+      patch.settleMinMinutesToOpen = Number(rec.suggestedMinMinutes);
+    }
+    if (rec.suggestedVolatileExits === 'on' || rec.suggestedVolatileExits === 'off') {
+      patch.settleVolatileExits = rec.suggestedVolatileExits;
+    }
+    const result = this.updateConfig(patch);
+    const volatileBit =
+      patch.settleVolatileExits === 'on'
+        ? ` volatile on (no hold-to-settle, TP ≥${SETTLE_VOLATILE_TP_FLOOR_CENTS}¢, min ${patch.settleMinMinutesToOpen}m).`
+        : patch.settleVolatileExits === 'off'
+          ? ' volatile off (normal hold/TP rules).'
+          : '';
     const msg =
-      `Applied settle open window ${rec.light.toUpperCase()} → ${rec.suggestedMaxMinutes} min. ${rec.reason}`;
+      `Applied settle open window ${rec.light.toUpperCase()} → ${rec.suggestedMaxMinutes} min.` +
+      volatileBit +
+      ` ${rec.reason}`;
     this.lastDecision = msg;
     this._logActivity(msg, { kind: 'settle-window' });
     this._persist();
@@ -3601,7 +3688,7 @@ class TradingBot {
       }
 
       if (!isSettleTieredExitsEnabled(this.config)) return;
-      const plan = settleExitPlan(trade.entryPriceCents);
+      const plan = settleEffectiveExitPlan(trade.entryPriceCents, this.config);
       const entry = Number(trade.entryPriceCents);
       const bidOk =
         heldSideBidCents != null &&
@@ -3611,14 +3698,16 @@ class TradingBot {
 
       // Once bid tags 90¢ and ≤3:30 left → hold to settle (ignore TP/stuck/stale).
       // Stop-loss above still applies. With >3:30 left after tagging 90, tier exits may bank.
+      // Red-light volatile package disables all hold-to-settle shortcuts.
       if (bidOk && heldSideBidCents >= 90) {
         trade.settleTouched90 = true;
       }
       const holdToSettleAfter90 =
+        !plan.volatile &&
         trade.settleTouched90 === true &&
         Number.isFinite(minutesRemaining) &&
         minutesRemaining <= SETTLE_TOUCHED90_HOLD_MINUTES;
-      const skipEarlyExits = plan.tier === 'hold' || holdToSettleAfter90;
+      const skipEarlyExits = plan.holdToSettle || holdToSettleAfter90;
 
       // Tier TP when not in the post-90 hold window (and not a ≥90 hold-tier entry).
       if (
@@ -5068,7 +5157,7 @@ class TradingBot {
     // Don't open if we're already inside this entry's stale window — would
     // churn: enter → immediately green → settle_stale → reopen (see BTC 7:25–7:27).
     if (isSettleTieredExitsEnabled(this.config)) {
-      const entryPlan = settleExitPlan(pick.priceCents);
+      const entryPlan = settleEffectiveExitPlan(pick.priceCents, this.config);
       if (
         entryPlan.staleMinutesLeft != null &&
         minutesRemaining <= entryPlan.staleMinutesLeft
@@ -5488,7 +5577,9 @@ module.exports = {
   isSettleStrategyMode,
   isSettleTrade,
   isSettleTieredExitsEnabled,
+  isSettleVolatileExitsEnabled,
   settleExitPlan,
+  settleEffectiveExitPlan,
   settleExitTiersForDashboard,
   SETTLE_EXIT_TIERS,
   settleStuckHoldMs,
@@ -5528,4 +5619,7 @@ module.exports = {
   recommendSettleOpenWindow,
   SETTLE_WINDOW_STABLE_MAX_MINUTES,
   SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
+  SETTLE_WINDOW_STABLE_MIN_MINUTES,
+  SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
+  SETTLE_VOLATILE_TP_FLOOR_CENTS,
 };

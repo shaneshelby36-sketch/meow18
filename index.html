@@ -383,7 +383,7 @@
                 <tr><td colspan="3" class="settle-exit-table-loading">Loading…</td></tr>
               </tbody>
             </table>
-            <p class="field-hint" id="settle-exit-table-note">Live from bot tiers. After a trade’s bid tags 90¢, stuck/stale turn off and it rides settlement even if price dips back under 90 (stop still applies). Tier TP (e.g. 96¢) can still bank if hit.</p>
+            <p class="field-hint" id="settle-exit-table-note">Live from bot tiers. After a trade’s bid tags 90¢, stuck/stale turn off and it rides settlement even if price dips back under 90 (stop still applies). Tier TP (e.g. 96¢) can still bank if hit. Red-light volatile (when Applied) removes hold-to-settle and banks at ≥95¢ instead.</p>
           </div>
           <label>Stuck exit after (min parked)
             <div class="slider-row">
@@ -409,7 +409,7 @@
               <span class="settle-window-rec-text" id="settle-window-rec-text">Retrospect: gathering settle history…</span>
               <button type="button" class="settle-window-apply" id="settle-window-apply" disabled>Apply</button>
             </div>
-            <span class="field-hint">Won’t open too early in the window (default 8.5). Green/red retrospect suggests 8m (stable) or 5.5m (volatile) from the last 2–12h of settle trades — press Apply to change the slider.</span>
+            <span class="field-hint">Won’t open too early in the window (default 8.5). Green/red retrospect suggests 8m (stable) or 5.5m (volatile) from the last 2–12h of settle trades — press Apply to change the slider. Red Apply also turns on the volatile package: no hold-to-settle, TP ≥95¢, stop new opens at ≤1:30 left. Green Apply restores normal hold/TP rules and 0.5m min.</span>
           </label>
           <label>Settle same-side sit-out after stop (min)
             <div class="slider-row">

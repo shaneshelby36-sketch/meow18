@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, SETTLE_WINDOW_STABLE_MAX_MINUTES, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, stopVerdictLabel } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, isSettleVolatileExitsEnabled, settleExitPlan, settleEffectiveExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, SETTLE_WINDOW_STABLE_MAX_MINUTES, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, SETTLE_WINDOW_STABLE_MIN_MINUTES, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, SETTLE_VOLATILE_TP_FLOOR_CENTS, stopVerdictLabel } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -1148,6 +1148,63 @@ async function testBotExits() {
     });
     await bot._manageOpenTrade(trade, predictions(3000));
     checkEq(trade.status, 'open', 'settle ≥90¢ holds toward settlement');
+  }
+
+  // Volatile package: ≥90 entry banks at ≥95 (no hold-to-settle)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 2 * 60 * 1000).toISOString(),
+        yes_bid: 95,
+        no_bid: 5,
+      }),
+      {
+        settleStopLossCents: 50,
+        settleTieredExits: 'on',
+        settleVolatileExits: 'on',
+        settleStuckHoldMinutes: 0,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 91,
+      settleTouched90: true,
+      windowCloseTime: now + 2 * 60 * 1000,
+      openedAt: now - 60 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.exitReason, 'take_profit', 'volatile ≥90 entry TPs at ≥95¢');
+  }
+
+  // Volatile package: mid-tier target raised to 95 (was 94)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 8 * 60 * 1000).toISOString(),
+        yes_bid: 95,
+        no_bid: 5,
+      }),
+      {
+        settleStopLossCents: 50,
+        settleTieredExits: 'on',
+        settleVolatileExits: 'on',
+        settleStuckHoldMinutes: 0,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 82,
+      windowCloseTime: now + 8 * 60 * 1000,
+      openedAt: now - 60 * 1000,
+    });
+    await bot._manageOpenTrade(trade, predictions(3000));
+    checkEq(trade.exitReason, 'take_profit', 'volatile mid tier TPs at 95¢ floor');
   }
 
   // Settle weak ticket: peak <80 + strong lean against → settle_weak_switch
@@ -4388,6 +4445,8 @@ async function testBotTradingFlow() {
     );
     checkEq(healthy.light, 'green', 'healthy recent settle book → green 8m');
     checkEq(healthy.suggestedMaxMinutes, SETTLE_WINDOW_STABLE_MAX_MINUTES, 'green suggests 8m');
+    checkEq(healthy.suggestedMinMinutes, SETTLE_WINDOW_STABLE_MIN_MINUTES, 'green suggests 0.5m min');
+    checkEq(healthy.suggestedVolatileExits, 'off', 'green clears volatile package');
 
     const rough = recommendSettleOpenWindow(
       [
@@ -4400,6 +4459,9 @@ async function testBotTradingFlow() {
     );
     checkEq(rough.light, 'red', 'rough recent settle book → red 5.5m');
     checkEq(rough.suggestedMaxMinutes, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, 'red suggests 5.5m');
+    checkEq(rough.suggestedMinMinutes, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, 'red suggests 1.5m min');
+    checkEq(rough.suggestedVolatileExits, 'on', 'red enables volatile package');
+    check(/no hold-to-settle/i.test(rough.reason || ''), 'red reason mentions volatile package');
 
     const midBetter = recommendSettleOpenWindow(
       [
@@ -4412,6 +4474,67 @@ async function testBotTradingFlow() {
     );
     checkEq(midBetter.light, 'green', 'mid-window avg beats late → green');
   }
+
+  check(!isSettleVolatileExitsEnabled({}), 'volatile exits default off');
+  check(isSettleVolatileExitsEnabled({ settleVolatileExits: 'on' }), 'volatile exits on');
+  {
+    const normal = settleEffectiveExitPlan(91, {});
+    checkEq(normal.holdToSettle, true, '≥90 hold-to-settle when volatile off');
+    checkEq(normal.targetCents, null, '≥90 has no TP when volatile off');
+    const vol = settleEffectiveExitPlan(91, { settleVolatileExits: 'on' });
+    checkEq(vol.holdToSettle, false, 'volatile disables hold-to-settle');
+    checkEq(vol.targetCents, SETTLE_VOLATILE_TP_FLOOR_CENTS, 'volatile ≥90 TP floor 95');
+    const mid = settleEffectiveExitPlan(82, { settleVolatileExits: 'on' });
+    checkEq(mid.targetCents, 95, 'volatile raises mid TP 94→95');
+    const high = settleEffectiveExitPlan(87, { settleVolatileExits: 'on' });
+    checkEq(high.targetCents, 96, 'volatile keeps high TP 96 (≥ floor)');
+  }
+  {
+    const bot = makeBot(mockClient(null), { strategyMode: 'settle' });
+    let n = 0;
+    bot.getSettleWindowRecommendation = () => {
+      n += 1;
+      if (n === 1) {
+        return {
+          light: 'red',
+          suggestedMaxMinutes: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
+          suggestedMinMinutes: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
+          suggestedVolatileExits: 'on',
+          reason: 'rough',
+        };
+      }
+      return {
+        light: 'red',
+        suggestedMaxMinutes: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
+        suggestedMinMinutes: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
+        suggestedVolatileExits: 'on',
+        reason: 'rough',
+      };
+    };
+    const applied = bot.applySettleWindowRecommendation();
+    check(applied.ok, 'red apply ok');
+    checkEq(bot.config.settleMaxMinutesToOpen, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, 'red apply max 5.5');
+    checkEq(bot.config.settleMinMinutesToOpen, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, 'red apply min 1.5');
+    checkEq(bot.config.settleVolatileExits, 'on', 'red apply volatile on');
+
+    n = 0;
+    bot.getSettleWindowRecommendation = () => {
+      n += 1;
+      return {
+        light: 'green',
+        suggestedMaxMinutes: SETTLE_WINDOW_STABLE_MAX_MINUTES,
+        suggestedMinMinutes: SETTLE_WINDOW_STABLE_MIN_MINUTES,
+        suggestedVolatileExits: 'off',
+        reason: 'healthy',
+      };
+    };
+    const green = bot.applySettleWindowRecommendation();
+    check(green.ok, 'green apply ok');
+    checkEq(bot.config.settleMaxMinutesToOpen, SETTLE_WINDOW_STABLE_MAX_MINUTES, 'green apply max 8');
+    checkEq(bot.config.settleMinMinutesToOpen, SETTLE_WINDOW_STABLE_MIN_MINUTES, 'green apply min 0.5');
+    checkEq(bot.config.settleVolatileExits, 'off', 'green apply volatile off');
+  }
+
   checkEq(settleEntryBand({}).min, 80, 'settle band default min 80');
   checkEq(settleEntryBand({}).max, 94, 'settle band default max 94');
   checkEq(settleMinUpsideCents({}), 6, 'settle min upside defaults to 6¢');
