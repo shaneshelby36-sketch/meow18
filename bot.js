@@ -427,8 +427,8 @@ const SETTLE_WINDOW_STABLE_MAX_MINUTES = 8;
 const SETTLE_WINDOW_VOLATILE_MAX_MINUTES = 5.5;
 /** Green Apply restores this min-minutes-left gate (default). */
 const SETTLE_WINDOW_STABLE_MIN_MINUTES = 0.5;
-/** Red Apply: stop new opens with ≤1:30 left. */
-const SETTLE_WINDOW_VOLATILE_MIN_MINUTES = 1.5;
+/** Red Apply: stop new opens with ≤2:30 left. */
+const SETTLE_WINDOW_VOLATILE_MIN_MINUTES = 2.5;
 /** Red Apply: bank at ≥ this bid (no hold-to-settle). */
 const SETTLE_VOLATILE_TP_FLOOR_CENTS = 95;
 const SETTLE_WINDOW_RETRO_SHORT_MS = 2 * 60 * 60 * 1000;
@@ -485,9 +485,34 @@ function summarizeSettleWindowSample(trades) {
 }
 
 /**
+ * Config patch for a settle open-window package (red volatile / green stable).
+ * Used by Apply — including manual force when retrospect is still neutral.
+ */
+function settleWindowPackageForLight(light) {
+  const L = String(light || '').toLowerCase();
+  if (L === 'red') {
+    return {
+      light: 'red',
+      settleMaxMinutesToOpen: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
+      settleMinMinutesToOpen: SETTLE_WINDOW_VOLATILE_MIN_MINUTES,
+      settleVolatileExits: 'on',
+    };
+  }
+  if (L === 'green') {
+    return {
+      light: 'green',
+      settleMaxMinutesToOpen: SETTLE_WINDOW_STABLE_MAX_MINUTES,
+      settleMinMinutesToOpen: SETTLE_WINDOW_STABLE_MIN_MINUTES,
+      settleVolatileExits: 'off',
+    };
+  }
+  return null;
+}
+
+/**
  * Retrospect settle open-window: green → prefer 8m ceiling, red → 5.5m.
  * Prefers last 2h when enough settle closes; else expands to 12h.
- * Does not auto-apply — caller must press Apply.
+ * Does not auto-apply — caller must press Apply (or force light manually).
  */
 function recommendSettleOpenWindow(trades, { now = Date.now(), currentMaxMinutes = null } = {}) {
   const all = (Array.isArray(trades) ? trades : []).filter(isSettleClosedTrade);
@@ -1774,34 +1799,49 @@ class TradingBot {
   }
 
   /**
-   * Apply green/red suggestion: open-window max + volatile package (min / exits).
+   * Apply green/red open-window + volatile package.
+   * Pass `{ light: 'red'|'green' }` to force that package even when retrospect is neutral.
+   * Without force, uses the current recommendation when it is green/red.
    */
-  applySettleWindowRecommendation() {
+  applySettleWindowRecommendation({ light: forceLight = null } = {}) {
     const rec = this.getSettleWindowRecommendation();
-    if (rec.light !== 'green' && rec.light !== 'red') {
-      return { ok: false, message: rec.reason || 'No green/red suggestion to apply.', recommendation: rec };
+    const forced = String(forceLight || '').toLowerCase();
+    const chosen =
+      forced === 'red' || forced === 'green'
+        ? forced
+        : rec.light === 'green' || rec.light === 'red'
+          ? rec.light
+          : null;
+    if (!chosen) {
+      return {
+        ok: false,
+        message:
+          rec.reason ||
+          'No green/red suggestion — use Apply volatile or Apply stable to force.',
+        recommendation: rec,
+      };
     }
-    if (!Number.isFinite(Number(rec.suggestedMaxMinutes))) {
-      return { ok: false, message: 'Suggestion has no target minutes.', recommendation: rec };
+    const pkg = settleWindowPackageForLight(chosen);
+    if (!pkg) {
+      return { ok: false, message: 'Unknown settle window package.', recommendation: rec };
     }
-    const patch = { settleMaxMinutesToOpen: rec.suggestedMaxMinutes };
-    if (Number.isFinite(Number(rec.suggestedMinMinutes))) {
-      patch.settleMinMinutesToOpen = Number(rec.suggestedMinMinutes);
-    }
-    if (rec.suggestedVolatileExits === 'on' || rec.suggestedVolatileExits === 'off') {
-      patch.settleVolatileExits = rec.suggestedVolatileExits;
-    }
+    const patch = {
+      settleMaxMinutesToOpen: pkg.settleMaxMinutesToOpen,
+      settleMinMinutesToOpen: pkg.settleMinMinutesToOpen,
+      settleVolatileExits: pkg.settleVolatileExits,
+    };
     const result = this.updateConfig(patch);
+    const manual = forced === 'red' || forced === 'green';
     const volatileBit =
       patch.settleVolatileExits === 'on'
         ? ` volatile on (no hold-to-settle, TP ≥${SETTLE_VOLATILE_TP_FLOOR_CENTS}¢, min ${patch.settleMinMinutesToOpen}m).`
-        : patch.settleVolatileExits === 'off'
-          ? ' volatile off (normal hold/TP rules).'
-          : '';
+        : ' volatile off (normal hold/TP rules).';
     const msg =
-      `Applied settle open window ${rec.light.toUpperCase()} → ${rec.suggestedMaxMinutes} min.` +
+      `Applied settle open window ${chosen.toUpperCase()}` +
+      (manual ? ' (manual)' : '') +
+      ` → ${patch.settleMaxMinutesToOpen} min.` +
       volatileBit +
-      ` ${rec.reason}`;
+      (rec.reason ? ` ${rec.reason}` : '');
     this.lastDecision = msg;
     this._logActivity(msg, { kind: 'settle-window' });
     this._persist();
@@ -1811,6 +1851,8 @@ class TradingBot {
       recommendation: this.getSettleWindowRecommendation(),
       applied: result.applied,
       config: this.config,
+      forced: manual,
+      light: chosen,
     };
   }
 
@@ -5617,6 +5659,7 @@ module.exports = {
   classifyStopVerdictFromBids,
   buildHourlyPnlBuckets,
   recommendSettleOpenWindow,
+  settleWindowPackageForLight,
   SETTLE_WINDOW_STABLE_MAX_MINUTES,
   SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
   SETTLE_WINDOW_STABLE_MIN_MINUTES,

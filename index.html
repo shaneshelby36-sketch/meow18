@@ -407,9 +407,16 @@
             <div class="settle-window-rec" id="settle-window-rec">
               <span class="settle-window-light" id="settle-window-light" aria-hidden="true"></span>
               <span class="settle-window-rec-text" id="settle-window-rec-text">Retrospect: gathering settle history…</span>
-              <button type="button" class="settle-window-apply" id="settle-window-apply" disabled>Apply</button>
+              <div class="settle-window-apply-row">
+                <button type="button" class="settle-window-apply settle-window-apply-volatile" id="settle-window-apply-volatile">
+                  Apply volatile
+                </button>
+                <button type="button" class="settle-window-apply settle-window-apply-stable" id="settle-window-apply-stable">
+                  Apply stable
+                </button>
+              </div>
             </div>
-            <span class="field-hint">Won’t open too early in the window (default 8.5). Green/red retrospect suggests 8m (stable) or 5.5m (volatile) from the last 2–12h of settle trades — press Apply to change the slider. Red Apply also turns on the volatile package: no hold-to-settle, TP ≥95¢, stop new opens at ≤1:30 left. Green Apply restores normal hold/TP rules and 0.5m min.</span>
+            <span class="field-hint">Won’t open too early in the window (default 8.5). Green/red retrospect suggests 8m (stable) or 5.5m (volatile) from the last 2–12h of settle trades. You can Apply volatile or Apply stable anytime — even while the light is still gathering. Volatile: no hold-to-settle, TP ≥95¢, stop new opens at ≤2:30. Stable: normal hold/TP rules and 0.5m min.</span>
           </label>
           <label>Settle same-side sit-out after stop (min)
             <div class="slider-row">

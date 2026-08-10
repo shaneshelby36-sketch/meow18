@@ -1801,13 +1801,14 @@ async function loadBotConfigIntoForm() {
 function renderSettleWindowRec(rec) {
   const wrap = document.getElementById('settle-window-rec');
   const text = document.getElementById('settle-window-rec-text');
-  const btn = document.getElementById('settle-window-apply');
-  if (!wrap || !text || !btn) return;
+  const btnVolatile = document.getElementById('settle-window-apply-volatile');
+  const btnStable = document.getElementById('settle-window-apply-stable');
+  if (!wrap || !text) return;
+  if (btnVolatile) btnVolatile.disabled = false;
+  if (btnStable) btnStable.disabled = false;
   if (!rec || typeof rec !== 'object') {
     wrap.dataset.light = 'neutral';
-    text.textContent = 'Retrospect: waiting for settle history…';
-    btn.disabled = true;
-    btn.textContent = 'Apply';
+    text.textContent = 'Retrospect: waiting for settle history… Apply volatile or stable anytime.';
     return;
   }
   const light = rec.light === 'green' || rec.light === 'red' ? rec.light : 'neutral';
@@ -1817,27 +1818,22 @@ function renderSettleWindowRec(rec) {
   const n = rec.stats && rec.stats.sampleSize != null ? rec.stats.sampleSize : 0;
   if (light === 'green') {
     text.textContent = `Green · suggest ${mins}m (stable) · ${look}, n=${n}. ${rec.reason || ''}`;
-    btn.disabled = false;
-    btn.textContent = `Apply ${mins} min`;
   } else if (light === 'red') {
     const tp = rec.volatileTpFloorCents != null ? rec.volatileTpFloorCents : 95;
-    const minLeft = rec.suggestedMinMinutes != null ? rec.suggestedMinMinutes : 1.5;
+    const minLeft = rec.suggestedMinMinutes != null ? rec.suggestedMinMinutes : 2.5;
     text.textContent =
       `Red · suggest ${mins}m (volatile) · no hold-to-settle · TP ≥${tp}¢ · no opens ≤${minLeft}m` +
       ` · ${look}, n=${n}. ${rec.reason || ''}`;
-    btn.disabled = false;
-    btn.textContent = `Apply ${mins} min`;
   } else {
-    text.textContent = `Neutral · ${rec.reason || 'Leave slider as-is.'}`;
-    btn.disabled = true;
-    btn.textContent = 'Apply';
+    text.textContent = `Neutral · ${rec.reason || 'Leave slider as-is.'} Apply volatile or stable anytime.`;
   }
 }
 
-async function applySettleWindowRec() {
+async function applySettleWindowRec(light) {
   const { engineUrl } = loadSettings();
   const feedback = document.getElementById('bot-settings-feedback');
-  const btn = document.getElementById('settle-window-apply');
+  const btnVolatile = document.getElementById('settle-window-apply-volatile');
+  const btnStable = document.getElementById('settle-window-apply-stable');
   if (isBotSettingsLocked()) {
     if (feedback) {
       feedback.textContent = 'Settings are locked — unlock before applying the settle window.';
@@ -1845,17 +1841,20 @@ async function applySettleWindowRec() {
     }
     return;
   }
-  if (btn) btn.disabled = true;
+  const force = light === 'red' || light === 'green' ? light : null;
+  if (!force) return;
+  if (btnVolatile) btnVolatile.disabled = true;
+  if (btnStable) btnStable.disabled = true;
   try {
     const res = await fetch(`${engineUrl}/api/bot/settle-window-rec/apply`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: '{}',
+      body: JSON.stringify({ light: force }),
     });
     const data = await res.json();
     if (!res.ok || !data.ok) {
       if (feedback) {
-        feedback.textContent = data.message || 'Could not apply settle window suggestion.';
+        feedback.textContent = data.message || 'Could not apply settle window package.';
         feedback.style.color = 'var(--wait)';
       }
       renderSettleWindowRec(data.recommendation);
@@ -1878,6 +1877,9 @@ async function applySettleWindowRec() {
       feedback.textContent = `Could not reach the engine: ${err.message}`;
       feedback.style.color = 'var(--down)';
     }
+  } finally {
+    if (btnVolatile) btnVolatile.disabled = false;
+    if (btnStable) btnStable.disabled = false;
   }
 }
 
@@ -2317,9 +2319,13 @@ function wireBotUI() {
     loadBotConfigIntoForm();
   });
   document.getElementById('bot-settings-save').addEventListener('click', () => saveBotConfig());
-  const settleWindowApply = document.getElementById('settle-window-apply');
-  if (settleWindowApply) {
-    settleWindowApply.addEventListener('click', () => applySettleWindowRec());
+  const settleWindowApplyVolatile = document.getElementById('settle-window-apply-volatile');
+  if (settleWindowApplyVolatile) {
+    settleWindowApplyVolatile.addEventListener('click', () => applySettleWindowRec('red'));
+  }
+  const settleWindowApplyStable = document.getElementById('settle-window-apply-stable');
+  if (settleWindowApplyStable) {
+    settleWindowApplyStable.addEventListener('click', () => applySettleWindowRec('green'));
   }
   document.getElementById('bot-running-toggle').addEventListener('click', () => {
     const isRunning = document.getElementById('bot-running-toggle').textContent !== 'Start bot';

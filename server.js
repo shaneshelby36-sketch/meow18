@@ -511,7 +511,16 @@ app.get("/", (req, res) => {
       res.status(404).json({ enabled: false, message: 'Bot is not enabled (set KALSHI_ENABLED=true).' });
       return;
     }
-    const result = bot.applySettleWindowRecommendation();
+    const body = req.body || {};
+    const light = body.light != null ? body.light : body.package;
+    // Accept package: 'volatile'|'stable' as aliases for red|green.
+    let force = light;
+    const pkg = String(force || '').toLowerCase();
+    if (pkg === 'volatile') force = 'red';
+    if (pkg === 'stable') force = 'green';
+    const result = bot.applySettleWindowRecommendation(
+      force ? { light: force } : {}
+    );
     res.status(result.ok ? 200 : 400).json(result);
   });
 

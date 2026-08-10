@@ -4459,7 +4459,7 @@ async function testBotTradingFlow() {
     );
     checkEq(rough.light, 'red', 'rough recent settle book → red 5.5m');
     checkEq(rough.suggestedMaxMinutes, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, 'red suggests 5.5m');
-    checkEq(rough.suggestedMinMinutes, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, 'red suggests 1.5m min');
+    checkEq(rough.suggestedMinMinutes, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, 'red suggests 2.5m min');
     checkEq(rough.suggestedVolatileExits, 'on', 'red enables volatile package');
     check(/no hold-to-settle/i.test(rough.reason || ''), 'red reason mentions volatile package');
 
@@ -4514,7 +4514,7 @@ async function testBotTradingFlow() {
     const applied = bot.applySettleWindowRecommendation();
     check(applied.ok, 'red apply ok');
     checkEq(bot.config.settleMaxMinutesToOpen, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, 'red apply max 5.5');
-    checkEq(bot.config.settleMinMinutesToOpen, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, 'red apply min 1.5');
+    checkEq(bot.config.settleMinMinutesToOpen, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, 'red apply min 2.5');
     checkEq(bot.config.settleVolatileExits, 'on', 'red apply volatile on');
 
     n = 0;
@@ -4533,6 +4533,32 @@ async function testBotTradingFlow() {
     checkEq(bot.config.settleMaxMinutesToOpen, SETTLE_WINDOW_STABLE_MAX_MINUTES, 'green apply max 8');
     checkEq(bot.config.settleMinMinutesToOpen, SETTLE_WINDOW_STABLE_MIN_MINUTES, 'green apply min 0.5');
     checkEq(bot.config.settleVolatileExits, 'off', 'green apply volatile off');
+  }
+  {
+    const bot = makeBot(mockClient(null), {
+      strategyMode: 'settle',
+      settleMaxMinutesToOpen: 8.5,
+      settleMinMinutesToOpen: 0.5,
+      settleVolatileExits: 'off',
+    });
+    bot.getSettleWindowRecommendation = () => ({
+      light: 'neutral',
+      suggestedMaxMinutes: null,
+      suggestedMinMinutes: null,
+      suggestedVolatileExits: null,
+      reason: 'Need more trades',
+    });
+    const blocked = bot.applySettleWindowRecommendation();
+    check(!blocked.ok, 'neutral without force cannot apply');
+    const forced = bot.applySettleWindowRecommendation({ light: 'red' });
+    check(forced.ok, 'manual red apply ok while neutral');
+    check(forced.forced === true, 'manual apply marked forced');
+    checkEq(bot.config.settleMaxMinutesToOpen, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, 'manual red max');
+    checkEq(bot.config.settleMinMinutesToOpen, SETTLE_WINDOW_VOLATILE_MIN_MINUTES, 'manual red min');
+    checkEq(bot.config.settleVolatileExits, 'on', 'manual red volatile on');
+    const stable = bot.applySettleWindowRecommendation({ light: 'green' });
+    check(stable.ok, 'manual green apply ok while neutral');
+    checkEq(bot.config.settleVolatileExits, 'off', 'manual green clears volatile');
   }
 
   checkEq(settleEntryBand({}).min, 80, 'settle band default min 80');
