@@ -82,7 +82,8 @@ const bot = KALSHI_ENABLED
   ? new TradingBot({
       kalshiClient,
       config: {
-        symbol: (process.env.KALSHI_SYMBOL || 'BTC').toUpperCase(),
+        symbol: (process.env.KALSHI_SYMBOL || 'AUTO').toUpperCase(),
+        strategyMode: (process.env.KALSHI_STRATEGY_MODE || 'settle').toLowerCase() === 'edge' ? 'edge' : 'settle',
         edgeThresholdPct: parseFloat(process.env.KALSHI_EDGE_THRESHOLD_PCT || '1'),
         minConfidence: parseFloat(process.env.KALSHI_MIN_CONFIDENCE || '55'),
         stopLossCents: parseInt(process.env.KALSHI_STOP_LOSS_CENTS || '23', 10),
@@ -96,6 +97,18 @@ const bot = KALSHI_ENABLED
         postStopSameSideCooldownMinutes: parseFloat(
           process.env.KALSHI_POST_STOP_SAME_SIDE_COOLDOWN_MINUTES || '2'
         ),
+        settleEntryMinCents: parseFloat(process.env.KALSHI_SETTLE_ENTRY_MIN_CENTS || '80'),
+        settleEntryMaxCents: parseFloat(process.env.KALSHI_SETTLE_ENTRY_MAX_CENTS || '94'),
+        settleNoEntryMinCents: parseFloat(process.env.KALSHI_SETTLE_NO_ENTRY_MIN_CENTS || '80'),
+        settleStopLossCents: parseInt(process.env.KALSHI_SETTLE_STOP_LOSS_CENTS || '40', 10),
+        settleMaxMinutesToOpen: parseFloat(process.env.KALSHI_SETTLE_MAX_MINUTES_TO_OPEN || '8.5'),
+        settlePostStopSameSideCooldownMinutes: parseFloat(
+          process.env.KALSHI_SETTLE_POST_STOP_SAME_SIDE_COOLDOWN_MINUTES || '2.5'
+        ),
+        settleStuckHoldMinutes: parseFloat(process.env.KALSHI_SETTLE_STUCK_HOLD_MINUTES || '3'),
+        settleLateEntryMinutes: parseFloat(process.env.KALSHI_SETTLE_LATE_ENTRY_MINUTES || '3.5'),
+        settleLateEntryMinCents: parseFloat(process.env.KALSHI_SETTLE_LATE_ENTRY_MIN_CENTS || '70'),
+        settleTieredExits: process.env.KALSHI_SETTLE_TIERED_EXITS || 'on',
         stakeDollars: parseFloat(process.env.KALSHI_STAKE_DOLLARS || '10'),
         maxOpenPositions: parseInt(process.env.KALSHI_MAX_OPEN_POSITIONS || '2', 10),
         skimMode: process.env.KALSHI_SKIM_MODE || 'insurance',
@@ -117,7 +130,7 @@ const bot = KALSHI_ENABLED
   : null;
 
 if (KALSHI_ENABLED) {
-  console.log(`[bot] Kalshi bot enabled in ${wantsLive ? 'LIVE' : 'paper'} mode, trading ${(process.env.KALSHI_SYMBOL || 'BTC').toUpperCase()}`);
+  console.log(`[bot] Kalshi bot enabled in ${wantsLive ? 'LIVE' : 'paper'} mode, trading ${(process.env.KALSHI_SYMBOL || 'AUTO').toUpperCase()}, strategy ${(process.env.KALSHI_STRATEGY_MODE || 'settle').toLowerCase() === 'edge' ? 'edge' : 'settle'}`);
 }
 
 const PORT = parseInt(process.env.PORT || '4000', 10);

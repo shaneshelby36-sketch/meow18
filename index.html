@@ -253,10 +253,10 @@
         <p class="settings-hint">These apply immediately — no restart needed. Lock settings when you're done so a sleepy thumb can't drop stop-loss to 1¢. Trading mode (paper/live) is set on the server and can't be changed here.</p>
         <div id="bot-settings-fields">
         <div class="bot-strategy-tabs" role="tablist" aria-label="Strategy">
-          <button type="button" class="bot-strategy-tab active" data-strategy="edge" id="bot-tab-edge">Edge</button>
-          <button type="button" class="bot-strategy-tab" data-strategy="settle" id="bot-tab-settle">Settle (85–95¢)</button>
+          <button type="button" class="bot-strategy-tab" data-strategy="edge" id="bot-tab-edge">Edge</button>
+          <button type="button" class="bot-strategy-tab active" data-strategy="settle" id="bot-tab-settle">Settle (80–94¢)</button>
         </div>
-        <input type="hidden" id="bot-strategy-mode" value="edge" />
+        <input type="hidden" id="bot-strategy-mode" value="settle" />
 
         <div class="bot-field-grid">
           <label>Asset to trade
@@ -289,7 +289,7 @@
           </label>
         </div>
 
-        <div id="bot-settings-edge" class="bot-field-grid">
+        <div id="bot-settings-edge" class="bot-field-grid" hidden>
           <label>Edge threshold
             <div class="slider-row">
               <input id="bot-edge" type="range" min="1" max="30" step="0.5" />
@@ -339,14 +339,14 @@
           </label>
         </div>
 
-        <div id="bot-settings-settle" class="bot-field-grid" hidden>
-          <p class="settings-hint">Buys YES when ask is in the primary band (default 85–94¢). NO may enter from 80¢ (mid-tier) through the same max so downs in the 80s count. 90–94¢ hold to settlement (stop still on). Skips “rich” asks (≥95¢). Coinbase lean only breaks ties when both sides qualify. Late fallback can dip lower. Entry-tiered exits On = TP/stale/stuck by entry; Off = stop + hold to settle.</p>
+        <div id="bot-settings-settle" class="bot-field-grid">
+          <p class="settings-hint">Buys YES or NO when ask is in the band (default 80–94¢). 90–94¢ hold to settlement (stop still on). Skips “rich” asks (≥95¢). Coinbase lean only breaks ties when both sides qualify. Late fallback can dip lower. Entry-tiered exits On = TP/stale/stuck by entry; Off = stop + hold to settle.</p>
           <label>Settle entry min (¢)
             <div class="slider-row">
               <input id="bot-settle-min" type="range" min="65" max="95" step="1" />
               <span class="slider-value" id="bot-settle-min-value">—</span>
             </div>
-            <span class="field-hint">Lowest ask in the primary band (code default 85¢; many live setups use 75¢).</span>
+            <span class="field-hint">Lowest ask in the primary band (default 80¢).</span>
           </label>
           <label>Settle entry max (¢)
             <div class="slider-row">
@@ -404,14 +404,14 @@
               <input id="bot-settle-maxmin" type="range" min="1" max="14" step="0.5" />
               <span class="slider-value" id="bot-settle-maxmin-value">—</span>
             </div>
-            <span class="field-hint">Won’t open too early in the window (default 12). If the Decision line mentions “min left”, raise this slider.</span>
+            <span class="field-hint">Won’t open too early in the window (default 8.5). If the Decision line mentions “min left”, raise this slider.</span>
           </label>
           <label>Settle same-side sit-out after stop (min)
             <div class="slider-row">
               <input id="bot-settle-cooldown" type="range" min="0" max="15" step="0.5" />
               <span class="slider-value" id="bot-settle-cooldown-value">—</span>
             </div>
-            <span class="field-hint">After a settle stop, block that coin+side for this many minutes (default 5). Stops knife-catch loops like SOL reopen-every-few-seconds. 0 = off (not recommended).</span>
+            <span class="field-hint">After a settle stop, block that coin+side for this many minutes (default 2.5). Stops knife-catch loops like SOL reopen-every-few-seconds. 0 = off (not recommended).</span>
           </label>
           <label>Late fallback: only with ≤ this many min left
             <div class="slider-row">

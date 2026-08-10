@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 17;
+const SETTINGS_DEFAULTS_VERSION = 18;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -158,11 +158,11 @@ function settleMinUpsideCents(config = {}) {
   return 6;
 }
 
-/** Settle-mode entry band (default 85–94¢ for YES). Clamped to 1–99; swaps if inverted. */
+/** Settle-mode entry band (default 80–94¢). Clamped to 1–99; swaps if inverted. */
 function settleEntryBand(config = {}) {
   let min = Number(config.settleEntryMinCents);
   let max = Number(config.settleEntryMaxCents);
-  if (!Number.isFinite(min)) min = 85;
+  if (!Number.isFinite(min)) min = 80;
   // Default 94: hold-to-settle tier (≥90¢) is allowed through 94¢.
   if (!Number.isFinite(max)) max = 94;
   min = Math.max(1, Math.min(99, Math.round(min)));
@@ -176,8 +176,8 @@ function settleEntryBand(config = {}) {
 }
 
 /**
- * NO-side settle floor (default 80¢). Same mid-tier economics as YES 80–84,
- * without lowering the YES primary min. Never above the YES primary min.
+ * NO-side settle floor (default 80¢). Matches primary min when min is 80;
+ * if YES min is raised above 80, NO can still use this lower floor (capped at band.min).
  */
 function settleNoEntryMinCents(config = {}) {
   const band = settleEntryBand(config);
@@ -341,6 +341,8 @@ const SETTLE_EXIT_TIERS = [
  * With more than 3:30 left after tagging 90, tier exits can still bank.
  */
 const SETTLE_TOUCHED90_HOLD_MINUTES = 3.5;
+/** Settle weak-ticket confirm: once held bid tags this, lean-switch exit turns off. */
+const SETTLE_WEAK_CONFIRM_CENTS = 80;
 
 /** Human label for post-stop review (trade log / activity). */
 function stopVerdictLabel(verdict) {
@@ -754,7 +756,7 @@ const POST_STOP_MAX_ONE_DEFAULT_MINUTES = 1.5;
 /** Default minutes for same-coin same-side sit-out after a stop (knife-catch delay). */
 const POST_STOP_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES = 2;
 /** Settle default is longer — late-bank knife-catch strings are especially toxic. */
-const SETTLE_POST_STOP_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES = 5;
+const SETTLE_POST_STOP_SAME_SIDE_COOLDOWN_DEFAULT_MINUTES = 2.5;
 
 /**
  * How long after a stop the bot caps concurrent opens at 1 (even if
@@ -771,7 +773,7 @@ function postStopMaxOneAgeMs(config = {}) {
 /**
  * Same-coin same-side sit-out after stop_loss (from closedAt). Blocks knife-catch
  * re-entry even when bounce + thesis would allow. `0` disables.
- * Settle mode: settlePostStopSameSideCooldownMinutes (default 5m) so a dump
+ * Settle mode: settlePostStopSameSideCooldownMinutes (default 2.5m) so a dump
  * cannot reopen the same side every few seconds. Edge: postStopSameSideCooldownMinutes (default 2m).
  */
 function postStopSameSideCooldownMs(config = {}) {
@@ -1294,9 +1296,9 @@ class TradingBot {
   constructor({ kalshiClient, config }) {
     this.client = kalshiClient;
     this.config = {
-      symbol: 'BTC', // 'BTC' | 'XRP' — which asset the bot is currently trading
-      // 'edge' = prediction edge vs Kalshi; 'settle' = buy 85–90¢ and hold to settlement.
-      strategyMode: 'edge',
+      symbol: 'AUTO',
+      // 'settle' = band ask → hold/tier exits; 'edge' = prediction edge vs Kalshi.
+      strategyMode: 'settle',
       edgeThresholdPct: 1, // minimum probability-point edge vs Kalshi to bother trading
       minConfidence: 55, // engine confidence (0-100) required to act
       stopLossCents: 23, // exit if held bid falls this many cents below entry
@@ -1321,18 +1323,18 @@ class TradingBot {
       postStopSameSideCooldownMinutes: 2,
       // Settle strategy: buy ask in [min,max]¢; tiered target/stale exit by entry
       // (see settleExitPlan), else hold to official settlement.
-      settleEntryMinCents: 85,
+      settleEntryMinCents: 80,
       settleEntryMaxCents: 94, // includes ≥90¢ hold-to-settle through 94¢
-      // NO can enter from 80¢ (mid tier) without lowering YES primary min.
+      // NO can enter from this floor (default matches primary min when min is 80).
       settleNoEntryMinCents: 80,
       // Max allowed stop (40¢): ride reversible wicks; true 90→40 gaps still gap.
       settleStopLossCents: 40,
       // Reject asks with less upside to 100 than this. Independent of stop. 0 = off.
       settleMinUpsideCents: 6, // allows 94¢ (6¢ to 100); 95¢+ still blocked
       settleMinMinutesToOpen: 0.5, // still need a little time; 0 = allow until last seconds
-      settleMaxMinutesToOpen: 12, // late-ish windows (was 8 — early 85¢ quotes looked stuck)
-      // Settle same-side sit-out after stop (longer than Edge — prevents SOL-style loops).
-      settlePostStopSameSideCooldownMinutes: 5,
+      settleMaxMinutesToOpen: 8.5, // don't open too early in the 15m window
+      // Settle same-side sit-out after stop (knife-catch delay).
+      settlePostStopSameSideCooldownMinutes: 2.5,
       // After settle_stale / settle TP: don't reopen same coin+side for a few minutes.
       settlePostStaleSameSideCooldownMinutes: 3,
       // Late fallback: if nothing in primary band and ≤ this many min left, allow down to late min.
@@ -3220,6 +3222,23 @@ class TradingBot {
     }
 
     const heldSideBidCents = this._heldSideBidCents(trade, market);
+    // Settle weak-ticket tracking: peak held bid; confirm threshold turns off lean-switch.
+    if (
+      isSettleTrade(trade) &&
+      heldSideBidCents != null &&
+      Number.isFinite(heldSideBidCents) &&
+      heldSideBidCents >= 1 &&
+      heldSideBidCents <= 99
+    ) {
+      const prevPeak = Number(trade.peakHeldBidCents);
+      const entryPeak = Number(trade.entryPriceCents);
+      const base = Number.isFinite(prevPeak) ? prevPeak : Number.isFinite(entryPeak) ? entryPeak : heldSideBidCents;
+      const nextPeak = Math.max(base, heldSideBidCents);
+      if (!Number.isFinite(prevPeak) || nextPeak > prevPeak) {
+        trade.peakHeldBidCents = nextPeak;
+        this._persist();
+      }
+    }
     // For stop/TP timing use the earliest known close so we don't hold into the next session.
     const closeCandidates = [storedClose, this._marketCloseMs(market)].filter((t) => Number.isFinite(t) && t > 0);
     const closeTime = closeCandidates.length ? Math.min(...closeCandidates) : NaN;
@@ -3338,9 +3357,31 @@ class TradingBot {
       return;
     }
 
-    // Settle strategy: stop (above); optional entry-tiered TP/stale/stuck; else hold
-    // for official settlement — no edge signal-flip exits.
+    // Settle strategy: stop (above); weak-ticket lean-switch; optional entry-tiered
+    // TP/stale/stuck; else hold for official settlement — no edge signal-flip exits
+    // once the ticket has confirmed (≥80¢ peak).
     if (isSettleTrade(trade)) {
+      const peakRaw = Number(trade.peakHeldBidCents);
+      const entryRaw = Number(trade.entryPriceCents);
+      const peak =
+        Number.isFinite(peakRaw) && peakRaw > 0
+          ? peakRaw
+          : Number.isFinite(entryRaw)
+            ? entryRaw
+            : null;
+      const weakTicket = peak == null || peak < SETTLE_WEAK_CONFIRM_CENTS;
+      if (
+        weakTicket &&
+        heldSideBidCents != null &&
+        Number.isFinite(heldSideBidCents) &&
+        (strongReversalSignal || signalFlipped)
+      ) {
+        await this._closePosition(trade, heldSideBidCents, 'settle_weak_switch', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+
       if (!isSettleTieredExitsEnabled(this.config)) return;
       const plan = settleExitPlan(trade.entryPriceCents);
       const entry = Number(trade.entryPriceCents);
@@ -3683,6 +3724,8 @@ class TradingBot {
       engineProbability,
       engineConfidence,
       status: 'open',
+      // Settle: peak held bid for weak-ticket lean-switch (confirm at 80¢).
+      ...(isSettle ? { peakHeldBidCents: Math.round(priceCents) } : {}),
     };
 
     if (this.config.mode === 'live') {
@@ -4619,21 +4662,31 @@ class TradingBot {
 
     const yesBid = Number(market.yes_bid);
     const yesAsk = Number(market.yes_ask);
-    if (!Number.isFinite(yesBid) || !Number.isFinite(yesAsk) || yesBid < 1 || yesAsk > 99 || yesBid > yesAsk) {
-      this.lastError = `Skipped ${symbol}: Kalshi has no usable two-sided quote yet.`;
+    const yesAskOk = Number.isFinite(yesAsk) && yesAsk >= 1 && yesAsk <= 99;
+    const yesBidOk =
+      Number.isFinite(yesBid) && yesBid >= 1 && yesBid <= 99 && (!yesAskOk || yesBid <= yesAsk);
+    // Prefer Kalshi's real NO ask; implied 100−yes_bid only when YES bid exists.
+    let noAsk = Number(market.no_ask);
+    if (!Number.isFinite(noAsk) || noAsk < 1 || noAsk > 99) {
+      noAsk = yesBidOk ? 100 - yesBid : NaN;
+    } else {
+      noAsk = Math.round(noAsk);
+    }
+    const noAskOk = Number.isFinite(noAsk) && noAsk >= 1 && noAsk <= 99;
+    if (!yesAskOk && !noAskOk) {
+      this.lastError = `Skipped ${symbol}: Kalshi has no usable YES or NO ask yet.`;
       return null;
     }
 
     const primary = settleEntryBand(this.config);
     const noMin = settleNoEntryMinCents(this.config);
-    const noAsk = 100 - yesBid;
     // YES uses primary min; NO may start lower (default 80¢) so downs in the 80s qualify.
     const collect = (yesMinCents, noMinCents, maxCents) => {
       const out = [];
-      if (yesAsk >= yesMinCents && yesAsk <= maxCents) {
+      if (yesAskOk && yesAsk >= yesMinCents && yesAsk <= maxCents) {
         out.push({ side: 'yes', priceCents: yesAsk });
       }
-      if (noAsk >= noMinCents && noAsk <= maxCents) {
+      if (noAskOk && noAsk >= noMinCents && noAsk <= maxCents) {
         out.push({ side: 'no', priceCents: noAsk });
       }
       return out;
@@ -4674,8 +4727,10 @@ class TradingBot {
         lateMins > 0 && minutesRemaining > lateMins
           ? ` (late fallback ${lateFloor}–${primary.max}¢ only with ≤ ${lateMins} min left)`
           : '';
+      const yesLabel = yesAskOk ? `${yesAsk}¢` : 'n/a';
+      const noLabel = noAskOk ? `${noAsk}¢` : 'n/a';
       say(
-        `Waiting: ${symbol} settle — YES ask ${yesAsk}¢ (need ${primary.min}–${primary.max}) / NO ask ${noAsk}¢ (need ${noMin}–${primary.max})` +
+        `Waiting: ${symbol} settle — YES ask ${yesLabel} (need ${primary.min}–${primary.max}) / NO ask ${noLabel} (need ${noMin}–${primary.max})` +
           lateHint +
           '.'
       );
@@ -4758,7 +4813,7 @@ class TradingBot {
           usedLateBand,
         }) +
         liquidityPriority(symbol) +
-        Math.max(0, 15 - Math.max(0, yesAsk - yesBid)),
+        (yesAskOk && yesBidOk ? Math.max(0, 15 - Math.max(0, yesAsk - yesBid)) : 0),
       strategy: 'settle',
       settleLateEntry: usedLateBand,
       engineReady,
@@ -5068,6 +5123,7 @@ module.exports = {
   settlePostStaleSameSideCooldownMs,
   SETTLE_STALE_MIN_HOLD_MS,
   SETTLE_TOUCHED90_HOLD_MINUTES,
+  SETTLE_WEAK_CONFIRM_CENTS,
   SETTLE_STUCK_HOLD_DEFAULT_MINUTES,
   stopTradeReferenceMs,
   tradeWindowCloseMs,

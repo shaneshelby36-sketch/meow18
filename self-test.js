@@ -1131,6 +1131,70 @@ async function testBotExits() {
     checkEq(trade.status, 'open', 'settle ≥90¢ holds toward settlement');
   }
 
+  // Settle weak ticket: peak <80 + strong lean against → settle_weak_switch
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 70,
+        no_bid: 30,
+      }),
+      { settleStopLossCents: 40, settleTieredExits: 'on', settleStuckHoldMinutes: 0 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 72,
+      peakHeldBidCents: 75,
+      windowCloseTime: now + 10 * 60 * 1000,
+      openedAt: now - 2 * 60 * 1000,
+    });
+    await bot._manageOpenTrade(
+      trade,
+      predictions(3000, {
+        w5: win(30, 70),
+        w10: win(30, 70),
+        w15: win(30, 70),
+      })
+    );
+    checkEq(trade.exitReason, 'settle_weak_switch', 'weak ticket exits on lean switch');
+    checkEq(trade.status, 'closed', 'weak switch closes the trade');
+  }
+
+  // Settle confirmed (≥80 peak): lean switch does not force exit
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 10 * 60 * 1000).toISOString(),
+        yes_bid: 78,
+        no_bid: 22,
+      }),
+      { settleStopLossCents: 40, settleTieredExits: 'on', settleStuckHoldMinutes: 0 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'settle',
+      side: 'yes',
+      entryPriceCents: 72,
+      peakHeldBidCents: 82,
+      windowCloseTime: now + 10 * 60 * 1000,
+      openedAt: now - 2 * 60 * 1000,
+    });
+    await bot._manageOpenTrade(
+      trade,
+      predictions(3000, {
+        w5: win(30, 70),
+        w10: win(30, 70),
+        w15: win(30, 70),
+      })
+    );
+    checkEq(trade.status, 'open', 'confirmed ≥80 peak ignores lean-switch exit');
+    check(!trade.exitReason, 'no weak-switch exit after confirm');
+  }
+
   // Second open only when an existing hold is green
   {
     const now = Date.now();
@@ -4263,7 +4327,7 @@ async function testBotTradingFlow() {
       'hourly pnl counts 2 closed trades in window'
     );
   }
-  checkEq(settleEntryBand({}).min, 85, 'settle band default min 85');
+  checkEq(settleEntryBand({}).min, 80, 'settle band default min 80');
   checkEq(settleEntryBand({}).max, 94, 'settle band default max 94');
   checkEq(settleMinUpsideCents({}), 6, 'settle min upside defaults to 6¢');
   checkEq(
@@ -4275,7 +4339,8 @@ async function testBotTradingFlow() {
   check(isSettleEntryPriceCents(92), '92¢ inside settle band');
   check(isSettleEntryPriceCents(94), '94¢ at settle band max (hold-to-settle)');
   check(!isSettleEntryPriceCents(95), '95¢ outside settle band');
-  check(!isSettleEntryPriceCents(84), '84¢ outside settle band');
+  check(isSettleEntryPriceCents(84), '84¢ inside settle band');
+  check(!isSettleEntryPriceCents(79), '79¢ outside settle band');
   check(!isSettleEntryPriceCents(96), '96¢ outside settle band');
   check(!isSettleEntryPriceCents(72, {}, 10), '72¢ blocked with 10m left (late not open)');
   check(isSettleEntryPriceCents(72, {}, 3), '72¢ allowed with 3m left (late fallback)');
@@ -4346,8 +4411,8 @@ async function testBotTradingFlow() {
     );
   checkEq(
       postStopSameSideCooldownMs({ strategyMode: 'settle' }),
-      5 * 60 * 1000,
-      'settle default same-side cooldown is 5m'
+      2.5 * 60 * 1000,
+      'settle default same-side cooldown is 2.5m'
     );
   }
 
@@ -4783,7 +4848,7 @@ async function testBotTradingFlow() {
     });
     check(downOpp, 'settle takes NO when NO ask is in band');
     checkEq(downOpp && downOpp.side, 'no', 'NO-in-band pick is NO even if spot leans YES');
-    checkEq(downOpp && downOpp.priceCents, 92, 'NO ask uses 100−yes_bid');
+    checkEq(downOpp && downOpp.priceCents, 92, 'NO ask prefers market.no_ask');
 
     // NO in the 80s (below YES primary min 85) still qualifies
     const no80Market = {
@@ -4815,7 +4880,7 @@ async function testBotTradingFlow() {
     });
     check(no80Opp, 'settle allows NO in the 80s');
     checkEq(no80Opp && no80Opp.side, 'no', '80s down pick is NO');
-    checkEq(no80Opp && no80Opp.priceCents, 83, 'NO 80s uses 100−yes_bid');
+    checkEq(no80Opp && no80Opp.priceCents, 83, 'NO 80s uses market.no_ask (or 100−yes_bid)');
     check(
       !isSettleEntryPriceCents(83, no80Bot.config, 8, 'yes'),
       'YES still blocked at 83 with primary min 85'
@@ -4824,6 +4889,38 @@ async function testBotTradingFlow() {
       isSettleEntryPriceCents(83, no80Bot.config, 8, 'no'),
       'NO allowed at 83 with no-min 80'
     );
+
+    // Missing YES bid but real no_ask in band → still take NO
+    const noAskOnlyMarket = {
+      ticker: 'KXHYPE15M-NOASK',
+      status: 'open',
+      floor_strike: 40,
+      close_time: new Date(now + 8 * 60 * 1000).toISOString(),
+      yes_bid: null,
+      yes_ask: null,
+      no_bid: 10,
+      no_ask: 88,
+    };
+    const noAskOnlyBot = makeBot(mockClient(noAskOnlyMarket), {
+      symbol: 'HYPE',
+      strategyMode: 'settle',
+      settleEntryMinCents: 80,
+      settleEntryMaxCents: 94,
+      settleMinMinutesToOpen: 0.5,
+      settleMaxMinutesToOpen: 12,
+      settleStopLossCents: 40,
+      settleMinUpsideCents: 6,
+      settleRichAskFloorCents: 95,
+      minEntryCents: 1,
+    });
+    noAskOnlyBot.config.strategyMode = 'settle';
+    noAskOnlyBot.config.symbol = 'HYPE';
+    const noAskOnlyOpp = await noAskOnlyBot._evaluateSymbolForSettle('HYPE', {
+      HYPE: { ready: false, price: null },
+    });
+    check(noAskOnlyOpp, 'settle takes NO when only no_ask is quoted');
+    checkEq(noAskOnlyOpp && noAskOnlyOpp.side, 'no', 'no_ask-only pick is NO');
+    checkEq(noAskOnlyOpp && noAskOnlyOpp.priceCents, 88, 'uses market.no_ask directly');
 
     // Rank scan includes not-ready coins (not stuck on "Not ready")
     const rankBot = makeBot(

@@ -1660,7 +1660,7 @@ async function loadBotConfigIntoForm() {
     const c = data.config;
     renderSettleExitTable(data.settleExitTiers);
     document.getElementById('bot-symbol').value = c.symbol;
-    setBotStrategyTab(c.strategyMode || 'edge');
+    setBotStrategyTab(c.strategyMode || 'settle');
     const backtestSymbol = document.getElementById('backtest-symbol');
     if (backtestSymbol && [...backtestSymbol.options].some((o) => o.value === c.symbol)) {
       backtestSymbol.value = c.symbol;
@@ -1671,9 +1671,9 @@ async function loadBotConfigIntoForm() {
     const stopRecEl = document.getElementById('bot-stoprecovery');
     if (stopRecEl) stopRecEl.value = c.stopRecoveryCents != null ? c.stopRecoveryCents : 6;
     document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 15;
-    document.getElementById('bot-minentries').value = c.minEntryCents != null ? c.minEntryCents : 25;
+    document.getElementById('bot-minentries').value = c.minEntryCents != null ? c.minEntryCents : 40;
     const settleMin = document.getElementById('bot-settle-min');
-    if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 85;
+    if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 80;
     const settleMax = document.getElementById('bot-settle-max');
     if (settleMax) settleMax.value = c.settleEntryMaxCents != null ? c.settleEntryMaxCents : 94;
     const settleStop = document.getElementById('bot-settle-stoploss');
@@ -1682,11 +1682,11 @@ async function loadBotConfigIntoForm() {
       settleStop.value = Math.max(8, Math.min(40, Number.isFinite(raw) ? raw : 40));
     }
     const settleMaxMin = document.getElementById('bot-settle-maxmin');
-    if (settleMaxMin) settleMaxMin.value = c.settleMaxMinutesToOpen != null ? c.settleMaxMinutesToOpen : 12;
+    if (settleMaxMin) settleMaxMin.value = c.settleMaxMinutesToOpen != null ? c.settleMaxMinutesToOpen : 8.5;
     const settleCd = document.getElementById('bot-settle-cooldown');
     if (settleCd) {
       settleCd.value =
-        c.settlePostStopSameSideCooldownMinutes != null ? c.settlePostStopSameSideCooldownMinutes : 5;
+        c.settlePostStopSameSideCooldownMinutes != null ? c.settlePostStopSameSideCooldownMinutes : 2.5;
     }
     const settleLateMin = document.getElementById('bot-settle-late-min');
     if (settleLateMin) {
@@ -1799,22 +1799,22 @@ async function saveBotConfig(opts = {}) {
   const skimAmount = parseFloat(document.getElementById('bot-skim-amount').value);
   const payload = {
     symbol: document.getElementById('bot-symbol').value,
-    strategyMode: document.getElementById('bot-strategy-mode')?.value || 'edge',
+    strategyMode: document.getElementById('bot-strategy-mode')?.value || 'settle',
     edgeThresholdPct: parseFloat(document.getElementById('bot-edge').value),
     minConfidence: parseFloat(document.getElementById('bot-confidence').value),
     stopLossCents: parseFloat(document.getElementById('bot-stoploss').value),
     stopRecoveryCents: parseFloat(document.getElementById('bot-stoprecovery').value),
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
-    settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '85'),
+    settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '80'),
     settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '94'),
     settleStopLossCents: Math.max(
       8,
       Math.min(40, parseFloat(document.getElementById('bot-settle-stoploss')?.value || '40') || 40)
     ),
-    settleMaxMinutesToOpen: parseFloat(document.getElementById('bot-settle-maxmin')?.value || '12'),
+    settleMaxMinutesToOpen: parseFloat(document.getElementById('bot-settle-maxmin')?.value || '8.5'),
     settlePostStopSameSideCooldownMinutes: parseFloat(
-      document.getElementById('bot-settle-cooldown')?.value || '5'
+      document.getElementById('bot-settle-cooldown')?.value || '2.5'
     ),
     settleLateEntryMinutes: parseFloat(document.getElementById('bot-settle-late-min')?.value || '3.5'),
     settleLateEntryMinCents: parseFloat(document.getElementById('bot-settle-late-floor')?.value || '70'),

@@ -84,7 +84,7 @@ function normalizeSettings(raw = {}) {
       : 0.5,
     settleMaxMinutesToOpen: Number.isFinite(Number(raw.settleMaxMinutesToOpen))
       ? Number(raw.settleMaxMinutesToOpen)
-      : 12,
+      : 8.5,
     // When false, settle mode only stops or holds to 0/100 (no tier TP / stale).
     settleTieredExits: raw.settleTieredExits !== false && raw.settleTieredExits !== 0,
   };
