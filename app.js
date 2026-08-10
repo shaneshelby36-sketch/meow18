@@ -774,6 +774,7 @@ async function refreshBotStatus() {
     const tradeScroll = captureLogScroll('bot-trade-log-list', 'top');
     body.innerHTML = [
       buildCapitalLedgerHtml(capital, { depositControls: true }),
+      buildHourlyPnlHtml(data.hourlyPnl || (data.stats && data.stats.hourlyPnl)),
       buildOpenPositionsHtml(data.openTrades),
       `<div class="bot-stat-chips">${chips.join('')}</div>`,
       buildTradeLogHtml(data.tradeLog, data.tradeLogTotal),
@@ -782,6 +783,7 @@ async function refreshBotStatus() {
     restoreLogScroll('bot-activity-log-list', activityScroll, 'bottom');
     restoreLogScroll('bot-trade-log-list', tradeScroll, 'top');
     bindActivityLogUi();
+    bindTradeLogUi();
     renderBotDashboard(data);
   } catch (err) {
     modeLine.textContent = 'Could not reach the engine to check bot status.';
@@ -976,6 +978,24 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
           ? ` · fees $${(t.feesCents / 100).toFixed(2)}`
           : '';
       const conf = Number.isFinite(t.engineConfidence) ? ` · conf ${t.engineConfidence}%` : '';
+      let stopNote = '';
+      if (t.exitReason === 'stop_loss') {
+        if (t.stopVerdictPending || t.stopVerdict === 'pending') {
+          stopNote = `<span class="bot-log-sub stop-verdict pending">Stop review: checking whether this prevented more loss or missed a bounce…</span>`;
+        } else if (t.stopVerdict === 'prevented_loss') {
+          stopNote = `<span class="bot-log-sub stop-verdict helped">${escapeHtml(
+            t.stopVerdictDetail || 'Stop helped — prevented further loss'
+          )}</span>`;
+        } else if (t.stopVerdict === 'missed_opportunity') {
+          stopNote = `<span class="bot-log-sub stop-verdict missed">${escapeHtml(
+            t.stopVerdictDetail || 'Missed opportunity — would have recovered'
+          )}</span>`;
+        } else if (t.stopVerdict === 'mixed') {
+          stopNote = `<span class="bot-log-sub stop-verdict mixed">${escapeHtml(
+            t.stopVerdictDetail || 'Stop outcome unclear'
+          )}</span>`;
+        }
+      }
       const rowId = escapeHtml(t.id || `${t.symbol || 'x'}-${t.openedAt || ''}-${t.closedAt || ''}`);
       return `
         <div class="bot-log-row kind-${t.status === 'open' ? 'open' : 'close'}" data-log-id="${rowId}">
@@ -985,6 +1005,7 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
             ${status} · ${entry}${t.status === 'closed' ? ` → ${exit}` : ''}
             ${Number.isFinite(t.stakeDollars) ? ` · $${Number(t.stakeDollars).toFixed(2)}` : ''}${conf}${fees}${skim}
             <span class="bot-log-sub">opened ${formatTradeTime(t.openedAt)}${t.mode ? ` · ${t.mode}` : ''}</span>
+            ${stopNote}
           </span>
           <span class="bot-log-pnl ${pnlClass}">${pnl != null ? formatMoneyCents(pnl, { signed: true }) : t.status === 'open' ? 'open' : ''}</span>
         </div>`;
@@ -993,9 +1014,38 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
 
   return `
     <div class="bot-log bot-trade-log">
-      <div class="bot-panel-title">Trade log <span>${total}</span></div>
+      <div class="bot-panel-title">Trade log <span>${total}</span> <button type="button" class="bot-log-copy" id="bot-trade-copy" title="Copy trade log text">Copy</button></div>
       <p class="bot-empty-line">Saved on disk (survives reboot + 12h rotation). Showing latest ${trades.length}${total > trades.length ? ` of ${total}` : ''}.</p>
       <div class="bot-log-list" id="bot-trade-log-list">${rows}</div>
+    </div>`;
+}
+
+function buildHourlyPnlHtml(hourlyPnl) {
+  const buckets = Array.isArray(hourlyPnl) ? hourlyPnl : [];
+  if (!buckets.length) return '';
+  const rows = buckets
+    .map((b) => {
+      const pnl = Number(b.pnlCents) || 0;
+      const pnlClass = pnl > 0 ? 'chip-positive' : pnl < 0 ? 'chip-negative' : '';
+      const trades = Number(b.trades) || 0;
+      return `
+        <div class="hourly-pnl-row">
+          <span class="hourly-pnl-hour">${escapeHtml(b.label || '—')}</span>
+          <span class="hourly-pnl-trades">${trades} trade${trades === 1 ? '' : 's'}</span>
+          <span class="hourly-pnl-value ${pnlClass}">${formatMoneyCents(pnl, { signed: true })}</span>
+        </div>`;
+    })
+    .join('');
+  const total = buckets.reduce((sum, b) => sum + (Number(b.pnlCents) || 0), 0);
+  const totalClass = total > 0 ? 'chip-positive' : total < 0 ? 'chip-negative' : '';
+  return `
+    <div class="hourly-pnl">
+      <div class="bot-panel-title">P&amp;L by hour <span>last 6h</span></div>
+      <div class="hourly-pnl-list">${rows}</div>
+      <div class="hourly-pnl-total">
+        <span>6h total</span>
+        <span class="${totalClass}">${formatMoneyCents(total, { signed: true })}</span>
+      </div>
     </div>`;
 }
 
@@ -1070,7 +1120,34 @@ function bindActivityLogUi() {
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(done).catch(() => {
-        // Fallback below
+        fallbackCopyText(text);
+        done();
+      });
+    } else {
+      fallbackCopyText(text);
+      done();
+    }
+  };
+}
+
+function bindTradeLogUi() {
+  const list = document.getElementById('bot-trade-log-list');
+  const copyBtn = document.getElementById('bot-trade-copy');
+  if (!copyBtn || !list) return;
+  copyBtn.onclick = () => {
+    const text = Array.from(list.querySelectorAll('.bot-log-row'))
+      .map((row) => row.innerText.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .join('\n');
+    if (!text) return;
+    const done = () => {
+      copyBtn.textContent = 'Copied';
+      setTimeout(() => {
+        copyBtn.textContent = 'Copy';
+      }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => {
         fallbackCopyText(text);
         done();
       });

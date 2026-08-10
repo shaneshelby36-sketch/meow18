@@ -316,6 +316,89 @@ const SETTLE_EXIT_TIERS = [
  */
 const SETTLE_TOUCHED90_HOLD_MINUTES = 3.5;
 
+/** Human label for post-stop review (trade log / activity). */
+function stopVerdictLabel(verdict) {
+  const v = String(verdict || '');
+  if (v === 'prevented_loss') return 'Stop helped — prevented further loss';
+  if (v === 'missed_opportunity') return 'Missed opportunity — would have recovered';
+  if (v === 'mixed') return 'Stop outcome unclear';
+  if (v === 'pending') return 'Checking after stop…';
+  return '';
+}
+
+/**
+ * Official Kalshi result after a stop: if our side won settlement we missed the
+ * bounce; if it lost we avoided riding to 0.
+ */
+function classifyStopVerdictFromResult(side, result) {
+  const s = String(side || '').toLowerCase();
+  const r = String(result || '').toLowerCase();
+  if ((s !== 'yes' && s !== 'no') || (r !== 'yes' && r !== 'no')) return null;
+  return s === r ? 'missed_opportunity' : 'prevented_loss';
+}
+
+/**
+ * Bid path after a stop when no official result yet.
+ * Continued weakness vs exit → prevented; recovery to/above entry → missed.
+ */
+function classifyStopVerdictFromBids({
+  entryCents,
+  exitCents,
+  postMinBid = null,
+  postMaxBid = null,
+  lastBid = null,
+} = {}) {
+  const entry = Math.round(Number(entryCents));
+  const exit = Math.round(Number(exitCents));
+  const minB = Number.isFinite(Number(postMinBid)) ? Math.round(Number(postMinBid)) : null;
+  const maxB = Number.isFinite(Number(postMaxBid)) ? Math.round(Number(postMaxBid)) : null;
+  const last = Number.isFinite(Number(lastBid)) ? Math.round(Number(lastBid)) : null;
+  if (!Number.isFinite(entry) || !Number.isFinite(exit)) return null;
+
+  if (last != null) {
+    if (last <= exit - 2) return 'prevented_loss';
+    if (last >= entry) return 'missed_opportunity';
+  }
+  if (minB != null && minB <= exit - 5) return 'prevented_loss';
+  if (maxB != null && maxB >= entry) return 'missed_opportunity';
+  if (last != null || minB != null || maxB != null) return 'mixed';
+  return null;
+}
+
+/**
+ * Closed-trade P&L buckets for the last N clock hours (local), oldest → newest.
+ */
+function buildHourlyPnlBuckets(trades, { hours = 6, now = Date.now() } = {}) {
+  const n = Math.max(1, Math.min(24, Math.floor(Number(hours) || 6)));
+  const end = Number(now);
+  const hourMs = 60 * 60 * 1000;
+  const currentHourStart = Math.floor(end / hourMs) * hourMs;
+  const buckets = [];
+  for (let i = n - 1; i >= 0; i -= 1) {
+    const hourStartMs = currentHourStart - i * hourMs;
+    const d = new Date(hourStartMs);
+    const label = d.toLocaleString(undefined, { hour: 'numeric' });
+    buckets.push({
+      hourStartMs,
+      hourEndMs: hourStartMs + hourMs,
+      label,
+      pnlCents: 0,
+      trades: 0,
+    });
+  }
+  const rangeStart = buckets[0].hourStartMs;
+  for (const t of trades || []) {
+    if (!t || t.status !== 'closed') continue;
+    const at = Number(t.closedAt);
+    if (!Number.isFinite(at) || at < rangeStart || at > end) continue;
+    const idx = Math.floor((at - rangeStart) / hourMs);
+    if (idx < 0 || idx >= buckets.length) continue;
+    buckets[idx].pnlCents += Number(t.pnlCents) || 0;
+    buckets[idx].trades += 1;
+  }
+  return buckets;
+}
+
 function settleExitTiersForDashboard() {
   return SETTLE_EXIT_TIERS.map((t) => ({
     entryLabel: t.entryLabel,
@@ -2586,6 +2669,10 @@ class TradingBot {
       if (reason === 'stop_loss' && trade.symbol) {
         if (!this._stoppedSymbolsThisCycle) this._stoppedSymbolsThisCycle = new Set();
         this._stoppedSymbolsThisCycle.add(String(trade.symbol).toUpperCase());
+        trade.stopVerdictPending = true;
+        trade.stopVerdict = 'pending';
+        trade.stopPostMinBidCents = null;
+        trade.stopPostMaxBidCents = null;
       }
       const entryFees = Math.max(0, Math.round(Number(trade.entryFeesCents) || 0));
       const exitFees = Math.max(0, Math.round(Number(trade.exitFeesCents) || 0));
@@ -2654,6 +2741,10 @@ class TradingBot {
         insuranceDrawnCents: trade.insuranceDrawnCents || 0,
         insuranceOverflowCents: trade.insuranceOverflowCents || 0,
         insuranceReleasedCents: trade.insuranceReleasedCents || 0,
+        stopVerdictPending: trade.stopVerdictPending === true,
+        stopVerdict: trade.stopVerdict || undefined,
+        stopPostMinBidCents: trade.stopPostMinBidCents,
+        stopPostMaxBidCents: trade.stopPostMaxBidCents,
       });
     this._persist();
       return true;
@@ -2661,6 +2752,144 @@ class TradingBot {
       if (trade.status === 'open') trade._closing = false;
       else delete trade._closing;
     }
+  }
+
+  /**
+   * After stop_loss: watch the same ticker until Kalshi posts a result (or the
+   * window is long past) and stamp whether the stop prevented a worse loss or
+   * missed a recovery. Updates ledger + permanent trade log.
+   */
+  async _reviewPendingStopVerdicts() {
+    const log = loadTradeLog();
+    const pending = (log || []).filter(
+      (t) =>
+        t &&
+        t.status === 'closed' &&
+        t.exitReason === 'stop_loss' &&
+        t.stopVerdictPending === true &&
+        t.ticker
+    );
+    if (!pending.length) return;
+
+    let touched = false;
+    for (const row of pending.slice(0, 8)) {
+      let market = null;
+      try {
+        market = await this._getMarketBounded(row.ticker, 1500);
+      } catch {
+        market = null;
+      }
+      const sideBid = market ? this._heldSideBidCents(row, market) : null;
+      if (Number.isFinite(sideBid)) {
+        const prevMin = Number(row.stopPostMinBidCents);
+        const prevMax = Number(row.stopPostMaxBidCents);
+        row.stopPostMinBidCents = Number.isFinite(prevMin)
+          ? Math.min(prevMin, sideBid)
+          : sideBid;
+        row.stopPostMaxBidCents = Number.isFinite(prevMax)
+          ? Math.max(prevMax, sideBid)
+          : sideBid;
+      }
+
+      const result = market && market.result ? String(market.result).toLowerCase() : '';
+      let verdict = classifyStopVerdictFromResult(row.side, result);
+      let detail = null;
+      if (verdict) {
+        detail =
+          verdict === 'prevented_loss'
+            ? `Session settled ${result.toUpperCase()} — holding would have paid 0¢`
+            : `Session settled ${result.toUpperCase()} — holding would have paid 100¢`;
+      } else {
+        const closeAt = Number(row.windowCloseTime);
+        const closedAt = Number(row.closedAt) || 0;
+        const now = Date.now();
+        const pastClose = Number.isFinite(closeAt) && now >= closeAt + 45_000;
+        const waitedLong = now - closedAt >= 12 * 60 * 1000;
+        if (pastClose || waitedLong) {
+          verdict = classifyStopVerdictFromBids({
+            entryCents: row.entryPriceCents,
+            exitCents: row.exitPriceCents,
+            postMinBid: row.stopPostMinBidCents,
+            postMaxBid: row.stopPostMaxBidCents,
+            lastBid: sideBid,
+          });
+          if (!verdict) verdict = 'mixed';
+          detail =
+            verdict === 'prevented_loss'
+              ? `Bid kept falling after stop (low ${row.stopPostMinBidCents ?? '—'}¢)`
+              : verdict === 'missed_opportunity'
+                ? `Bid recovered after stop (high ${row.stopPostMaxBidCents ?? '—'}¢)`
+                : 'No clear post-stop signal before session ended';
+        }
+      }
+
+      if (!verdict) {
+        // Still waiting — persist updated extremes only.
+        this._syncStopReviewFields(row, { pending: true });
+        touched = true;
+        continue;
+      }
+
+      this._applyStopVerdict(row, verdict, detail);
+      touched = true;
+    }
+    if (touched) this._persist();
+  }
+
+  _syncStopReviewFields(row, { pending = true } = {}) {
+    const ledgerTrade = (this.ledger.trades || []).find((t) => t && t.id === row.id);
+    if (ledgerTrade) {
+      ledgerTrade.stopPostMinBidCents = row.stopPostMinBidCents;
+      ledgerTrade.stopPostMaxBidCents = row.stopPostMaxBidCents;
+      if (pending) {
+        ledgerTrade.stopVerdictPending = true;
+        ledgerTrade.stopVerdict = ledgerTrade.stopVerdict || 'pending';
+      }
+    }
+    upsertTradeLog({
+      id: row.id,
+      stopVerdictPending: pending,
+      stopVerdict: pending ? row.stopVerdict || 'pending' : row.stopVerdict,
+      stopPostMinBidCents: row.stopPostMinBidCents,
+      stopPostMaxBidCents: row.stopPostMaxBidCents,
+      stopVerdictDetail: row.stopVerdictDetail,
+    });
+  }
+
+  _applyStopVerdict(row, verdict, detail) {
+    row.stopVerdict = verdict;
+    row.stopVerdictPending = false;
+    row.stopVerdictDetail = detail || stopVerdictLabel(verdict);
+    row.stopVerdictAt = Date.now();
+
+    const ledgerTrade = (this.ledger.trades || []).find((t) => t && t.id === row.id);
+    if (ledgerTrade) {
+      ledgerTrade.stopVerdict = verdict;
+      ledgerTrade.stopVerdictPending = false;
+      ledgerTrade.stopVerdictDetail = row.stopVerdictDetail;
+      ledgerTrade.stopVerdictAt = row.stopVerdictAt;
+      ledgerTrade.stopPostMinBidCents = row.stopPostMinBidCents;
+      ledgerTrade.stopPostMaxBidCents = row.stopPostMaxBidCents;
+    }
+
+    upsertTradeLog({
+      id: row.id,
+      stopVerdict: verdict,
+      stopVerdictPending: false,
+      stopVerdictDetail: row.stopVerdictDetail,
+      stopVerdictAt: row.stopVerdictAt,
+      stopPostMinBidCents: row.stopPostMinBidCents,
+      stopPostMaxBidCents: row.stopPostMaxBidCents,
+    });
+
+    const msg = `Stop review ${row.symbol || ''} ${String(row.side || '').toUpperCase()}: ${row.stopVerdictDetail}`;
+    this._logActivity(msg, {
+      kind: 'info',
+      symbol: row.symbol,
+      side: row.side,
+      tradeId: row.id,
+      pnlCents: row.pnlCents,
+    });
   }
 
   /**
@@ -3808,6 +4037,7 @@ class TradingBot {
     // --- first, manage every currently open trade by its own ticker,
     // regardless of what symbol is currently selected to trade next ---
     await this.manageOpenPositions(predictions);
+    await this._reviewPendingStopVerdicts();
 
     if (!this.isRunning) {
       this.lastDecision = 'Bot is stopped; it will continue monitoring any already-open positions but will not open new ones.';
@@ -4714,6 +4944,7 @@ class TradingBot {
       const d = this._tradeCloseDeadline(t);
       return Number.isFinite(d) && now >= d;
     });
+    const hourlyPnl = buildHourlyPnlBuckets(permanentLog, { hours: 6, now });
     return {
       mode: this.config.mode,
       isRunning: this.isRunning,
@@ -4728,6 +4959,7 @@ class TradingBot {
       // Permanent history (survives 12h ledger rotation). Newest first.
       tradeLog: permanentLog.slice(0, 50),
       tradeLogTotal: permanentLog.length,
+      hourlyPnl,
       stats: {
         totalAttempts: this.ledger.trades.length, // current period open + closed
         totalTrades: closed.length, // settled/closed trades only (current period)
@@ -4742,6 +4974,7 @@ class TradingBot {
         insuranceCents: this.ledger.insuranceCents || 0,
         insuranceDepositedCents: this.ledger.insuranceDepositedCents || 0,
         lifetimeTrades: permanentLog.length,
+        hourlyPnl,
       },
       capital: {
         ...capital,
@@ -4802,4 +5035,8 @@ module.exports = {
   INSURANCE_ARM_DEFAULT,
   INSURANCE_FLOOR_DEFAULT,
   INSURANCE_OVERFLOW_DEFAULT,
+  stopVerdictLabel,
+  classifyStopVerdictFromResult,
+  classifyStopVerdictFromBids,
+  buildHourlyPnlBuckets,
 };

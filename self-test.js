@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, stopVerdictLabel } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -4213,6 +4213,56 @@ async function testBotTradingFlow() {
   checkEq(SERIES_BY_SYMBOL.HYPE, 'KXHYPE15M', 'HYPE Kalshi series');
 
   section('settle strategy helpers');
+  checkEq(
+    classifyStopVerdictFromResult('yes', 'no'),
+    'prevented_loss',
+    'YES stop + NO settle = prevented further loss'
+  );
+  checkEq(
+    classifyStopVerdictFromResult('yes', 'yes'),
+    'missed_opportunity',
+    'YES stop + YES settle = missed opportunity'
+  );
+  checkEq(
+    classifyStopVerdictFromBids({
+      entryCents: 88,
+      exitCents: 68,
+      lastBid: 55,
+    }),
+    'prevented_loss',
+    'bid kept falling after stop → prevented'
+  );
+  checkEq(
+    classifyStopVerdictFromBids({
+      entryCents: 88,
+      exitCents: 68,
+      lastBid: 90,
+    }),
+    'missed_opportunity',
+    'bid recovered above entry after stop → missed'
+  );
+  check(/prevented further loss/i.test(stopVerdictLabel('prevented_loss')), 'stop verdict label helped');
+  {
+    const now = Date.parse('2026-08-10T18:30:00.000Z');
+    const hour = 60 * 60 * 1000;
+    const buckets = buildHourlyPnlBuckets(
+      [
+        { status: 'closed', closedAt: now - 30 * 60 * 1000, pnlCents: 200 },
+        { status: 'closed', closedAt: now - 2.5 * hour, pnlCents: -150 },
+        { status: 'closed', closedAt: now - 7 * hour, pnlCents: 999 },
+        { status: 'open', closedAt: now, pnlCents: 50 },
+      ],
+      { hours: 6, now }
+    );
+    checkEq(buckets.length, 6, 'hourly pnl returns 6 buckets');
+    const total = buckets.reduce((s, b) => s + b.pnlCents, 0);
+    checkEq(total, 50, 'hourly pnl sums only last 6h closed trades');
+    checkEq(
+      buckets.reduce((s, b) => s + b.trades, 0),
+      2,
+      'hourly pnl counts 2 closed trades in window'
+    );
+  }
   checkEq(settleEntryBand({}).min, 85, 'settle band default min 85');
   checkEq(settleEntryBand({}).max, 94, 'settle band default max 94');
   checkEq(settleMinUpsideCents({}), 6, 'settle min upside defaults to 6¢');

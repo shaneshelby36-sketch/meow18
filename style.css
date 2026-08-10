@@ -863,7 +863,13 @@ body[data-view-mode="bot"] .asset-picker {
 .bot-activity-log .bot-log-msg,
 .bot-activity-log .bot-log-time,
 .bot-activity-log .bot-log-pnl,
-.bot-activity-log .bot-empty-line {
+.bot-activity-log .bot-empty-line,
+.bot-trade-log,
+.bot-trade-log .bot-log-row,
+.bot-trade-log .bot-log-msg,
+.bot-trade-log .bot-log-time,
+.bot-trade-log .bot-log-pnl,
+.bot-trade-log .bot-empty-line {
   -webkit-user-select: text;
   user-select: text;
 }
@@ -886,6 +892,64 @@ body[data-view-mode="bot"] .asset-picker {
 .bot-log-copy:hover {
   color: var(--text);
   border-color: var(--accent);
+}
+.bot-trade-log .bot-panel-title,
+.bot-activity-log .bot-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.bot-log-sub.stop-verdict {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.78rem;
+}
+.bot-log-sub.stop-verdict.helped {
+  color: var(--positive, #2f9e6a);
+}
+.bot-log-sub.stop-verdict.missed {
+  color: var(--warning, #c48a2a);
+}
+.bot-log-sub.stop-verdict.pending,
+.bot-log-sub.stop-verdict.mixed {
+  color: var(--text-dim);
+}
+.hourly-pnl {
+  margin: 12px 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.hourly-pnl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.hourly-pnl-row,
+.hourly-pnl-total {
+  display: grid;
+  grid-template-columns: 4.5rem 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 0.85rem;
+}
+.hourly-pnl-hour {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.hourly-pnl-trades {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+.hourly-pnl-total {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-weight: 600;
+  grid-template-columns: 1fr auto;
 }
 .bot-log-row {
   display: grid;
