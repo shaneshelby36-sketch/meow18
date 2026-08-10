@@ -497,6 +497,23 @@ app.get("/", (req, res) => {
     res.json({ ...result, settleExitTiers: settleExitTiersForDashboard() });
   });
 
+  app.get('/api/bot/settle-window-rec', (req, res) => {
+    if (!bot) {
+      res.status(404).json({ enabled: false, message: 'Bot is not enabled (set KALSHI_ENABLED=true).' });
+      return;
+    }
+    res.json({ recommendation: bot.getSettleWindowRecommendation() });
+  });
+
+  app.post('/api/bot/settle-window-rec/apply', (req, res) => {
+    if (!bot) {
+      res.status(404).json({ enabled: false, message: 'Bot is not enabled (set KALSHI_ENABLED=true).' });
+      return;
+    }
+    const result = bot.applySettleWindowRecommendation();
+    res.status(result.ok ? 200 : 400).json(result);
+  });
+
   app.post('/api/bot/reset-paper', (req, res) => {
     if (!bot) {
       res.status(404).json({ enabled: false, message: 'Bot is not enabled (set KALSHI_ENABLED=true).' });

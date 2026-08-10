@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, stopVerdictLabel } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, SETTLE_WINDOW_STABLE_MAX_MINUTES, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, stopVerdictLabel } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -4342,6 +4342,56 @@ async function testBotTradingFlow() {
       2,
       'hourly pnl counts 2 closed trades in window'
     );
+  }
+  {
+    const now = Date.now();
+    const mk = (minsLeft, pnl, reason, agoMin = 30) => ({
+      status: 'closed',
+      strategy: 'settle',
+      exitReason: reason,
+      pnlCents: pnl,
+      openedAt: now - agoMin * 60_000 - minsLeft * 60_000,
+      windowCloseTime: now - agoMin * 60_000,
+      closedAt: now - agoMin * 60_000,
+    });
+    const thin = recommendSettleOpenWindow([mk(4, 50, 'settled')], { now, currentMaxMinutes: 5 });
+    checkEq(thin.light, 'neutral', 'settle window rec neutral with too few trades');
+    checkEq(thin.suggestedMaxMinutes, null, 'neutral has no apply target');
+
+    const healthy = recommendSettleOpenWindow(
+      [
+        mk(4, 120, 'settled', 20),
+        mk(3, 80, 'take_profit', 25),
+        mk(5, 60, 'settled', 40),
+        mk(4, 40, 'near_certain', 50),
+      ],
+      { now, currentMaxMinutes: 5 }
+    );
+    checkEq(healthy.light, 'green', 'healthy recent settle book → green 8m');
+    checkEq(healthy.suggestedMaxMinutes, SETTLE_WINDOW_STABLE_MAX_MINUTES, 'green suggests 8m');
+
+    const rough = recommendSettleOpenWindow(
+      [
+        mk(4, -200, 'stop_loss', 15),
+        mk(3, -180, 'settle_weak_switch', 20),
+        mk(5, -90, 'stop_loss', 25),
+        mk(4, 30, 'settle_stuck', 35),
+      ],
+      { now, currentMaxMinutes: 8 }
+    );
+    checkEq(rough.light, 'red', 'rough recent settle book → red 5m');
+    checkEq(rough.suggestedMaxMinutes, SETTLE_WINDOW_VOLATILE_MAX_MINUTES, 'red suggests 5m');
+
+    const midBetter = recommendSettleOpenWindow(
+      [
+        mk(7, 150, 'settled', 10),
+        mk(6.5, 120, 'take_profit', 20),
+        mk(4, -100, 'stop_loss', 30),
+        mk(3.5, -80, 'stop_loss', 40),
+      ],
+      { now, currentMaxMinutes: 5 }
+    );
+    checkEq(midBetter.light, 'green', 'mid-window avg beats late → green');
   }
   checkEq(settleEntryBand({}).min, 80, 'settle band default min 80');
   checkEq(settleEntryBand({}).max, 94, 'settle band default max 94');

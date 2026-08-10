@@ -770,6 +770,7 @@ async function refreshBotStatus() {
     }
     if (data.lastDecision) chips.push(chip('Decision', data.lastDecision));
     if (data.lastError) chips.push(chip('Last error', data.lastError));
+    renderSettleWindowRec(data.settleWindowRec);
     const activityScroll = captureLogScroll('bot-activity-log-list', 'bottom');
     const tradeScroll = captureLogScroll('bot-trade-log-list', 'top');
     body.innerHTML = [
@@ -1785,6 +1786,84 @@ async function loadBotConfigIntoForm() {
   }
 }
 
+function renderSettleWindowRec(rec) {
+  const wrap = document.getElementById('settle-window-rec');
+  const text = document.getElementById('settle-window-rec-text');
+  const btn = document.getElementById('settle-window-apply');
+  if (!wrap || !text || !btn) return;
+  if (!rec || typeof rec !== 'object') {
+    wrap.dataset.light = 'neutral';
+    text.textContent = 'Retrospect: waiting for settle history…';
+    btn.disabled = true;
+    btn.textContent = 'Apply';
+    return;
+  }
+  const light = rec.light === 'green' || rec.light === 'red' ? rec.light : 'neutral';
+  wrap.dataset.light = light;
+  const mins = rec.suggestedMaxMinutes;
+  const look = rec.lookbackHours != null ? `${rec.lookbackHours}h` : '—';
+  const n = rec.stats && rec.stats.sampleSize != null ? rec.stats.sampleSize : 0;
+  if (light === 'green') {
+    text.textContent = `Green · suggest ${mins}m (stable) · ${look}, n=${n}. ${rec.reason || ''}`;
+    btn.disabled = false;
+    btn.textContent = `Apply ${mins} min`;
+  } else if (light === 'red') {
+    text.textContent = `Red · suggest ${mins}m (volatile) · ${look}, n=${n}. ${rec.reason || ''}`;
+    btn.disabled = false;
+    btn.textContent = `Apply ${mins} min`;
+  } else {
+    text.textContent = `Neutral · ${rec.reason || 'Leave slider as-is.'}`;
+    btn.disabled = true;
+    btn.textContent = 'Apply';
+  }
+}
+
+async function applySettleWindowRec() {
+  const { engineUrl } = loadSettings();
+  const feedback = document.getElementById('bot-settings-feedback');
+  const btn = document.getElementById('settle-window-apply');
+  if (isBotSettingsLocked()) {
+    if (feedback) {
+      feedback.textContent = 'Settings are locked — unlock before applying the settle window.';
+      feedback.style.color = 'var(--wait)';
+    }
+    return;
+  }
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(`${engineUrl}/api/bot/settle-window-rec/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      if (feedback) {
+        feedback.textContent = data.message || 'Could not apply settle window suggestion.';
+        feedback.style.color = 'var(--wait)';
+      }
+      renderSettleWindowRec(data.recommendation);
+      return;
+    }
+    if (feedback) {
+      feedback.textContent = data.message || 'Settle open window applied.';
+      feedback.style.color = 'var(--up)';
+    }
+    renderSettleWindowRec(data.recommendation);
+    const slider = document.getElementById('bot-settle-maxmin');
+    if (slider && data.config && data.config.settleMaxMinutesToOpen != null) {
+      slider.value = data.config.settleMaxMinutesToOpen;
+      updateSliderDisplay('bot-settle-maxmin');
+    }
+    refreshBotStatus();
+  } catch (err) {
+    if (feedback) {
+      feedback.textContent = `Could not reach the engine: ${err.message}`;
+      feedback.style.color = 'var(--down)';
+    }
+  }
+}
+
 async function saveBotConfig(opts = {}) {
   const { engineUrl } = loadSettings();
   const feedback = document.getElementById('bot-settings-feedback');
@@ -2221,6 +2300,10 @@ function wireBotUI() {
     loadBotConfigIntoForm();
   });
   document.getElementById('bot-settings-save').addEventListener('click', () => saveBotConfig());
+  const settleWindowApply = document.getElementById('settle-window-apply');
+  if (settleWindowApply) {
+    settleWindowApply.addEventListener('click', () => applySettleWindowRec());
+  }
   document.getElementById('bot-running-toggle').addEventListener('click', () => {
     const isRunning = document.getElementById('bot-running-toggle').textContent !== 'Start bot';
     setBotRunning(!isRunning);

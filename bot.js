@@ -410,6 +410,152 @@ function classifyStopVerdictFromBids({
   return null;
 }
 
+/** Stable settle open ceiling (minutes left) when retrospect is green. */
+const SETTLE_WINDOW_STABLE_MAX_MINUTES = 8;
+/** Volatile settle open ceiling when retrospect is red. */
+const SETTLE_WINDOW_VOLATILE_MAX_MINUTES = 5;
+const SETTLE_WINDOW_RETRO_SHORT_MS = 2 * 60 * 60 * 1000;
+const SETTLE_WINDOW_RETRO_LONG_MS = 12 * 60 * 60 * 1000;
+const SETTLE_WINDOW_RETRO_MIN_TRADES = 3;
+/** Split late vs mid-window opens around the volatile ceiling. */
+const SETTLE_WINDOW_LATE_CUTOFF_MINUTES = 5.5;
+
+function settleMinutesLeftAtOpen(trade) {
+  const opened = Number(trade && trade.openedAt);
+  const close = Number(trade && trade.windowCloseTime);
+  if (!Number.isFinite(opened) || !Number.isFinite(close) || close <= opened) return null;
+  return (close - opened) / 60000;
+}
+
+function isSettleClosedTrade(trade) {
+  if (!trade || trade.status !== 'closed') return false;
+  return isSettleTrade(trade) || String(trade.strategy || '').toLowerCase() === 'settle';
+}
+
+function summarizeSettleWindowSample(trades) {
+  let wins = 0;
+  let losses = 0;
+  let netPnlCents = 0;
+  let stopLike = 0;
+  let late = [];
+  let mid = [];
+  for (const t of trades) {
+    const pnl = Number(t.pnlCents) || 0;
+    netPnlCents += pnl;
+    if (pnl > 0) wins += 1;
+    else losses += 1;
+    const reason = String(t.exitReason || '');
+    if (reason === 'stop_loss' || reason === 'settle_weak_switch') stopLike += 1;
+    const mins = settleMinutesLeftAtOpen(t);
+    if (mins == null) continue;
+    if (mins <= SETTLE_WINDOW_LATE_CUTOFF_MINUTES) late.push(pnl);
+    else if (mins <= SETTLE_WINDOW_STABLE_MAX_MINUTES + 0.5) mid.push(pnl);
+  }
+  const n = trades.length;
+  const avg = (arr) => (arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : null);
+  return {
+    sampleSize: n,
+    wins,
+    losses,
+    netPnlCents,
+    winRatePct: n ? +((wins / n) * 100).toFixed(1) : null,
+    stopLikeRatePct: n ? +((stopLike / n) * 100).toFixed(1) : null,
+    lateCount: late.length,
+    midCount: mid.length,
+    lateAvgPnlCents: avg(late),
+    midAvgPnlCents: avg(mid),
+  };
+}
+
+/**
+ * Retrospect settle open-window: green → prefer 8m ceiling, red → 5m.
+ * Prefers last 2h when enough settle closes; else expands to 12h.
+ * Does not auto-apply — caller must press Apply.
+ */
+function recommendSettleOpenWindow(trades, { now = Date.now(), currentMaxMinutes = null } = {}) {
+  const all = (Array.isArray(trades) ? trades : []).filter(isSettleClosedTrade);
+  const pickSince = (ms) => all.filter((t) => Number(t.closedAt) >= now - ms);
+  let lookbackHours = 2;
+  let sample = pickSince(SETTLE_WINDOW_RETRO_SHORT_MS);
+  if (sample.length < SETTLE_WINDOW_RETRO_MIN_TRADES) {
+    lookbackHours = 12;
+    sample = pickSince(SETTLE_WINDOW_RETRO_LONG_MS);
+  }
+  const stats = summarizeSettleWindowSample(sample);
+  const current = Number(currentMaxMinutes);
+  const currentMax = Number.isFinite(current) ? current : null;
+
+  if (stats.sampleSize < SETTLE_WINDOW_RETRO_MIN_TRADES) {
+    return {
+      light: 'neutral',
+      suggestedMaxMinutes: null,
+      currentMaxMinutes: currentMax,
+      lookbackHours,
+      reason: `Need ≥${SETTLE_WINDOW_RETRO_MIN_TRADES} closed settle trades in the last ${lookbackHours}h (have ${stats.sampleSize}).`,
+      stats,
+      stableMaxMinutes: SETTLE_WINDOW_STABLE_MAX_MINUTES,
+      volatileMaxMinutes: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
+    };
+  }
+
+  let light = 'neutral';
+  let suggestedMaxMinutes = null;
+  let reason = '';
+
+  // Prefer mid-vs-late counterfactual when we have both buckets.
+  if (stats.midCount >= 2 && stats.lateCount >= 2) {
+    const midAvg = stats.midAvgPnlCents;
+    const lateAvg = stats.lateAvgPnlCents;
+    if (midAvg != null && lateAvg != null && midAvg > lateAvg + 5) {
+      light = 'green';
+      suggestedMaxMinutes = SETTLE_WINDOW_STABLE_MAX_MINUTES;
+      reason =
+        `Mid-window opens (≤${SETTLE_WINDOW_STABLE_MAX_MINUTES}m) beat late opens over ${lookbackHours}h ` +
+        `(avg $${(midAvg / 100).toFixed(2)} vs $${(lateAvg / 100).toFixed(2)}).`;
+    } else if (midAvg != null && lateAvg != null && lateAvg > midAvg + 5) {
+      light = 'red';
+      suggestedMaxMinutes = SETTLE_WINDOW_VOLATILE_MAX_MINUTES;
+      reason =
+        `Late opens beat mid-window over ${lookbackHours}h ` +
+        `(avg $${(lateAvg / 100).toFixed(2)} vs $${(midAvg / 100).toFixed(2)}) — keep a shorter ceiling.`;
+    }
+  }
+
+  // Fallback: overall recent health.
+  if (light === 'neutral') {
+    const stopRate = stats.stopLikeRatePct != null ? stats.stopLikeRatePct : 0;
+    const net = stats.netPnlCents;
+    if (net < 0 || stopRate >= 45) {
+      light = 'red';
+      suggestedMaxMinutes = SETTLE_WINDOW_VOLATILE_MAX_MINUTES;
+      reason =
+        `Recent settle book is rough over ${lookbackHours}h ` +
+        `(net $${(net / 100).toFixed(2)}, stop/weak ${stopRate.toFixed(0)}%) → prefer ${SETTLE_WINDOW_VOLATILE_MAX_MINUTES}m.`;
+    } else if (net > 0 && (stats.winRatePct == null || stats.winRatePct >= 55) && stopRate < 40) {
+      light = 'green';
+      suggestedMaxMinutes = SETTLE_WINDOW_STABLE_MAX_MINUTES;
+      reason =
+        `Recent settle book is healthy over ${lookbackHours}h ` +
+        `(net $${(net / 100).toFixed(2)}, win ${stats.winRatePct ?? '—'}%) → prefer ${SETTLE_WINDOW_STABLE_MAX_MINUTES}m.`;
+    } else {
+      reason =
+        `Mixed settle results over ${lookbackHours}h (net $${(net / 100).toFixed(2)}, ` +
+        `stop/weak ${stopRate.toFixed(0)}%) — leave the slider as-is.`;
+    }
+  }
+
+  return {
+    light,
+    suggestedMaxMinutes,
+    currentMaxMinutes: currentMax,
+    lookbackHours,
+    reason,
+    stats,
+    stableMaxMinutes: SETTLE_WINDOW_STABLE_MAX_MINUTES,
+    volatileMaxMinutes: SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
+  };
+}
+
 /**
  * Closed-trade P&L buckets for the last N clock hours (local), oldest → newest.
  */
@@ -1529,6 +1675,53 @@ class TradingBot {
     }
     saveConfigOverrides(collectConfigOverrides(this.config));
     return { applied, config: this.config };
+  }
+
+  /**
+   * Green/red settle open-window suggestion from recent closed settle trades.
+   * Does not change config — use applySettleWindowRecommendation().
+   */
+  getSettleWindowRecommendation({ now = Date.now() } = {}) {
+    const permanentLog = loadTradeLog();
+    const ledgerClosed = (this.ledger.trades || []).filter((t) => t && t.status === 'closed');
+    // Prefer permanent log (survives rotation); merge ledger ids not already present.
+    const byId = new Map();
+    for (const t of permanentLog) {
+      if (t && t.id) byId.set(t.id, t);
+    }
+    for (const t of ledgerClosed) {
+      if (t && t.id && !byId.has(t.id)) byId.set(t.id, t);
+    }
+    return recommendSettleOpenWindow([...byId.values()], {
+      now,
+      currentMaxMinutes: this.config.settleMaxMinutesToOpen,
+    });
+  }
+
+  /**
+   * Apply the current green/red suggestion to settleMaxMinutesToOpen (button press).
+   */
+  applySettleWindowRecommendation() {
+    const rec = this.getSettleWindowRecommendation();
+    if (rec.light !== 'green' && rec.light !== 'red') {
+      return { ok: false, message: rec.reason || 'No green/red suggestion to apply.', recommendation: rec };
+    }
+    if (!Number.isFinite(Number(rec.suggestedMaxMinutes))) {
+      return { ok: false, message: 'Suggestion has no target minutes.', recommendation: rec };
+    }
+    const result = this.updateConfig({ settleMaxMinutesToOpen: rec.suggestedMaxMinutes });
+    const msg =
+      `Applied settle open window ${rec.light.toUpperCase()} → ${rec.suggestedMaxMinutes} min. ${rec.reason}`;
+    this.lastDecision = msg;
+    this._logActivity(msg, { kind: 'settle-window' });
+    this._persist();
+    return {
+      ok: true,
+      message: msg,
+      recommendation: this.getSettleWindowRecommendation(),
+      applied: result.applied,
+      config: this.config,
+    };
   }
 
   resetPaperState() {
@@ -5230,6 +5423,7 @@ class TradingBot {
       return Number.isFinite(d) && now >= d;
     });
     const hourlyPnl = buildHourlyPnlBuckets(permanentLog, { hours: 6, now });
+    const settleWindowRec = this.getSettleWindowRecommendation({ now });
     return {
       mode: this.config.mode,
       isRunning: this.isRunning,
@@ -5245,6 +5439,7 @@ class TradingBot {
       tradeLog: permanentLog.slice(0, 50),
       tradeLogTotal: permanentLog.length,
       hourlyPnl,
+      settleWindowRec,
       stats: {
         totalAttempts: this.ledger.trades.length, // current period open + closed
         totalTrades: closed.length, // settled/closed trades only (current period)
@@ -5327,4 +5522,7 @@ module.exports = {
   classifyStopVerdictFromResult,
   classifyStopVerdictFromBids,
   buildHourlyPnlBuckets,
+  recommendSettleOpenWindow,
+  SETTLE_WINDOW_STABLE_MAX_MINUTES,
+  SETTLE_WINDOW_VOLATILE_MAX_MINUTES,
 };
