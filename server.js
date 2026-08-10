@@ -100,7 +100,7 @@ const bot = KALSHI_ENABLED
         settleEntryMinCents: parseFloat(process.env.KALSHI_SETTLE_ENTRY_MIN_CENTS || '80'),
         settleEntryMaxCents: parseFloat(process.env.KALSHI_SETTLE_ENTRY_MAX_CENTS || '94'),
         settleNoEntryMinCents: parseFloat(process.env.KALSHI_SETTLE_NO_ENTRY_MIN_CENTS || '80'),
-        settleStopLossCents: parseInt(process.env.KALSHI_SETTLE_STOP_LOSS_CENTS || '40', 10),
+        settleStopLossCents: parseInt(process.env.KALSHI_SETTLE_STOP_LOSS_CENTS || '50', 10),
         settleMaxMinutesToOpen: parseFloat(process.env.KALSHI_SETTLE_MAX_MINUTES_TO_OPEN || '8.5'),
         settlePostStopSameSideCooldownMinutes: parseFloat(
           process.env.KALSHI_SETTLE_POST_STOP_SAME_SIDE_COOLDOWN_MINUTES || '2.5'

@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 18;
+const SETTINGS_DEFAULTS_VERSION = 19;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -711,14 +711,17 @@ function syncInsuranceReady(balanceCents, ready, armCents, floorCents) {
 
 /** Floor for settle stop — blocks accidental 1–2¢ stops from UI fat-fingers. */
 const SETTLE_STOP_LOSS_MIN_CENTS = 8;
+/** Ceiling for settle stop — widest ride through wicks (UI max −60¢). */
+const SETTLE_STOP_LOSS_MAX_CENTS = 60;
+const SETTLE_STOP_LOSS_DEFAULT_CENTS = 50;
 
 function normalizeSettleStopLossCents(config) {
   if (!config || typeof config !== 'object') return config;
   let n = Number(config.settleStopLossCents);
-  if (!Number.isFinite(n)) n = 40;
+  if (!Number.isFinite(n)) n = SETTLE_STOP_LOSS_DEFAULT_CENTS;
   config.settleStopLossCents = Math.max(
     SETTLE_STOP_LOSS_MIN_CENTS,
-    Math.min(40, Math.round(n))
+    Math.min(SETTLE_STOP_LOSS_MAX_CENTS, Math.round(n))
   );
   return config;
 }
@@ -1490,8 +1493,8 @@ class TradingBot {
       settleEntryMaxCents: 94, // includes ≥90¢ hold-to-settle through 94¢
       // NO can enter from this floor (default matches primary min when min is 80).
       settleNoEntryMinCents: 80,
-      // Max allowed stop (40¢): ride reversible wicks; true 90→40 gaps still gap.
-      settleStopLossCents: 40,
+      // Default 50¢; UI max 60¢ — ride reversible wicks; hard gaps can still fill worse.
+      settleStopLossCents: SETTLE_STOP_LOSS_DEFAULT_CENTS,
       // Reject asks with less upside to 100 than this. Independent of stop. 0 = off.
       settleMinUpsideCents: 6, // allows 94¢ (6¢ to 100); 95¢+ still blocked
       settleMinMinutesToOpen: 0.5, // still need a little time; 0 = allow until last seconds

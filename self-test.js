@@ -4455,6 +4455,10 @@ async function testBotTradingFlow() {
     );
     settleBot.updateConfig({ settleStopLossCents: 2 });
     checkEq(settleBot.config.settleStopLossCents, 8, 'settle stop cannot go below 8¢ floor');
+    settleBot.updateConfig({ settleStopLossCents: 60 });
+    checkEq(settleBot.config.settleStopLossCents, 60, 'settle stop allows 60¢ max');
+    settleBot.updateConfig({ settleStopLossCents: 61 });
+    checkEq(settleBot.config.settleStopLossCents, 60, 'settle stop clamps above 60¢');
     settleBot.config.settleStopLossCents = 20;
     checkEq(
       settleBot._stopLevelCents({ strategy: 'settle', entryPriceCents: 87 }),
