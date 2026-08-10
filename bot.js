@@ -434,6 +434,20 @@ function syncInsuranceReady(balanceCents, ready, armCents, floorCents) {
   return !!ready;
 }
 
+/** Floor for settle stop — blocks accidental 1–2¢ stops from UI fat-fingers. */
+const SETTLE_STOP_LOSS_MIN_CENTS = 8;
+
+function normalizeSettleStopLossCents(config) {
+  if (!config || typeof config !== 'object') return config;
+  let n = Number(config.settleStopLossCents);
+  if (!Number.isFinite(n)) n = 20;
+  config.settleStopLossCents = Math.max(
+    SETTLE_STOP_LOSS_MIN_CENTS,
+    Math.min(40, Math.round(n))
+  );
+  return config;
+}
+
 /** Clamp config knobs so floor stays strictly below arm; normalize overflow. */
 function normalizeInsuranceThresholds(config) {
   if (!config || typeof config !== 'object') return config;
@@ -1245,6 +1259,7 @@ class TradingBot {
       ...loadConfigOverrides(), // saved runtime edits win over env/defaults, except `mode`/`liveAuthorized`
     };
     normalizeInsuranceThresholds(this.config);
+    normalizeSettleStopLossCents(this.config);
     if (this.config.symbol !== 'AUTO' && !isKalshiTradeEnabled(this.config.symbol, this.config)) {
       console.warn(
         `[bot] ${this.config.symbol} is opted out of trading — switching symbol to AUTO`
@@ -1368,6 +1383,10 @@ class TradingBot {
       applied[field] = value;
     }
     normalizeInsuranceThresholds(this.config);
+    normalizeSettleStopLossCents(this.config);
+    if (applied.settleStopLossCents != null) {
+      applied.settleStopLossCents = this.config.settleStopLossCents;
+    }
     if (this.config.symbol !== 'AUTO' && !isKalshiTradeEnabled(this.config.symbol, this.config)) {
       this.config.symbol = 'AUTO';
       applied.symbol = 'AUTO';
@@ -3337,30 +3356,39 @@ class TradingBot {
     };
 
     if (this.config.mode === 'live') {
-      // One attempt per coin. Refresh ask, pay up to +1¢ to cross, IOC, size to book.
+      // Up to 3 IOC tries: re-quote each time, chase ask by +0/+1/+2¢ inside the
+      // settle ceiling. Thin books move between cycles — one shot was missing too often.
       let filled = 0;
       let fill = null;
       let orderId = null;
       let workingPrice = priceCents;
       let lastErr = null;
+      let freshAsk = null;
+      const maxEntryAttempts = 3;
 
-      // Re-quote so we don't GTC a ghost ask that already walked.
-      let liveMarket = null;
-      try {
-        liveMarket = await this._getMarketBounded(ticker, 2000);
-      } catch {
-        liveMarket = null;
-      }
-      const freshAsk = await this._refreshLiveEntryAskCents(ticker, side);
-      if (Number.isFinite(freshAsk)) {
+      for (let attempt = 0; attempt < maxEntryAttempts; attempt++) {
+        if (attempt > 0) await this._sleep(250);
+
+        let liveMarket = null;
+        try {
+          liveMarket = await this._getMarketBounded(ticker, 2000);
+        } catch {
+          liveMarket = null;
+        }
+        freshAsk = await this._refreshLiveEntryAskCents(ticker, side);
         const band = isSettle ? settleEffectiveEntryBand(this.config, minutesLeft) : null;
         const richFloor = isSettle ? settleRichAskFloorCents(this.config) : 100;
         const ceiling = isSettle
-          ? Math.min(99, richFloor - 1, Math.max(band?.max ?? priceCents, priceCents) + 1)
+          ? Math.min(99, richFloor - 1, Math.max(band?.max ?? priceCents, priceCents) + 2)
           : Math.min(99, priceCents + 2);
-        // Cross by at most +1¢ above the live ask / planned price.
-        workingPrice = Math.min(ceiling, Math.max(priceCents, freshAsk, Math.min(99, freshAsk + 1)));
+        if (Number.isFinite(freshAsk)) {
+          const chase = Math.min(99, Math.round(freshAsk) + attempt);
+          workingPrice = Math.min(ceiling, Math.max(priceCents, freshAsk, chase));
+        } else {
+          workingPrice = Math.min(ceiling, Math.max(1, Math.round(priceCents) + attempt));
+        }
         workingPrice = Math.max(1, Math.min(99, Math.round(workingPrice)));
+
         if (isSettle) {
           const upside = 100 - workingPrice;
           const minUpside = settleMinUpsideCents(this.config);
@@ -3369,66 +3397,72 @@ class TradingBot {
             (minUpside > 0 && upside < minUpside) ||
             !isSettleEntryPriceCents(workingPrice, this.config, minutesLeft)
           ) {
-            // Can't cross without leaving the band — skip rather than rest a dead bid.
-            this._noteEntryMiss(symbol, null, closeAt);
-            this.lastError =
-              `Skipped ${symbol} live entry: live ask ${freshAsk}¢ can't cross inside settle band ` +
-              `(would need ${workingPrice}¢). Focusing on other cryptos.`;
-            this.lastDecision = this.lastError;
-            this._logActivity(this.lastDecision, { kind: 'open', symbol, side, strategy: trade.strategy });
-            return false;
+            if (attempt === maxEntryAttempts - 1) {
+              this._noteEntryMiss(symbol, null, closeAt);
+              this.lastError =
+                `Skipped ${symbol} live entry: live ask ${freshAsk != null ? freshAsk + '¢' : 'n/a'} can't cross inside settle band ` +
+                `(would need ${workingPrice}¢). Focusing on other cryptos.`;
+              this.lastDecision = this.lastError;
+              this._logActivity(this.lastDecision, {
+                kind: 'open',
+                symbol,
+                side,
+                strategy: trade.strategy,
+              });
+              return false;
+            }
+            continue;
           }
         }
-      }
 
-      let attemptContracts = Math.max(
-        1,
-        Math.floor(
-          (this._stakeDollarsForEntry(workingPrice, { settle: isSettle, symbol, thirdSlot }) * 100) /
-            workingPrice
-        )
-      );
-      const bookAskSize =
-        liveMarket &&
-        (side === 'yes'
-          ? Number(liveMarket.yes_ask_size)
-          : Number(liveMarket.no_ask_size) ||
-            (Number.isFinite(Number(liveMarket.yes_bid_size))
-              ? Number(liveMarket.yes_bid_size)
-              : NaN));
-      if (Number.isFinite(bookAskSize) && bookAskSize >= 1 && bookAskSize < attemptContracts) {
-        console.warn(
-          `[bot] sizing ${symbol} entry down ${attemptContracts}→${bookAskSize} to visible ask size`
+        let attemptContracts = Math.max(
+          1,
+          Math.floor(
+            (this._stakeDollarsForEntry(workingPrice, { settle: isSettle, symbol, thirdSlot }) * 100) /
+              workingPrice
+          )
         );
-        attemptContracts = Math.max(1, Math.floor(bookAskSize));
-      }
-      const attemptCost = attemptContracts * workingPrice;
-      if (Number.isFinite(this.liveBalanceCents) && attemptCost > this.liveBalanceCents) {
-        this.lastDecision =
-          `Insufficient live balance: need $${(attemptCost / 100).toFixed(2)}, have $${(this.liveBalanceCents / 100).toFixed(2)}.`;
-        return false;
-      }
-      trade.contracts = attemptContracts;
-      trade.entryPriceCents = workingPrice;
-      trade.stakeDollars = +(attemptCost / 100).toFixed(2);
+        const bookAskSize =
+          liveMarket &&
+          (side === 'yes'
+            ? Number(liveMarket.yes_ask_size)
+            : Number(liveMarket.no_ask_size) ||
+              (Number.isFinite(Number(liveMarket.yes_bid_size))
+                ? Number(liveMarket.yes_bid_size)
+                : NaN));
+        if (Number.isFinite(bookAskSize) && bookAskSize >= 1 && bookAskSize < attemptContracts) {
+          console.warn(
+            `[bot] sizing ${symbol} entry down ${attemptContracts}→${bookAskSize} to visible ask size`
+          );
+          attemptContracts = Math.max(1, Math.floor(bookAskSize));
+        }
+        const attemptCost = attemptContracts * workingPrice;
+        if (Number.isFinite(this.liveBalanceCents) && attemptCost > this.liveBalanceCents) {
+          this.lastDecision =
+            `Insufficient live balance: need $${(attemptCost / 100).toFixed(2)}, have $${(this.liveBalanceCents / 100).toFixed(2)}.`;
+          return false;
+        }
+        trade.contracts = attemptContracts;
+        trade.entryPriceCents = workingPrice;
+        trade.stakeDollars = +(attemptCost / 100).toFixed(2);
 
-      try {
-        const order = await this.client.createOrder({
-          ticker,
-          side,
-          action: 'buy',
-          count: trade.contracts,
-          priceCents: workingPrice,
-          // IOC: take what's there now; don't rest a GTC that we cancel empty ~2s later.
-          timeInForce: 'immediate_or_cancel',
-        });
-        orderId = this._extractOrderId(order);
-        if (!orderId) {
-          lastErr = new Error('createOrder returned no order_id');
-          console.error(`[bot] Live entry on ${symbol} returned no order_id`);
-        } else {
+        try {
+          const order = await this.client.createOrder({
+            ticker,
+            side,
+            action: 'buy',
+            count: trade.contracts,
+            priceCents: workingPrice,
+            timeInForce: 'immediate_or_cancel',
+          });
+          orderId = this._extractOrderId(order);
+          if (!orderId) {
+            lastErr = new Error('createOrder returned no order_id');
+            console.error(`[bot] Live entry on ${symbol} returned no order_id`);
+            continue;
+          }
           fill = await this._awaitOrderFill(orderId, {
-            minFill: 1, // accept partials — full-size FOC was a common 0/N miss
+            minFill: 1,
             attempts: 4,
             delayMs: 200,
             seedOrder: order,
@@ -3440,7 +3474,7 @@ class TradingBot {
             const lastChance = await this._recoverOrderFillsAfterCancel(orderId, {
               priorOrder: fill.order,
               attempts: 2,
-              delayMs: 300,
+              delayMs: 250,
             });
             if (lastChance.filled > 0) {
               filled = lastChance.filled;
@@ -3451,16 +3485,15 @@ class TradingBot {
               );
             }
           }
-          if (filled < 1) {
-            lastErr = new Error(`no fill (0/${trade.contracts})`);
-            console.warn(
-              `[bot] Live entry on ${symbol} did not fill @ ${workingPrice}¢ (IOC; fresh ask was ${freshAsk}¢)`
-            );
-          }
+          if (filled >= 1) break;
+          lastErr = new Error(`no fill (0/${trade.contracts})`);
+          console.warn(
+            `[bot] Live entry try ${attempt + 1}/${maxEntryAttempts} on ${symbol} did not fill @ ${workingPrice}¢ (IOC; ask ${freshAsk}¢)`
+          );
+        } catch (err) {
+          lastErr = err;
+          console.error(`[bot] Live entry try ${attempt + 1}/${maxEntryAttempts} failed:`, err.message);
         }
-      } catch (err) {
-        lastErr = err;
-        console.error(`[bot] Live entry failed:`, err.message);
       }
 
       if (filled < 1) {

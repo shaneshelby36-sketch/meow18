@@ -925,6 +925,34 @@ body[data-view-mode="bot"] .asset-picker {
 }
 .bot-trade-log .bot-log-list {
   max-height: 360px;
+  overflow-anchor: none;
+}
+.bot-section h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.bot-settings-lock {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border, var(--line));
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.bot-settings-lock[aria-pressed="true"] {
+  border-color: var(--wait);
+  color: var(--wait);
+}
+#bot-settings-fields.is-locked {
+  opacity: 0.72;
+  pointer-events: none;
 }
 .bot-log-row.kind-open .bot-log-msg { color: var(--wait); }
 .bot-log-row.kind-close .bot-log-msg { color: var(--text); }

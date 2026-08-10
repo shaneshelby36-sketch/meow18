@@ -3363,7 +3363,7 @@ async function testBotTradingFlow() {
     });
     checkEq(opened, false, 'unfilled entry returns false');
     checkEq(retryBot.openTrades.length, 0, 'unfilled entry leaves no trade');
-    checkEq(entryOrders, 1, 'unfilled entry places one buy (no chase retries)');
+    checkEq(entryOrders, 3, 'unfilled entry retries IOC up to 3 times');
     check(retryBot._hasRecentEntryMiss('ETH'), 'fill miss demotes ETH briefly');
     check(/skipping this coin|focusing on other/i.test(retryBot.lastError || ''), 'miss message mentions skip/focus');
     check(/miss #1/i.test(retryBot.lastError || ''), 'first miss labeled #1');
@@ -3448,7 +3448,7 @@ async function testBotTradingFlow() {
       engineConfidence: 70,
     });
     checkEq(missBot.openTrades.length, 0, 'unfilled entry after miss leaves no trade');
-    checkEq(entryOrders, 1, 'unfilled entry attempted 1 buy');
+    checkEq(entryOrders, 3, 'unfilled entry attempted 3 buys');
     check(/did not fill/i.test(missBot.lastError || ''), 'unfilled entry error mentions did not fill');
   }
 
@@ -4140,6 +4140,8 @@ async function testBotTradingFlow() {
       79,
       'settle stop uses settleStopLossCents (87−8)'
     );
+    settleBot.updateConfig({ settleStopLossCents: 2 });
+    checkEq(settleBot.config.settleStopLossCents, 8, 'settle stop cannot go below 8¢ floor');
     settleBot.config.settleStopLossCents = 20;
     checkEq(
       settleBot._stopLevelCents({ strategy: 'settle', entryPriceCents: 87 }),

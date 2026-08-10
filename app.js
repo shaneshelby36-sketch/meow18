@@ -781,11 +781,6 @@ async function refreshBotStatus() {
     ].join('');
     restoreLogScroll('bot-activity-log-list', activityScroll, 'bottom');
     restoreLogScroll('bot-trade-log-list', tradeScroll, 'top');
-    // Re-apply after layout so sticky-bottom lands on the latest line.
-    requestAnimationFrame(() => {
-      restoreLogScroll('bot-activity-log-list', activityScroll, 'bottom');
-      restoreLogScroll('bot-trade-log-list', tradeScroll, 'top');
-    });
     bindActivityLogUi();
     renderBotDashboard(data);
   } catch (err) {
@@ -981,8 +976,9 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
           ? ` · fees $${(t.feesCents / 100).toFixed(2)}`
           : '';
       const conf = Number.isFinite(t.engineConfidence) ? ` · conf ${t.engineConfidence}%` : '';
+      const rowId = escapeHtml(t.id || `${t.symbol || 'x'}-${t.openedAt || ''}-${t.closedAt || ''}`);
       return `
-        <div class="bot-log-row kind-${t.status === 'open' ? 'open' : 'close'}">
+        <div class="bot-log-row kind-${t.status === 'open' ? 'open' : 'close'}" data-log-id="${rowId}">
           <span class="bot-log-time">${formatTradeTime(t.closedAt || t.openedAt)}</span>
           <span class="bot-log-msg">
             <strong>${t.symbol || '?'} ${side}</strong>
@@ -1003,7 +999,7 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
     </div>`;
 }
 
-const LOG_STICKY_PX = 48;
+const LOG_STICKY_PX = 64;
 
 function captureLogScroll(id, mode = 'bottom') {
   const el = document.getElementById(id);
@@ -1012,18 +1008,40 @@ function captureLogScroll(id, mode = 'bottom') {
     mode === 'bottom'
       ? el.scrollHeight - el.scrollTop - el.clientHeight <= LOG_STICKY_PX
       : el.scrollTop <= LOG_STICKY_PX;
-  return { scrollTop: el.scrollTop, stickToLatest: nearLatest, mode };
+  let anchorId = null;
+  let anchorOffset = 0;
+  for (const child of el.children) {
+    if (!(child instanceof HTMLElement)) continue;
+    if (child.offsetTop + child.offsetHeight > el.scrollTop + 1) {
+      anchorId = child.getAttribute('data-log-id') || child.id || null;
+      anchorOffset = child.offsetTop - el.scrollTop;
+      break;
+    }
+  }
+  return { scrollTop: el.scrollTop, stickToLatest: nearLatest, mode, anchorId, anchorOffset };
 }
 
 function restoreLogScroll(id, state, defaultMode = 'bottom') {
   const el = document.getElementById(id);
   if (!el) return;
   const mode = (state && state.mode) || defaultMode;
-  if (!state || state.stickToLatest) {
-    el.scrollTop = mode === 'bottom' ? el.scrollHeight : 0;
-  } else {
+  const apply = () => {
+    if (!state || state.stickToLatest) {
+      el.scrollTop = mode === 'bottom' ? el.scrollHeight : 0;
+      return;
+    }
+    if (state.anchorId) {
+      const anchor = el.querySelector(`[data-log-id="${CSS.escape(String(state.anchorId))}"]`);
+      if (anchor instanceof HTMLElement) {
+        el.scrollTop = Math.max(0, anchor.offsetTop - (Number(state.anchorOffset) || 0));
+        return;
+      }
+    }
     el.scrollTop = state.scrollTop;
-  }
+  };
+  apply();
+  // Second pass after images/fonts/layout — keep the same row under the thumb.
+  requestAnimationFrame(apply);
 }
 
 function escapeHtml(value) {
@@ -1111,8 +1129,9 @@ function buildActivityLogHtml(activityLog, recentTrades) {
       const pnlClass =
         Number.isFinite(pnl) && pnl > 0 ? 'chip-positive' : Number.isFinite(pnl) && pnl < 0 ? 'chip-negative' : '';
       const kind = e.kind || 'info';
+      const rowId = escapeHtml(`${e.at || ''}-${kind}-${String(e.message || '').slice(0, 40)}`);
       return `
-        <div class="bot-log-row kind-${escapeHtml(kind)}">
+        <div class="bot-log-row kind-${escapeHtml(kind)}" data-log-id="${rowId}">
           <span class="bot-log-time">${escapeHtml(formatTradeTime(e.at))}</span>
           <span class="bot-log-msg">${escapeHtml(e.message || '')}</span>
           ${Number.isFinite(pnl) ? `<span class="bot-log-pnl ${pnlClass}">${escapeHtml(formatMoneyCents(pnl, { signed: true }))}</span>` : '<span class="bot-log-pnl"></span>'}
@@ -1426,11 +1445,64 @@ function wireSliderDisplays() {
 
 let botFormHydrating = false;
 let botAutoSaveTimer = null;
+const BOT_SETTINGS_LOCK_KEY = 'botSettingsLocked';
+
+function isBotSettingsLocked() {
+  try {
+    return localStorage.getItem(BOT_SETTINGS_LOCK_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function setBotSettingsLocked(locked) {
+  try {
+    localStorage.setItem(BOT_SETTINGS_LOCK_KEY, locked ? '1' : '0');
+  } catch {
+    // ignore quota / private mode
+  }
+  applyBotSettingsLockUi();
+}
+
+function applyBotSettingsLockUi() {
+  const locked = isBotSettingsLocked();
+  const fields = document.getElementById('bot-settings-fields');
+  if (fields) fields.classList.toggle('is-locked', locked);
+  const btn = document.getElementById('bot-settings-lock');
+  if (btn) {
+    btn.setAttribute('aria-pressed', locked ? 'true' : 'false');
+    btn.textContent = locked ? 'Locked — tap to edit' : 'Lock settings';
+  }
+  if (fields) {
+    fields.querySelectorAll('input, select, button.bot-strategy-tab').forEach((el) => {
+      if (el.id === 'bot-strategy-mode') return;
+      el.disabled = locked;
+    });
+  }
+  const saveBtn = document.getElementById('bot-settings-save');
+  if (saveBtn) saveBtn.disabled = locked;
+}
+
+function wireBotSettingsLock() {
+  const btn = document.getElementById('bot-settings-lock');
+  if (!btn || btn.dataset.wired === '1') return;
+  btn.dataset.wired = '1';
+  // Default locked so a redeploy can't leave sliders naked for a sleepy bump.
+  if (localStorage.getItem(BOT_SETTINGS_LOCK_KEY) == null) {
+    setBotSettingsLocked(true);
+  } else {
+    applyBotSettingsLockUi();
+  }
+  btn.addEventListener('click', () => {
+    setBotSettingsLocked(!isBotSettingsLocked());
+  });
+}
 
 function scheduleAutoSaveBotConfig() {
-  if (botFormHydrating) return;
+  if (botFormHydrating || isBotSettingsLocked()) return;
   clearTimeout(botAutoSaveTimer);
   botAutoSaveTimer = setTimeout(() => {
+    if (isBotSettingsLocked()) return;
     saveBotConfig({ auto: true });
   }, 700);
 }
@@ -1507,7 +1579,10 @@ async function loadBotConfigIntoForm() {
     const settleMax = document.getElementById('bot-settle-max');
     if (settleMax) settleMax.value = c.settleEntryMaxCents != null ? c.settleEntryMaxCents : 92;
     const settleStop = document.getElementById('bot-settle-stoploss');
-    if (settleStop) settleStop.value = c.settleStopLossCents != null ? c.settleStopLossCents : 20;
+    if (settleStop) {
+      const raw = c.settleStopLossCents != null ? Number(c.settleStopLossCents) : 20;
+      settleStop.value = Math.max(8, Number.isFinite(raw) ? raw : 20);
+    }
     const settleMaxMin = document.getElementById('bot-settle-maxmin');
     if (settleMaxMin) settleMaxMin.value = c.settleMaxMinutesToOpen != null ? c.settleMaxMinutesToOpen : 12;
     const settleCd = document.getElementById('bot-settle-cooldown');
@@ -1608,12 +1683,20 @@ async function loadBotConfigIntoForm() {
     // Bot likely disabled or engine unreachable — form just stays blank.
   } finally {
     botFormHydrating = false;
+    applyBotSettingsLockUi();
   }
 }
 
 async function saveBotConfig(opts = {}) {
   const { engineUrl } = loadSettings();
   const feedback = document.getElementById('bot-settings-feedback');
+  if (isBotSettingsLocked()) {
+    if (feedback) {
+      feedback.textContent = 'Settings are locked — tap “Locked — tap to edit” before changing anything.';
+      feedback.style.color = 'var(--wait)';
+    }
+    return;
+  }
   const skimMode = document.getElementById('bot-skim-mode').value;
   const skimAmount = parseFloat(document.getElementById('bot-skim-amount').value);
   const payload = {
@@ -1627,7 +1710,10 @@ async function saveBotConfig(opts = {}) {
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '85'),
     settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '92'),
-    settleStopLossCents: parseFloat(document.getElementById('bot-settle-stoploss')?.value || '20'),
+    settleStopLossCents: Math.max(
+      8,
+      parseFloat(document.getElementById('bot-settle-stoploss')?.value || '20') || 20
+    ),
     settleMaxMinutesToOpen: parseFloat(document.getElementById('bot-settle-maxmin')?.value || '12'),
     settlePostStopSameSideCooldownMinutes: parseFloat(
       document.getElementById('bot-settle-cooldown')?.value || '5'
@@ -2074,6 +2160,7 @@ function wireBotUI() {
   document.getElementById('mode-btn-live').addEventListener('click', () => switchMode('live'));
   wireBotStrategyTabs();
   wireBotConfigAutoSave();
+  wireBotSettingsLock();
   wireSliderDisplays();
 }
 

@@ -245,8 +245,13 @@
       </div>
 
       <div class="bot-section">
-        <h3>Settings</h3>
-        <p class="settings-hint">These apply immediately — no restart needed. Trading mode (paper/live) is set on the server for safety and can't be changed here.</p>
+        <h3>Settings
+          <button type="button" id="bot-settings-lock" class="bot-settings-lock" aria-pressed="false" title="Lock settings so sliders can't be bumped by accident">
+            Unlock to edit
+          </button>
+        </h3>
+        <p class="settings-hint">These apply immediately — no restart needed. Lock settings when you're done so a sleepy thumb can't drop stop-loss to 1¢. Trading mode (paper/live) is set on the server and can't be changed here.</p>
+        <div id="bot-settings-fields">
         <div class="bot-strategy-tabs" role="tablist" aria-label="Strategy">
           <button type="button" class="bot-strategy-tab active" data-strategy="edge" id="bot-tab-edge">Edge</button>
           <button type="button" class="bot-strategy-tab" data-strategy="settle" id="bot-tab-settle">Settle (85–95¢)</button>
@@ -352,10 +357,10 @@
           </label>
           <label>Settle stop-loss (¢ below entry)
             <div class="slider-row">
-              <input id="bot-settle-stoploss" type="range" min="1" max="30" step="1" />
+              <input id="bot-settle-stoploss" type="range" min="8" max="30" step="1" />
               <span class="slider-value" id="bot-settle-stoploss-value">—</span>
             </div>
-            <span class="field-hint">Default 20¢ — absorbs mid-band noise wicks. Entry band / min upside stay separate (still skip ≥94¢ tickets).</span>
+            <span class="field-hint">Default 20¢ — absorbs mid-band noise wicks. Floor is 8¢ so a fat-finger can't set 1–2¢ stops. Lock settings when done editing.</span>
           </label>
           <label>Entry-tiered exits (TP / stale / stuck by entry)
             <select id="bot-settle-tiered">
@@ -473,6 +478,7 @@
             <span class="field-hint" id="bot-skim-hint">Insurance: each win is 20% Insurance / 40% Wallet / 40% Available. Arms at the arm amount (default $10); stays usable down to the $6 floor. Soft fill ceiling $15 — excess 20% skim → Available (fund stays as cushion). Below floor, Available takes losses until re-armed at arm again.</span>
           </label>
         </div>
+        </div><!-- #bot-settings-fields -->
         <div class="settings-actions">
           <button class="btn-secondary" id="bot-settings-refresh">Refresh</button>
           <button class="btn-primary" id="bot-settings-save">Save settings</button>
