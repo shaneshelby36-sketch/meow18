@@ -316,6 +316,8 @@ const MODEL_MIN_TP_CENTS_DEFAULT = 3;
 const MODEL_BANK_GREEN_CENTS_DEFAULT = 8;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
+/** Model entries below this ask use ¼ stake (uncertain sizing). */
+const MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT = 70;
 
 /**
  * Live probs of the active window clearly against the held side (not the frozen lock).
@@ -5764,11 +5766,11 @@ class TradingBot {
     }
 
     const leanStrength = Math.abs(Number(window.probabilityUp) - 50) || 1;
-    // Uncertain flag: confidence near floor, lean weak, or cheap-band entry.
+    // Uncertain flag: confidence near floor, lean weak, or sub-70¢ entry.
     const confNearFloor = window.confidence < minConf + 5;
     const leanWeak = leanStrength < 8;
-    const cheapBand = priceCents < MODEL_MIN_ENTRY_DEFAULT_CENTS;
-    const uncertain = !!(confNearFloor || leanWeak || cheapBand);
+    const lowPrice = priceCents < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
+    const uncertain = !!(confNearFloor || leanWeak || lowPrice);
     return {
       symbol,
       market,
