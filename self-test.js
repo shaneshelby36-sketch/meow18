@@ -5316,8 +5316,8 @@ async function testModelStrategy() {
   checkEq(MODEL_MAX_ENTRY_DEFAULT_CENTS, 93, 'model max entry default 93¢');
   checkEq(MODEL_MIN_ENTRY_DEFAULT_CENTS, 45, 'model min entry default 45¢');
   checkEq(MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, 25, 'perfect floor 25¢');
-  checkEq(MODEL_TRAIL_CENTS_DEFAULT, 3, 'trail off peak 3¢');
-  checkEq(MODEL_MAX_ADVERSE_CENTS_DEFAULT, 8, 'dip stop default −8¢ from entry');
+  checkEq(MODEL_TRAIL_CENTS_DEFAULT, 4, 'trail off peak 4¢');
+  checkEq(MODEL_MAX_ADVERSE_CENTS_DEFAULT, 12, 'dip stop default −12¢ from entry');
 
   check(
     !modelPriceAllowed(30, win(60, 70), {}).ok,
@@ -5440,7 +5440,7 @@ async function testModelStrategy() {
         yes_bid: 66,
         no_bid: 34,
       }),
-      { strategyMode: 'model', modelMinHoldSeconds: 0, modelTrailCents: 3 }
+      { strategyMode: 'model', modelMinHoldSeconds: 0, modelTrailCents: 4 }
     );
     const trade = openTrade(bot, {
       strategy: 'model',
@@ -5467,17 +5467,17 @@ async function testModelStrategy() {
     checkEq(trade.exitPriceCents, 66, 'trail TP at live bid');
   }
 
-  // Dip stop: −8¢ from entry cuts even while lean still favors (no ride to 0)
+  // Dip stop: −12¢ from entry cuts even while lean still favors (no ride to 0)
   {
     const now = Date.now();
     const bot = makeBot(
       mockClient({
         status: 'open',
         close_time: new Date(now + 12 * 60 * 1000).toISOString(),
-        yes_bid: 66,
-        no_bid: 34,
+        yes_bid: 62,
+        no_bid: 38,
       }),
-      { strategyMode: 'model', modelMinHoldSeconds: 90, modelMaxAdverseCents: 8 }
+      { strategyMode: 'model', modelMinHoldSeconds: 90, modelMaxAdverseCents: 12 }
     );
     const trade = openTrade(bot, {
       strategy: 'model',
@@ -5500,11 +5500,46 @@ async function testModelStrategy() {
     };
     check(modelLiveLeanStillFavors(win(62, 80), 'yes', 3), 'lean still favors during dip');
     await bot._manageOpenTrade(trade, stillUp);
-    checkEq(trade.exitReason, 'model_dip_stop', '−8¢ adverse → dip stop (ignores min-hold + lean)');
-    checkEq(trade.exitPriceCents, 66, 'dip stop sells live bid');
+    checkEq(trade.exitReason, 'model_dip_stop', '−12¢ adverse → dip stop (ignores min-hold + lean)');
+    checkEq(trade.exitPriceCents, 62, 'dip stop sells live bid');
   }
 
-  // Dip stop does not fire under threshold (lean path still available)
+  // Small underwater during min-hold does NOT trail-cut (avoids 5s noise flips)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 49,
+        no_bid: 51,
+      }),
+      { strategyMode: 'model', modelMinHoldSeconds: 90, modelMaxAdverseCents: 12, modelTrailCents: 4 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 54,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 7_000,
+      peakHeldBidCents: 54,
+    });
+    const stillUp = {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(62, 80), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    };
+    await bot._manageOpenTrade(trade, stillUp);
+    checkEq(trade.status, 'open', '5¢ dip in first 90s holds (trail waits for min-hold)');
+  }
+
+  // Dip stop does not fire under threshold (lean path still available after hold)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -5514,7 +5549,7 @@ async function testModelStrategy() {
         yes_bid: 68,
         no_bid: 32,
       }),
-      { strategyMode: 'model', modelMinHoldSeconds: 0, modelMaxAdverseCents: 8 }
+      { strategyMode: 'model', modelMinHoldSeconds: 0, modelMaxAdverseCents: 12, modelTrailCents: 4 }
     );
     const trade = openTrade(bot, {
       strategy: 'model',
@@ -5536,8 +5571,8 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, stillUp);
-    // 74→68 = 6¢ < 8 dip; trail 74→68 = 6 ≥ 3 → lean_flip via trail
-    checkEq(trade.exitReason, 'model_lean_flip', 'sub-threshold dip can still trail-cut');
+    // 74→68 = 6¢ < 12 dip; trail 74→68 = 6 ≥ 4 → lean_flip via trail after hold
+    checkEq(trade.exitReason, 'model_lean_flip', 'sub-threshold dip can still trail-cut after hold');
   }
 
   // Lean softening while flat → breakeven before hard flip
