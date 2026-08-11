@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 31;
+const SETTINGS_DEFAULTS_VERSION = 32;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -674,8 +674,8 @@ const MODEL_TRAIL_CENTS_DEFAULT = 0;
 const MODEL_SOFT_LEAN_MARGIN_DEFAULT = 3;
 /** Soft dip (−N¢ + lean fade). 0 = off — price stops were hurting more than helping. */
 const MODEL_MAX_ADVERSE_CENTS_DEFAULT = 0;
-/** Hard cliff only — last resort vs ride-to-0. */
-const MODEL_HARD_ADVERSE_CENTS_DEFAULT = 25;
+/** Hard cliff (−N¢). 0 = off — bounce stop-outs were the main bleed; follow lean only. */
+const MODEL_HARD_ADVERSE_CENTS_DEFAULT = 0;
 /** Edge: final-N-minute cash-out allows up to this much position PnL loss (¢). */
 const EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS = 75;
 const EDGE_PRE_CLOSE_MINUTES_DEFAULT = 5;
@@ -4108,11 +4108,11 @@ class TradingBot {
       return;
     }
 
-    // Model: follow the window lean (loose). Bank decent green. Hard cliff only.
+    // Model: follow the window lean only — no price stops (bounce stop-outs bled more
+    // than they saved). Bank decent green. Else hold toward settle unless lean flips.
     // — ≥8¢ green → take_profit (don't wait for lean to flip)
     // — lean against / weak conf → TP (≥3¢) / BE / lean_flip
-    // — soft dip / trail / soften removed (were stopping winners and chopping)
-    // — hard −25¢ cliff only as last resort vs settle-to-0
+    // — hard/soft ¢ stops off by default (config can re-enable)
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
       const entry = Number(trade.entryPriceCents);

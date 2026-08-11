@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint">Windows: UP→YES / DOWN→NO. Entries <strong>45–93¢</strong> (25–44¢ if conf≥80% + lean≥15). No entries in last <strong>1.5m</strong>. Follows lean (lock / live / weak conf). Banks <strong>≥8¢ green</strong> without waiting; lean-exit TP ≥3¢. Soft stops off — hard cliff only at <strong>−25¢</strong>. ~60s min hold; ~3m sit-out.</p>
+          <p class="settings-hint">Windows: UP→YES / DOWN→NO. Entries <strong>45–93¢</strong> (25–44¢ if conf≥80% + lean≥15). No entries in last <strong>1.5m</strong>. Follows lean only (lock / live / weak conf) — <strong>no ¢ stop-loss</strong> (bounce cuts off). Banks <strong>≥8¢ green</strong>; lean-exit TP ≥3¢. ~60s min hold; ~3m sit-out.</p>
           <label>Min confidence
             <div class="slider-row">
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />

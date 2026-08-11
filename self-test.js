@@ -5318,7 +5318,7 @@ async function testModelStrategy() {
   checkEq(MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, 25, 'perfect floor 25¢');
   checkEq(MODEL_TRAIL_CENTS_DEFAULT, 0, 'trail off by default (simplified exits)');
   checkEq(MODEL_MAX_ADVERSE_CENTS_DEFAULT, 0, 'soft dip off by default');
-  checkEq(MODEL_HARD_ADVERSE_CENTS_DEFAULT, 25, 'hard cliff −25¢ last resort');
+  checkEq(MODEL_HARD_ADVERSE_CENTS_DEFAULT, 0, 'hard cliff off — no bounce stop-outs');
   checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 8, 'bank ≥8¢ green without lean flip');
   checkEq(MODEL_LIVE_LEAN_MARGIN_DEFAULT, 5, 'live lean margin 5pts');
 
@@ -5469,21 +5469,21 @@ async function testModelStrategy() {
     checkEq(trade.exitPriceCents, 64, 'bank TP at live bid');
   }
 
-  // Mid underwater with firm lean holds (no soft/trail stops)
+  // Mid underwater with firm lean holds (no price stops)
   {
     const now = Date.now();
     const bot = makeBot(
       mockClient({
         status: 'open',
         close_time: new Date(now + 12 * 60 * 1000).toISOString(),
-        yes_bid: 62,
-        no_bid: 38,
+        yes_bid: 48,
+        no_bid: 52,
       }),
       {
         strategyMode: 'model',
         modelMinHoldSeconds: 0,
         modelMaxAdverseCents: 0,
-        modelHardAdverseCents: 25,
+        modelHardAdverseCents: 0,
       }
     );
     const trade = openTrade(bot, {
@@ -5506,10 +5506,10 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, stillUp);
-    checkEq(trade.status, 'open', '−12¢ with firm lean holds (follow model, no soft stop)');
+    checkEq(trade.status, 'open', 'deep dip with firm lean holds (no ¢ stop)');
   }
 
-  // Hard cliff −25¢ cuts even with firm lean
+  // Hard cliff can still be enabled via config when wanted
   {
     const now = Date.now();
     const bot = makeBot(
@@ -5546,7 +5546,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, stillUp);
-    checkEq(trade.exitReason, 'model_dip_stop', '−25¢ hard cliff cuts despite firm lean');
+    checkEq(trade.exitReason, 'model_dip_stop', 'config hard cliff still works when set');
     checkEq(trade.exitPriceCents, 48, 'hard cliff at live bid');
   }
 
