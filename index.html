@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> plan: see lean correlate → buy → bank quick TP → if price returns under 50¢, re-cross and repeat. Runs <strong>2–3+ coins at once</strong> (max positions). After first full round-trip, confirm gate (YES &amp; NO): under 50 → cross → continue → enter; each exit resets so it won't rebuy the same level. ~30s sit-out after exit (scalp recycle). Lock + live lean ≥8pts. TP +7¢ then stall. Final 5m: high possibility may extend; else exit.</p>
+          <p class="settings-hint"><strong>MODEL</strong> plan: see lean correlate → buy → bank quick TP → if price returns under 50¢, re-cross and repeat. Runs <strong>2–3+ coins at once</strong> (max positions). Confirm gate is off until the first MODEL buy+sell of this run, then (YES &amp; NO): under 50 → cross → continue → enter; each exit resets. ~30s sit-out after exit. Lock + live lean ≥8pts. TP +7¢ then stall. Final 5m: high possibility may extend; else exit.</p>
 
           <label><strong>MODEL</strong> min confidence
             <div class="slider-row">
@@ -356,7 +356,7 @@
               <input id="bot-model-confirm-cross" type="range" min="0" max="65" step="1" />
               <span class="slider-value" id="bot-model-confirm-cross-value">—</span>
             </div>
-            <span class="field-hint">After the first full MODEL buy+sell, must see ask <strong>below</strong> this then cross it (YES and NO). Each exit resets — can't rebuy where you just were. Default <strong>50¢</strong>. <strong>0 = off</strong>.</span>
+            <span class="field-hint">Rule level only — gate stays <strong>off</strong> until a MODEL buy+sell closes in this run, then enforces: ask <strong>below</strong> this → cross → continue (YES and NO). Each exit resets. Default <strong>50¢</strong>. <strong>0 = never use gate</strong>.</span>
           </label>
 
           <label><strong>MODEL</strong> max run after cross (¢)

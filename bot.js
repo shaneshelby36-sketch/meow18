@@ -2213,6 +2213,9 @@ class TradingBot {
     this._entryMissSessionClose = Object.create(null);
     // Model confirm gate: ticker:side → { seenBelow, armed, crossAsk, peakAsk, lastAsk, closeTime }
     this._modelConfirmGates = Object.create(null);
+    // Confirm rule stays OFF until a MODEL buy+sell closes in this process.
+    // Old ledger history must not arm it on reboot (that felt like "always on").
+    this._modelConfirmGateArmed = false;
     const runState = loadRunState();
     this.isRunning = runState.isRunning !== false;
     this.runningSince = this.isRunning ? (Number(runState.runningSince) || Date.now()) : null;
@@ -5896,27 +5899,20 @@ class TradingBot {
   }
 
   /**
-   * Confirm gate stays off until at least one MODEL buy+sell has completed
-   * (avoids blocking the very first trade of a session).
+   * Confirm gate stays off until a MODEL buy+sell closes in this run.
+   * (Not ledger history — that would arm it on every reboot after trade #1.)
    */
   _hasCompletedModelRoundTrip() {
-    const trades = (this.ledger && this.ledger.trades) || [];
-    return trades.some(
-      (t) =>
-        t &&
-        String(t.strategy || '').toLowerCase() === 'model' &&
-        String(t.status || '').toLowerCase() === 'closed' &&
-        Number.isFinite(Number(t.entryPriceCents)) &&
-        Number.isFinite(Number(t.exitPriceCents))
-    );
+    return this._modelConfirmGateArmed === true;
   }
 
   /**
-   * After a MODEL close, wipe confirm state for that market (YES and NO).
-   * Forces a fresh under-50¢ print before rebuying — no re-entry where we just were.
+   * After a MODEL close, arm the confirm rule (if configured) and wipe per-market
+   * gate state so rebuy needs a fresh under-50¢ print — no re-entry where we just were.
    */
   _resetModelConfirmGatesForTrade(trade) {
     if (!trade || !isModelTrade(trade)) return;
+    this._modelConfirmGateArmed = true;
     if (!this._modelConfirmGates) return;
     const ticker = String(trade.ticker || '');
     const symbol = String(trade.symbol || '').toUpperCase();

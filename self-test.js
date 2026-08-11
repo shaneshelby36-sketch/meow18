@@ -5322,6 +5322,59 @@ async function testModelStrategy() {
   checkEq(MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, 15, 'confirm max extension +15¢');
   checkEq(MODEL_TRAIL_CENTS_DEFAULT, 0, 'trail off by default (simplified exits)');
 
+  // Confirm gate: OFF until a MODEL close in this run (old ledger must not arm it)
+  {
+    const closeMs = Date.now() + 12 * 60 * 1000;
+    const bot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-WARMUP',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(closeMs).toISOString(),
+        yes_bid: 84,
+        yes_ask: 86,
+        no_bid: 14,
+        no_ask: 16,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinConfidence: 55,
+        modelMinEntryCents: 60,
+        modelConfirmCrossCents: 50,
+        modelConfirmMaxExtensionCents: 15,
+        modelConfirmMinContinueCents: 2,
+      }
+    );
+    // Old closed MODEL on ledger — must NOT arm the gate.
+    bot.ledger.trades.unshift({
+      id: 'old-model-rt',
+      strategy: 'model',
+      status: 'closed',
+      symbol: 'SOL',
+      side: 'yes',
+      entryPriceCents: 60,
+      exitPriceCents: 70,
+      closedAt: Date.now() - 86_400_000,
+    });
+    const preds = {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: {
+          w5: { ...win(70, 80), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    };
+    const warmup = await bot._evaluateSymbolForModel('ETH', preds);
+    check(
+      warmup && warmup.side === 'yes' && warmup.priceCents === 86,
+      'confirm gate off before first MODEL close this run (even with old ledger RT)'
+    );
+    checkEq(bot._modelConfirmGateArmed, false, 'armed flag still false');
+  }
+
   // Confirm gate: must see below 50, cross, then continue — not buy the top
   {
     const closeMs = Date.now() + 12 * 60 * 1000;
@@ -5345,17 +5398,8 @@ async function testModelStrategy() {
         modelConfirmMinContinueCents: 2,
       }
     );
-    // Gate only arms after one full MODEL buy+sell.
-    bot.ledger.trades.unshift({
-      id: 'seed-model-rt',
-      strategy: 'model',
-      status: 'closed',
-      symbol: 'SOL',
-      side: 'yes',
-      entryPriceCents: 60,
-      exitPriceCents: 70,
-      closedAt: Date.now() - 60_000,
-    });
+    // Gate only arms after a MODEL buy+sell in this run (not old ledger).
+    bot._modelConfirmGateArmed = true;
     const preds = {
       ETH: {
         ready: true,
