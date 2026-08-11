@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 24;
+const SETTINGS_DEFAULTS_VERSION = 25;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -355,6 +355,77 @@ function modelLiveLeanMarginPct(config = {}) {
   return MODEL_LIVE_LEAN_MARGIN_DEFAULT;
 }
 
+function modelTrailCents(config = {}) {
+  const n = Number(config.modelTrailCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_TRAIL_CENTS_DEFAULT;
+}
+
+function modelSoftLeanMarginPct(config = {}) {
+  const n = Number(config.modelSoftLeanMarginPct);
+  if (Number.isFinite(n) && n >= 0) return n;
+  return MODEL_SOFT_LEAN_MARGIN_DEFAULT;
+}
+
+/** Held side still has a clear live lead (used to detect softening before a hard flip). */
+function modelLiveLeanStillFavors(window, side, keepMargin = MODEL_SOFT_LEAN_MARGIN_DEFAULT) {
+  if (!window) return false;
+  const up = Number(window.probabilityUp);
+  const down = Number(window.probabilityDown);
+  if (!Number.isFinite(up) || !Number.isFinite(down)) return false;
+  const margin = Number.isFinite(Number(keepMargin)) ? Math.max(0, Number(keepMargin)) : MODEL_SOFT_LEAN_MARGIN_DEFAULT;
+  if (side === 'yes') return up >= down + margin;
+  if (side === 'no') return down >= up + margin;
+  return false;
+}
+
+/**
+ * Normal entries need ≥ modelMinEntry (45¢). Below that only if confidence + lean
+ * are especially strong, and never below the perfect floor (25¢).
+ */
+function modelPriceAllowed(priceCents, window, config = {}) {
+  const price = Number(priceCents);
+  if (!Number.isFinite(price) || price < 1 || price > 99) {
+    return { ok: false, reason: 'invalid price' };
+  }
+  const maxEntry = Number.isFinite(Number(config.modelMaxEntryCents))
+    ? Number(config.modelMaxEntryCents)
+    : MODEL_MAX_ENTRY_DEFAULT_CENTS;
+  if (maxEntry > 0 && price > maxEntry) {
+    return { ok: false, reason: `above model max entry ${maxEntry}¢` };
+  }
+  const minEntry = Number.isFinite(Number(config.modelMinEntryCents))
+    ? Number(config.modelMinEntryCents)
+    : MODEL_MIN_ENTRY_DEFAULT_CENTS;
+  if (!(minEntry > 0) || price >= minEntry) return { ok: true };
+
+  const perfectFloor = Number.isFinite(Number(config.modelPerfectMinEntryCents))
+    ? Number(config.modelPerfectMinEntryCents)
+    : MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS;
+  if (price < perfectFloor) {
+    return {
+      ok: false,
+      reason: `below ${minEntry}¢ and under perfect floor ${perfectFloor}¢`,
+    };
+  }
+  const needConf = Number.isFinite(Number(config.modelPerfectConfidence))
+    ? Number(config.modelPerfectConfidence)
+    : MODEL_PERFECT_CONFIDENCE_DEFAULT;
+  const needLean = Number.isFinite(Number(config.modelPerfectLeanPts))
+    ? Number(config.modelPerfectLeanPts)
+    : MODEL_PERFECT_LEAN_DEFAULT;
+  const conf = window && Number(window.confidence);
+  const lean = window ? Math.abs(Number(window.probabilityUp) - 50) : NaN;
+  if (Number.isFinite(conf) && conf >= needConf && Number.isFinite(lean) && lean >= needLean) {
+    return { ok: true, perfect: true };
+  }
+  return {
+    ok: false,
+    reason: `below ${minEntry}¢ (need conf≥${needConf}% and lean≥${needLean}pts for exception)`,
+  };
+}
+
 /**
  * After a Model BE/TP/lean-flip on this coin, block new model entries until cooldown elapses.
  */
@@ -559,8 +630,18 @@ const STRATEGY_RETRO_MID_CEILING_MINUTES = 8.5;
 const EDGE_MAX_ENTRY_DEFAULT_CENTS = 95;
 /** Model: never buy richer than this (leaves a little room to 100). */
 const MODEL_MAX_ENTRY_DEFAULT_CENTS = 93;
-/** Model: never buy cheaper than this — blocks 1¢ lottery tickets. */
-const MODEL_MIN_ENTRY_DEFAULT_CENTS = 20;
+/** Model: never buy cheaper than this unless the call is especially perfect. */
+const MODEL_MIN_ENTRY_DEFAULT_CENTS = 45;
+/** Absolute floor even when the call is “perfect.” */
+const MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS = 25;
+/** Confidence required to allow entries below the normal min. */
+const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
+/** Lean strength (|probUp−50|) required for perfect-entry exception. */
+const MODEL_PERFECT_LEAN_DEFAULT = 15;
+/** Trail off peak (¢) — bank/cut before a dump finishes. */
+const MODEL_TRAIL_CENTS_DEFAULT = 4;
+/** Soft “still with us” margin — lose this lead while flat/green → bank early. */
+const MODEL_SOFT_LEAN_MARGIN_DEFAULT = 3;
 /** Edge: final-N-minute cash-out allows up to this much position PnL loss (¢). */
 const EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS = 75;
 const EDGE_PRE_CLOSE_MINUTES_DEFAULT = 5;
@@ -998,8 +1079,13 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMinConfidence',
   'modelMaxEntryCents',
   'modelMinEntryCents',
+  'modelPerfectMinEntryCents',
+  'modelPerfectConfidence',
+  'modelPerfectLeanPts',
   'modelMinTpCents',
   'modelLiveLeanMarginPct',
+  'modelSoftLeanMarginPct',
+  'modelTrailCents',
   'modelMinHoldSeconds',
   'modelPostExitCooldownMinutes',
   'stakeDollars',
@@ -1823,8 +1909,13 @@ class TradingBot {
       modelMinConfidence: 55,
       modelMaxEntryCents: MODEL_MAX_ENTRY_DEFAULT_CENTS,
       modelMinEntryCents: MODEL_MIN_ENTRY_DEFAULT_CENTS,
+      modelPerfectMinEntryCents: MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS,
+      modelPerfectConfidence: MODEL_PERFECT_CONFIDENCE_DEFAULT,
+      modelPerfectLeanPts: MODEL_PERFECT_LEAN_DEFAULT,
       modelMinTpCents: MODEL_MIN_TP_CENTS_DEFAULT,
       modelLiveLeanMarginPct: MODEL_LIVE_LEAN_MARGIN_DEFAULT,
+      modelSoftLeanMarginPct: MODEL_SOFT_LEAN_MARGIN_DEFAULT,
+      modelTrailCents: MODEL_TRAIL_CENTS_DEFAULT,
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
@@ -3849,9 +3940,9 @@ class TradingBot {
     }
 
     const heldSideBidCents = this._heldSideBidCents(trade, market);
-    // Settle weak-ticket tracking: peak held bid; confirm threshold turns off lean-switch.
+    // Peak held bid: settle (weak-ticket) + model (trail before dumps).
     if (
-      isSettleTrade(trade) &&
+      (isSettleTrade(trade) || isModelTrade(trade)) &&
       heldSideBidCents != null &&
       Number.isFinite(heldSideBidCents) &&
       heldSideBidCents >= 1 &&
@@ -3974,9 +4065,9 @@ class TradingBot {
       return;
     }
 
-    // Model: window lean + don't lose much + model-driven bank.
-    // Live lean needs a clear margin (not 50.1/49.9). Min hold before early exits.
-    // TP only with ≥N¢ green — tiny greens hold through noise.
+    // Model: window lean + predict falls early (soften / trail) + don't lose much.
+    // Flat/green: bank when lean softens, confidence drops, locks flip, or bid trails peak.
+    // Red: cut on hard live lean, lock flip, weak conf, or trail off peak.
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
       const entry = Number(trade.entryPriceCents);
@@ -3988,11 +4079,11 @@ class TradingBot {
       const minTp = modelMinTpCents(this.config);
       const flatOrGreen =
         bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents >= entry;
-      // Bankable green only — +1¢/+2¢ is noise, not a take-profit.
       const isBankableGreen =
         flatOrGreen && heldSideBidCents >= entry + Math.max(1, minTp || 0);
       const exactlyFlat =
         bidOk && Number.isFinite(entry) && Math.round(heldSideBidCents) === Math.round(entry);
+      const tinyGreen = flatOrGreen && !exactlyFlat && !isBankableGreen;
       const underwater = bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents < entry;
       const againstLocked =
         picked &&
@@ -4002,6 +4093,10 @@ class TradingBot {
         picked &&
         picked.window &&
         modelLiveLeanAgainstHeld(picked.window, trade.side, modelLiveLeanMarginPct(this.config));
+      const leanSoftening =
+        picked &&
+        picked.window &&
+        !modelLiveLeanStillFavors(picked.window, trade.side, modelSoftLeanMarginPct(this.config));
       const minConf = Number.isFinite(Number(this.config.modelMinConfidence))
         ? Number(this.config.modelMinConfidence)
         : 55;
@@ -4011,31 +4106,53 @@ class TradingBot {
         Number.isFinite(picked.window.confidence) &&
         picked.window.confidence < minConf;
 
+      const peakRaw = Number(trade.peakHeldBidCents);
+      const peak =
+        Number.isFinite(peakRaw) && peakRaw > 0
+          ? peakRaw
+          : Number.isFinite(entry)
+            ? entry
+            : null;
+      const trailNeed = modelTrailCents(this.config);
+      const trailDrop =
+        bidOk &&
+        peak != null &&
+        trailNeed > 0 &&
+        peak - heldSideBidCents >= trailNeed;
+
       const openedAt = Number(trade.openedAt);
       const heldMs = Number.isFinite(openedAt) ? now - openedAt : Infinity;
       const minHold = modelMinHoldMs(this.config);
       const heldLongEnough = minHold <= 0 || heldMs >= minHold;
 
-      // Locked window switch can exit anytime after min hold; live/weak need hold too.
-      const softExit = (liveAgainst || weakConf) && heldLongEnough;
-      const hardExit = againstLocked && heldLongEnough;
-      const modelSaysExit = hardExit || softExit;
+      // Predictive bank while still flat/green — don't wait for a hard lean flip into red.
+      const predictFall =
+        heldLongEnough && (leanSoftening || trailDrop || weakConf || againstLocked || liveAgainst);
+      // Red cuts: hard signals + trail off peak (SOL 70→27 style).
+      const cutRed =
+        heldLongEnough && (againstLocked || liveAgainst || weakConf || trailDrop);
 
-      if (bidOk && modelSaysExit && isBankableGreen) {
+      if (bidOk && predictFall && isBankableGreen) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
         });
         return;
       }
-      // Exactly flat + exit signal → scratch. Tiny green (+1/+2) → hold for a real TP or red flip.
-      if (bidOk && modelSaysExit && exactlyFlat) {
+      // Tiny green but lean softening / trailing — bank the bid before it vanishes.
+      if (bidOk && predictFall && tinyGreen && (leanSoftening || trailDrop || againstLocked)) {
+        await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+      if (bidOk && predictFall && exactlyFlat) {
         const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
         await this._closePosition(trade, beFill, 'breakeven', {
           liveSellPriceCents: heldSideBidCents,
         });
         return;
       }
-      if (underwater && modelSaysExit) {
+      if (underwater && cutRed) {
         await this._closePosition(trade, heldSideBidCents, 'model_lean_flip', {
           liveSellPriceCents: heldSideBidCents,
         });
@@ -4450,20 +4567,21 @@ class TradingBot {
         return false;
       }
     } else if (isModel) {
-      const minEntry = Number.isFinite(Number(this.config.modelMinEntryCents))
-        ? Number(this.config.modelMinEntryCents)
-        : MODEL_MIN_ENTRY_DEFAULT_CENTS;
+      const perfectFloor = Number.isFinite(Number(this.config.modelPerfectMinEntryCents))
+        ? Number(this.config.modelPerfectMinEntryCents)
+        : MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS;
       const maxEntry = Number.isFinite(Number(this.config.modelMaxEntryCents))
         ? Number(this.config.modelMaxEntryCents)
         : MODEL_MAX_ENTRY_DEFAULT_CENTS;
-      if (minEntry > 0 && priceCents < minEntry) {
-        this.lastDecision =
-          `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: below model min entry ${minEntry}¢ (longshot ban).`;
-        return false;
-      }
       if (maxEntry > 0 && priceCents > maxEntry) {
         this.lastDecision =
           `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: above model max entry ${maxEntry}¢.`;
+        return false;
+      }
+      // Absolute floor; 25–44¢ only reaches here via evaluate's perfect-call exception.
+      if (perfectFloor > 0 && priceCents < perfectFloor) {
+        this.lastDecision =
+          `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: below model perfect floor ${perfectFloor}¢.`;
         return false;
       }
     } else {
@@ -4515,8 +4633,7 @@ class TradingBot {
       engineProbability,
       engineConfidence,
       status: 'open',
-      // Settle: peak held bid for weak-ticket lean-switch (confirm at 80¢).
-      ...(isSettle ? { peakHeldBidCents: Math.round(priceCents) } : {}),
+      ...(isSettle || isModel ? { peakHeldBidCents: Math.round(priceCents) } : {}),
       ...(isModel
         ? {
             modelWindowKey: modelWindowKey || null,
@@ -5557,20 +5674,9 @@ class TradingBot {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
       return null;
     }
-    const minEntry = Number.isFinite(Number(this.config.modelMinEntryCents))
-      ? Number(this.config.modelMinEntryCents)
-      : MODEL_MIN_ENTRY_DEFAULT_CENTS;
-    if (minEntry > 0 && priceCents < minEntry) {
-      this.lastDecision =
-        `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — below model min entry ${minEntry}¢ (skipping longshots).`;
-      return null;
-    }
-    const maxEntry = Number.isFinite(Number(this.config.modelMaxEntryCents))
-      ? Number(this.config.modelMaxEntryCents)
-      : MODEL_MAX_ENTRY_DEFAULT_CENTS;
-    if (maxEntry > 0 && priceCents > maxEntry) {
-      this.lastDecision =
-        `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — above model max entry ${maxEntry}¢.`;
+    const priceGate = modelPriceAllowed(priceCents, window, this.config);
+    if (!priceGate.ok) {
+      this.lastDecision = `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — ${priceGate.reason}.`;
       return null;
     }
 
@@ -6238,15 +6344,24 @@ module.exports = {
   modelWindowDirection,
   modelDirectionAgainstHeld,
   modelLiveLeanAgainstHeld,
+  modelLiveLeanStillFavors,
+  modelPriceAllowed,
   checkModelPostExitCooldown,
   modelMinHoldMs,
   modelPostExitCooldownMs,
   modelMinTpCents,
   modelLiveLeanMarginPct,
+  modelSoftLeanMarginPct,
+  modelTrailCents,
   MODEL_LIVE_LEAN_MARGIN_DEFAULT,
   MODEL_MIN_HOLD_MS_DEFAULT,
   MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT,
   MODEL_MIN_TP_CENTS_DEFAULT,
+  MODEL_TRAIL_CENTS_DEFAULT,
+  MODEL_SOFT_LEAN_MARGIN_DEFAULT,
+  MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS,
+  MODEL_PERFECT_CONFIDENCE_DEFAULT,
+  MODEL_PERFECT_LEAN_DEFAULT,
   isSettleTieredExitsEnabled,
   settleExitPlan,
   settleExitTiersForDashboard,
