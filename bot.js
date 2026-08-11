@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 25;
+const SETTINGS_DEFAULTS_VERSION = 26;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -634,6 +634,8 @@ const MODEL_MAX_ENTRY_DEFAULT_CENTS = 93;
 const MODEL_MIN_ENTRY_DEFAULT_CENTS = 45;
 /** Absolute floor even when the call is “perfect.” */
 const MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS = 25;
+/** Don't open Model entries in the last this many minutes (freeze-into-settle). */
+const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 1.5;
 /** Confidence required to allow entries below the normal min. */
 const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
@@ -1088,6 +1090,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelTrailCents',
   'modelMinHoldSeconds',
   'modelPostExitCooldownMinutes',
+  'modelMinMinutesToOpen',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -1918,6 +1921,7 @@ class TradingBot {
       modelTrailCents: MODEL_TRAIL_CENTS_DEFAULT,
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
+      modelMinMinutesToOpen: MODEL_MIN_MINUTES_TO_OPEN_DEFAULT,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
       stopRecoveryCents: 6,
@@ -4527,8 +4531,16 @@ class TradingBot {
     // Bonus 3rd while a hold has tagged 90¢ — half stake (not stacked with NEAR ½).
     const thirdSlot = isSettle && this.openTrades.length >= 2 && this._hasTouched90Open();
     const minutesLeft = (closeAt - Date.now()) / 60000;
-    // Model has no min-minutes gate — schedule already picks the active window.
-    if (!isModel) {
+    if (isModel) {
+      const minMinutesToOpen = Number.isFinite(Number(this.config.modelMinMinutesToOpen))
+        ? Number(this.config.modelMinMinutesToOpen)
+        : MODEL_MIN_MINUTES_TO_OPEN_DEFAULT;
+      if (minMinutesToOpen > 0 && minutesLeft < minMinutesToOpen) {
+        this.lastDecision =
+          `Skipped ${symbol}: only ${minutesLeft.toFixed(1)} min left (model: no new entries in last ${minMinutesToOpen}m).`;
+        return false;
+      }
+    } else {
       const minMinutesToOpen = isSettle
         ? Number.isFinite(Number(this.config.settleMinMinutesToOpen))
           ? Number(this.config.settleMinMinutesToOpen)
@@ -5639,6 +5651,14 @@ class TradingBot {
     }
 
     const minutesRemaining = Math.max(0.1, (closeTime - now) / 60000);
+    const minMinutesToOpen = Number.isFinite(Number(this.config.modelMinMinutesToOpen))
+      ? Number(this.config.modelMinMinutesToOpen)
+      : MODEL_MIN_MINUTES_TO_OPEN_DEFAULT;
+    if (minMinutesToOpen > 0 && minutesRemaining < minMinutesToOpen) {
+      this.lastDecision =
+        `Waiting: ${symbol} model — only ${minutesRemaining.toFixed(1)} min left (no new entries in last ${minMinutesToOpen}m).`;
+      return null;
+    }
     const picked = pickModelWindow(assetPrediction, minutesRemaining);
     if (!picked || !picked.window || !picked.direction) {
       this.lastDecision = `Waiting: ${symbol} has no usable model window lean.`;
@@ -6362,6 +6382,7 @@ module.exports = {
   MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS,
   MODEL_PERFECT_CONFIDENCE_DEFAULT,
   MODEL_PERFECT_LEAN_DEFAULT,
+  MODEL_MIN_MINUTES_TO_OPEN_DEFAULT,
   isSettleTieredExitsEnabled,
   settleExitPlan,
   settleExitTiersForDashboard,
