@@ -304,6 +304,17 @@ function modelDirectionAgainstHeld(direction, side) {
   return (side === 'yes' && direction === 'DOWN') || (side === 'no' && direction === 'UP');
 }
 
+/** Live probs of the active window clearly against the held side (not the frozen lock). */
+function modelLiveLeanAgainstHeld(window, side) {
+  if (!window) return false;
+  const up = Number(window.probabilityUp);
+  const down = Number(window.probabilityDown);
+  if (!Number.isFinite(up) || !Number.isFinite(down)) return false;
+  if (side === 'yes') return down > up;
+  if (side === 'no') return up > down;
+  return false;
+}
+
 /** Entry-tiered settle TP/stale exits (default on). Off → stop + hold to settlement only. */
 function isSettleTieredExitsEnabled(config = {}) {
   const v = config.settleTieredExits;
@@ -3858,8 +3869,8 @@ class TradingBot {
     }
 
     // Model: window lean + don't lose much + model-driven bank.
-    // Green + lean against / confidence collapse → take_profit at bid (model TP).
-    // Flat + same → breakeven. Underwater + lean against → model_lean_flip.
+    // Exit when locked lean flips, live lean turns against, or confidence collapses.
+    // Green → take_profit at bid; flat → breakeven; red → model_lean_flip.
     // Else hold to settle.
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
@@ -3872,10 +3883,13 @@ class TradingBot {
       const flatOrGreen =
         bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents >= entry;
       const isGreen = flatOrGreen && heldSideBidCents > entry;
-      const against =
+      const underwater = bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents < entry;
+      const againstLocked =
         picked &&
         picked.direction &&
         modelDirectionAgainstHeld(picked.direction, trade.side);
+      const liveAgainst =
+        picked && picked.window && modelLiveLeanAgainstHeld(picked.window, trade.side);
       const minConf = Number.isFinite(Number(this.config.modelMinConfidence))
         ? Number(this.config.modelMinConfidence)
         : 55;
@@ -3885,9 +3899,9 @@ class TradingBot {
         Number.isFinite(picked.window.confidence) &&
         picked.window.confidence < minConf;
 
-      const modelSaysExit = against || weakConf;
+      // Locked flip, live lean flip, or confidence collapse — any is enough to leave.
+      const modelSaysExit = againstLocked || liveAgainst || weakConf;
       if (bidOk && modelSaysExit && isGreen) {
-        // Model TP: windows say leave while ahead — bank the live bid.
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
         });
@@ -3900,7 +3914,7 @@ class TradingBot {
         });
         return;
       }
-      if (bidOk && against) {
+      if (underwater && modelSaysExit) {
         await this._closePosition(trade, heldSideBidCents, 'model_lean_flip', {
           liveSellPriceCents: heldSideBidCents,
         });
@@ -6075,6 +6089,7 @@ module.exports = {
   pickModelWindow,
   modelWindowDirection,
   modelDirectionAgainstHeld,
+  modelLiveLeanAgainstHeld,
   isSettleTieredExitsEnabled,
   settleExitPlan,
   settleExitTiersForDashboard,
