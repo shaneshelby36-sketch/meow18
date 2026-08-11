@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 36;
+const SETTINGS_DEFAULTS_VERSION = 37;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -318,8 +318,12 @@ const MODEL_MIN_TP_CENTS_DEFAULT = 7;
 const MODEL_BANK_GREEN_CENTS_DEFAULT = 7;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
-/** Start near-settle closes this many minutes before window end. */
-const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 4;
+/** Final barrier (minutes left): low possibility exits; high can extend through. */
+const MODEL_LATE_BARRIER_MINUTES_DEFAULT = 5;
+/** Start near-settle closes this many minutes before window end (low-conviction path). */
+const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 5;
+/** Confidence required to extend a hold into/through the final 5-minute barrier. */
+const MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT = 78;
 /** After +bank green, TP if bid sits at peak this long without a new high (ms). */
 const MODEL_MOMENTUM_STALL_MS_DEFAULT = 12_000;
 /** After +bank green, TP if bid pulls back this many ¢ from peak. */
@@ -378,6 +382,30 @@ function modelSettleCloseMinutes(config = {}) {
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return n;
   return MODEL_SETTLE_CLOSE_MINUTES_DEFAULT;
+}
+
+function modelLateBarrierMinutes(config = {}) {
+  const n = Number(config.modelLateBarrierMinutes);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return n;
+  return MODEL_LATE_BARRIER_MINUTES_DEFAULT;
+}
+
+function modelLateExtendMinConfidence(config = {}) {
+  const n = Number(config.modelLateExtendMinConfidence);
+  if (Number.isFinite(n) && n > 0) return n;
+  return MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT;
+}
+
+/**
+ * High possibility to extend into the final barrier: live lean clearly favors
+ * the held side (entry-strength margin) and confidence clears the late bar.
+ */
+function modelLateExtendOk(window, side, config = {}) {
+  if (!window || (side !== 'yes' && side !== 'no')) return false;
+  const conf = Number(window.confidence);
+  if (!Number.isFinite(conf) || conf < modelLateExtendMinConfidence(config)) return false;
+  return modelLiveLeanStillFavors(window, side, modelEntryLiveLeanMarginPct(config));
 }
 
 function modelMomentumStallMs(config = {}) {
@@ -1180,6 +1208,8 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelBankGreenCents',
   'modelSettleCloseLossCents',
   'modelSettleCloseMinutes',
+  'modelLateBarrierMinutes',
+  'modelLateExtendMinConfidence',
   'modelMomentumStallSeconds',
   'modelMomentumPullbackCents',
   'modelLiveLeanMarginPct',
@@ -2020,6 +2050,8 @@ class TradingBot {
       modelBankGreenCents: MODEL_BANK_GREEN_CENTS_DEFAULT,
       modelSettleCloseLossCents: MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT,
       modelSettleCloseMinutes: MODEL_SETTLE_CLOSE_MINUTES_DEFAULT,
+      modelLateBarrierMinutes: MODEL_LATE_BARRIER_MINUTES_DEFAULT,
+      modelLateExtendMinConfidence: MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT,
       modelMomentumStallSeconds: MODEL_MOMENTUM_STALL_MS_DEFAULT / 1000,
       modelMomentumPullbackCents: MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT,
       modelLiveLeanMarginPct: MODEL_LIVE_LEAN_MARGIN_DEFAULT,
@@ -4204,7 +4236,7 @@ class TradingBot {
     // live lean still favors and bid keeps making highs; TP as soon as it stalls.
     // Lean exits only bank ≥7¢ green or flat BE — no micro TPs.
     // Underwater lean against → hold (no red lean-flip).
-    // Near settle (~4m): close unless losing >50¢.
+    // Final 5m: high possibility may extend; low possibility exits immediately.
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
       const entry = Number(trade.entryPriceCents);
@@ -4277,12 +4309,45 @@ class TradingBot {
         return;
       }
 
-      // Near settle: close unless deeply underwater (>50¢ loss).
+      // Final ~5m barrier: high possibility (strong live lean + high conf) may
+      // extend through; low possibility exits immediately.
+      const lateBarrierMins = modelLateBarrierMinutes(this.config);
       const settleCloseMins = modelSettleCloseMinutes(this.config);
       const settleCloseThresh = Number.isFinite(Number(this.config.modelSettleCloseLossCents))
         ? Number(this.config.modelSettleCloseLossCents)
         : MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT;
-      if (settleCloseMins > 0 && settleCloseThresh > 0 && minutesRemaining <= settleCloseMins && bidOk) {
+      const inLateBarrier = lateBarrierMins > 0 && minutesRemaining <= lateBarrierMins;
+      const canExtendLate = !!(
+        inLateBarrier &&
+        picked &&
+        picked.window &&
+        modelLateExtendOk(picked.window, trade.side, this.config)
+      );
+      if (inLateBarrier && bidOk && !canExtendLate) {
+        const reason = flatOrGreen
+          ? isDecentGreen || isBankableGreen
+            ? 'take_profit'
+            : exactlyFlat
+              ? 'breakeven'
+              : 'model_late_exit'
+          : 'model_late_exit';
+        await this._closePosition(trade, heldSideBidCents, reason, {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+      if (canExtendLate) {
+        this.lastDecision =
+          `Holding ${trade.symbol} into final ${lateBarrierMins}m — high possibility ` +
+          `(conf ${Number.isFinite(picked.window.confidence) ? Math.round(picked.window.confidence) : '?'}%, lean with us).`;
+        // Fall through: still allow +7¢ momentum TP / lean rules while extending.
+      } else if (
+        settleCloseMins > 0 &&
+        settleCloseThresh > 0 &&
+        minutesRemaining <= settleCloseMins &&
+        bidOk
+      ) {
+        // Non-barrier late close (if barrier disabled): same as before.
         const redCents = underwater ? adverseCents : 0;
         if (redCents <= settleCloseThresh) {
           const reason = flatOrGreen
@@ -6611,6 +6676,9 @@ module.exports = {
   modelMinTpCents,
   modelBankGreenCents,
   modelSettleCloseMinutes,
+  modelLateBarrierMinutes,
+  modelLateExtendMinConfidence,
+  modelLateExtendOk,
   modelMomentumStallMs,
   modelMomentumPullbackCents,
   modelLowPriceStakeQuarters,
@@ -6629,6 +6697,8 @@ module.exports = {
   MODEL_MIN_TP_CENTS_DEFAULT,
   MODEL_BANK_GREEN_CENTS_DEFAULT,
   MODEL_SETTLE_CLOSE_MINUTES_DEFAULT,
+  MODEL_LATE_BARRIER_MINUTES_DEFAULT,
+  MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT,
   MODEL_MOMENTUM_STALL_MS_DEFAULT,
   MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT,
   MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT,
