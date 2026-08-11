@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelPriceAllowed, checkModelPostExitCooldown, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelPriceAllowed, checkModelPostExitCooldown, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -173,6 +173,8 @@ function makeBot(client, config = {}) {
     minEntryCents: config.minEntryCents ?? 40,
     minMinutesToOpen: config.minMinutesToOpen ?? 3,
     modelMinConfidence: config.modelMinConfidence ?? 55,
+    modelConfirmCrossCents:
+      config.modelConfirmCrossCents != null ? config.modelConfirmCrossCents : 0,
     stopRecoveryCents: config.stopRecoveryCents ?? 6,
     stakeDollars: config.stakeDollars ?? 10,
     maxOpenPositions: config.maxOpenPositions ?? 1,
@@ -5316,7 +5318,88 @@ async function testModelStrategy() {
   checkEq(MODEL_MAX_ENTRY_DEFAULT_CENTS, 93, 'model max entry default 93¢');
   checkEq(MODEL_MIN_ENTRY_DEFAULT_CENTS, 60, 'model min entry default 60¢');
   checkEq(MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, 60, 'perfect floor matches min (no sub-60)');
+  checkEq(MODEL_CONFIRM_CROSS_CENTS_DEFAULT, 50, 'confirm cross default 50¢');
+  checkEq(MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, 15, 'confirm max extension +15¢');
   checkEq(MODEL_TRAIL_CENTS_DEFAULT, 0, 'trail off by default (simplified exits)');
+
+  // Confirm gate: must see below 50, cross, then continue — not buy the top
+  {
+    const closeMs = Date.now() + 12 * 60 * 1000;
+    const bot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-CONFIRM',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(closeMs).toISOString(),
+        yes_bid: 84,
+        yes_ask: 86,
+        no_bid: 14,
+        no_ask: 16,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinConfidence: 55,
+        modelMinEntryCents: 60,
+        modelConfirmCrossCents: 50,
+        modelConfirmMaxExtensionCents: 15,
+        modelConfirmMinContinueCents: 2,
+      }
+    );
+    const preds = {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: {
+          w5: { ...win(70, 80), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    };
+    const top = await bot._evaluateSymbolForModel('ETH', preds);
+    checkEq(top, null, '86¢ without under-50 print → blocked (no buy top)');
+    check(/never saw|under 50/i.test(bot.lastDecision || ''), 'cites missing under-50 print');
+
+    bot.client = mockClient({
+      ticker: 'KXETH15M-CONFIRM',
+      status: 'open',
+      floor_strike: 3000,
+      close_time: new Date(closeMs).toISOString(),
+      yes_bid: 44,
+      yes_ask: 46,
+      no_bid: 54,
+      no_ask: 56,
+    });
+    const below = await bot._evaluateSymbolForModel('ETH', preds);
+    checkEq(below, null, '46¢ under confirm — waiting to cross');
+    check(/need cross of 50/i.test(bot.lastDecision || ''), 'cites need cross');
+
+    bot.client = mockClient({
+      ticker: 'KXETH15M-CONFIRM',
+      status: 'open',
+      floor_strike: 3000,
+      close_time: new Date(closeMs).toISOString(),
+      yes_bid: 50,
+      yes_ask: 51,
+      no_bid: 49,
+      no_ask: 50,
+    });
+    const crossed = await bot._evaluateSymbolForModel('ETH', preds);
+    checkEq(crossed, null, 'cross tick waits for continuation');
+
+    bot.client = mockClient({
+      ticker: 'KXETH15M-CONFIRM',
+      status: 'open',
+      floor_strike: 3000,
+      close_time: new Date(closeMs).toISOString(),
+      yes_bid: 61,
+      yes_ask: 62,
+      no_bid: 38,
+      no_ask: 39,
+    });
+    const ready = await bot._evaluateSymbolForModel('ETH', preds);
+    check(ready && ready.side === 'yes' && ready.priceCents === 62, 'after cross+continue enters at 62¢');
+  }
   checkEq(MODEL_MAX_ADVERSE_CENTS_DEFAULT, 0, 'soft dip off by default');
   checkEq(MODEL_HARD_ADVERSE_CENTS_DEFAULT, 0, 'hard cliff off — no bounce stop-outs');
   checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 7, 'bank / momentum arm at ≥7¢ green');

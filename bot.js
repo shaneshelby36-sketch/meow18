@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 38;
+const SETTINGS_DEFAULTS_VERSION = 39;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -332,6 +332,15 @@ const MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT = 1;
 const MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT = 70;
 /** Under-70¢ stake as fourths of full: 1=¼, 2=½ (default), 3=¾. */
 const MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT = 2;
+/**
+ * Confirmation gate: must observe ask below this, then cross it, before entry
+ * is eligible. 0 = off. Default 50¢ — don't buy after the move already ran.
+ */
+const MODEL_CONFIRM_CROSS_CENTS_DEFAULT = 50;
+/** After the cross, skip if ask has already run this many ¢ past the cross (chase). */
+const MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT = 15;
+/** Need at least this many ¢ of continuation above the cross before buying. */
+const MODEL_CONFIRM_MIN_CONTINUE_CENTS_DEFAULT = 2;
 
 /**
  * Live probs of the active window clearly against the held side (not the frozen lock).
@@ -444,6 +453,27 @@ function modelLowPriceStakeLabel(config = {}) {
   if (q === 1) return '¼';
   if (q === 3) return '¾';
   return '½';
+}
+
+function modelConfirmCrossCents(config = {}) {
+  const n = Number(config.modelConfirmCrossCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_CONFIRM_CROSS_CENTS_DEFAULT;
+}
+
+function modelConfirmMaxExtensionCents(config = {}) {
+  const n = Number(config.modelConfirmMaxExtensionCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT;
+}
+
+function modelConfirmMinContinueCents(config = {}) {
+  const n = Number(config.modelConfirmMinContinueCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_CONFIRM_MIN_CONTINUE_CENTS_DEFAULT;
 }
 
 function modelLiveLeanMarginPct(config = {}) {
@@ -1209,6 +1239,9 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMinEntryCents',
   'modelLowPriceMaxCents',
   'modelLowPriceStakeQuarters',
+  'modelConfirmCrossCents',
+  'modelConfirmMaxExtensionCents',
+  'modelConfirmMinContinueCents',
   'modelPerfectMinEntryCents',
   'modelPerfectConfidence',
   'modelPerfectLeanPts',
@@ -2051,6 +2084,10 @@ class TradingBot {
       modelMaxEntryCents: MODEL_MAX_ENTRY_DEFAULT_CENTS,
       modelMinEntryCents: MODEL_MIN_ENTRY_DEFAULT_CENTS,
       modelLowPriceMaxCents: MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT,
+      modelLowPriceStakeQuarters: MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT,
+      modelConfirmCrossCents: MODEL_CONFIRM_CROSS_CENTS_DEFAULT,
+      modelConfirmMaxExtensionCents: MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT,
+      modelConfirmMinContinueCents: MODEL_CONFIRM_MIN_CONTINUE_CENTS_DEFAULT,
       modelPerfectMinEntryCents: MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS,
       modelPerfectConfidence: MODEL_PERFECT_CONFIDENCE_DEFAULT,
       modelPerfectLeanPts: MODEL_PERFECT_LEAN_DEFAULT,
@@ -2071,7 +2108,6 @@ class TradingBot {
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
       modelMinMinutesToOpen: MODEL_MIN_MINUTES_TO_OPEN_DEFAULT,
-      modelLowPriceStakeQuarters: MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
       stopRecoveryCents: 6,
@@ -2174,6 +2210,8 @@ class TradingBot {
     this._entryMissUntil = Object.create(null);
     this._entryMissStreak = Object.create(null);
     this._entryMissSessionClose = Object.create(null);
+    // Model confirm gate: ticker:side → { seenBelow, armed, crossAsk, peakAsk, lastAsk, closeTime }
+    this._modelConfirmGates = Object.create(null);
     const runState = loadRunState();
     this.isRunning = runState.isRunning !== false;
     this.runningSince = this.isRunning ? (Number(runState.runningSince) || Date.now()) : null;
@@ -5889,6 +5927,138 @@ class TradingBot {
   }
 
   /**
+   * Model confirmation gate (optional):
+   * 1) Must observe ask below confirmCross (default 50¢) this market
+   * 2) Then see it cross ≥ confirmCross → arm
+   * 3) Enter only after min continuation above the cross, while still in band
+   * 4) If ask runs too far past the cross → too late / buying the top
+   * 5) If ask falls back under confirmCross → disarm (no chase)
+   * Set modelConfirmCrossCents = 0 to disable.
+   */
+  _checkModelConfirmGate({ ticker, symbol, side, priceCents, closeTime }) {
+    const confirm = modelConfirmCrossCents(this.config);
+    if (!(confirm > 0)) return { ok: true, skipped: true };
+
+    if (!this._modelConfirmGates) this._modelConfirmGates = Object.create(null);
+    const key = `${String(ticker || symbol)}:${String(side || '').toLowerCase()}`;
+    const ask = Math.round(Number(priceCents));
+    if (!Number.isFinite(ask) || ask < 1 || ask > 99) {
+      return { ok: false, reason: `Waiting: ${symbol} confirm gate — no usable ask.` };
+    }
+
+    let g = this._modelConfirmGates[key];
+    const closeMs = Number(closeTime);
+    if (!g || (Number.isFinite(closeMs) && Number(g.closeTime) !== closeMs) || g.side !== side) {
+      g = {
+        seenBelow: false,
+        armed: false,
+        crossedAt: null,
+        crossAsk: null,
+        peakAsk: null,
+        lastAsk: null,
+        closeTime: closeMs,
+        side,
+      };
+      this._modelConfirmGates[key] = g;
+    }
+
+    const maxExt = modelConfirmMaxExtensionCents(this.config);
+    const minCont = modelConfirmMinContinueCents(this.config);
+
+    if (ask < confirm) {
+      g.seenBelow = true;
+      g.armed = false;
+      g.crossedAt = null;
+      g.crossAsk = null;
+      g.peakAsk = null;
+      g.lastAsk = ask;
+      return {
+        ok: false,
+        reason:
+          `Waiting: ${symbol} ${String(side).toUpperCase()} at ${ask}¢ — need cross of ${confirm}¢ ` +
+          `before MODEL entry is eligible (confirm gate).`,
+      };
+    }
+
+    // At/above confirm line.
+    if (!g.seenBelow) {
+      g.lastAsk = ask;
+      return {
+        ok: false,
+        reason:
+          `Waiting: ${symbol} ${String(side).toUpperCase()} already ${ask}¢ — never saw it under ` +
+          `${confirm}¢ this window (won't buy the top; need a print below ${confirm}¢ first).`,
+      };
+    }
+
+    if (!g.armed) {
+      g.armed = true;
+      g.crossedAt = Date.now();
+      g.crossAsk = ask;
+      g.peakAsk = ask;
+      g.lastAsk = ask;
+      return {
+        ok: false,
+        reason:
+          `Watching: ${symbol} ${String(side).toUpperCase()} just crossed ${confirm}¢ @ ${ask}¢ — ` +
+          `waiting for continuation (not buying the cross tick).`,
+      };
+    }
+
+    g.peakAsk = Math.max(Number(g.peakAsk) || ask, ask);
+    const crossAsk = Number(g.crossAsk);
+    const extension = Number.isFinite(crossAsk) ? ask - crossAsk : 0;
+    const prevAsk = Number(g.lastAsk);
+    const falling = Number.isFinite(prevAsk) && ask < prevAsk;
+    g.lastAsk = ask;
+
+    if (falling && ask < confirm + Math.max(1, minCont)) {
+      // Soft fade right after cross — don't chase.
+      return {
+        ok: false,
+        reason:
+          `Waiting: ${symbol} ${String(side).toUpperCase()} faded to ${ask}¢ after the ${confirm}¢ cross — not chasing.`,
+      };
+    }
+
+    if (maxExt > 0 && extension > maxExt) {
+      return {
+        ok: false,
+        reason:
+          `Waiting: ${symbol} ${String(side).toUpperCase()} at ${ask}¢ is +${extension}¢ past the ` +
+          `${confirm}¢ cross (max +${maxExt}¢) — move already happened, not buying the top.`,
+      };
+    }
+
+    if (minCont > 0 && extension < minCont) {
+      return {
+        ok: false,
+        reason:
+          `Watching: ${symbol} ${String(side).toUpperCase()} crossed ${confirm}¢ — need +${minCont}¢ ` +
+          `continuation (now +${Math.max(0, extension)}¢ @ ${ask}¢).`,
+      };
+    }
+
+    // Strengthening: at/above prior ask, or clearly above cross.
+    const strengthening =
+      !Number.isFinite(prevAsk) || ask >= prevAsk || (Number.isFinite(crossAsk) && ask > crossAsk);
+    if (!strengthening) {
+      return {
+        ok: false,
+        reason:
+          `Waiting: ${symbol} ${String(side).toUpperCase()} soft at ${ask}¢ after cross — want firm continuation.`,
+      };
+    }
+
+    return {
+      ok: true,
+      crossAsk,
+      extension,
+      confirm,
+    };
+  }
+
+  /**
    * Model mode: side from active window locked direction (UP→YES, DOWN→NO).
    * No Edge/Settle protection gates — windows + confidence floor only.
    */
@@ -5981,18 +6151,6 @@ class TradingBot {
     }
 
     const side = direction === 'UP' ? 'yes' : 'no';
-    // Lock alone is not enough — live probs must still favor that side, or we
-    // open into a lean that's already rolling over (then dump / flip).
-    const liveMargin = modelEntryLiveLeanMarginPct(this.config);
-    if (!modelLiveLeanStillFavors(window, side, liveMargin)) {
-      const up = Number(window.probabilityUp);
-      const down = Number(window.probabilityDown);
-      this.lastDecision =
-        `Waiting: ${symbol} lock is ${direction} but live lean is ` +
-        `${Number.isFinite(up) ? up.toFixed(0) : '?'}% UP / ${Number.isFinite(down) ? down.toFixed(0) : '?'}% DOWN` +
-        ` (need live favor by ≥${liveMargin}pts).`;
-      return null;
-    }
     const yesBid = Number(market.yes_bid);
     const yesAsk = Number(market.yes_ask);
     if (!Number.isFinite(yesBid) || !Number.isFinite(yesAsk) || yesBid < 1 || yesAsk > 99 || yesBid > yesAsk) {
@@ -6011,6 +6169,32 @@ class TradingBot {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
       return null;
     }
+
+    // Confirm gate observes every quote (records under-50 prints even if lean is soft).
+    const confirmGate = this._checkModelConfirmGate({
+      ticker: market.ticker,
+      symbol,
+      side,
+      priceCents,
+      closeTime,
+    });
+    if (!confirmGate.ok) {
+      this.lastDecision = confirmGate.reason;
+      return null;
+    }
+
+    // Lock alone is not enough — live probs must still favor that side.
+    const liveMargin = modelEntryLiveLeanMarginPct(this.config);
+    if (!modelLiveLeanStillFavors(window, side, liveMargin)) {
+      const up = Number(window.probabilityUp);
+      const down = Number(window.probabilityDown);
+      this.lastDecision =
+        `Waiting: ${symbol} lock is ${direction} but live lean is ` +
+        `${Number.isFinite(up) ? up.toFixed(0) : '?'}% UP / ${Number.isFinite(down) ? down.toFixed(0) : '?'}% DOWN` +
+        ` (need live favor by ≥${liveMargin}pts).`;
+      return null;
+    }
+
     const priceGate = modelPriceAllowed(priceCents, window, this.config);
     if (!priceGate.ok) {
       this.lastDecision = `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — ${priceGate.reason}.`;
@@ -6031,6 +6215,7 @@ class TradingBot {
       closeTime,
       rankScore: leanStrength * (window.confidence / 100),
       uncertain,
+      confirmCrossAsk: confirmGate.crossAsk != null ? confirmGate.crossAsk : null,
     };
   }
 
@@ -6701,6 +6886,12 @@ module.exports = {
   modelLowPriceStakeQuarters,
   modelLowPriceStakeFraction,
   modelLowPriceStakeLabel,
+  modelConfirmCrossCents,
+  modelConfirmMaxExtensionCents,
+  modelConfirmMinContinueCents,
+  MODEL_CONFIRM_CROSS_CENTS_DEFAULT,
+  MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT,
+  MODEL_CONFIRM_MIN_CONTINUE_CENTS_DEFAULT,
   modelLiveLeanMarginPct,
   modelEntryLiveLeanMarginPct,
   modelSoftLeanMarginPct,

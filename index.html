@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> — follows engine UP→YES / DOWN→NO. Needs lock + live lean agree (≥8pts). No ¢ stop-loss. TP arms at +7¢ then rides until stall. Final 5m: high possibility (conf≥78% + strong lean) may extend; otherwise exit. No new entries in last 5m (6m if already holding).</p>
+          <p class="settings-hint"><strong>MODEL</strong> — UP→YES / DOWN→NO. Confirm gate: see under 50¢ → cross → continue → enter (won't buy tops). Lock + live lean ≥8pts. No ¢ stop. TP +7¢ then ride until stall. Final 5m: high possibility may extend; else exit. No new entries last 5m (6m if holding).</p>
 
           <label><strong>MODEL</strong> min confidence
             <div class="slider-row">
@@ -349,6 +349,22 @@
               <span class="slider-value" id="bot-model-confidence-value">—</span>
             </div>
             <span class="field-hint">Engine must be at least this sure before opening. Default 66%.</span>
+          </label>
+
+          <label><strong>MODEL</strong> confirm cross (¢)
+            <div class="slider-row">
+              <input id="bot-model-confirm-cross" type="range" min="0" max="65" step="1" />
+              <span class="slider-value" id="bot-model-confirm-cross-value">—</span>
+            </div>
+            <span class="field-hint">Must see ask <strong>below</strong> this, then cross it, before entry is eligible. Default <strong>50¢</strong>. Set <strong>0 = off</strong>.</span>
+          </label>
+
+          <label><strong>MODEL</strong> max run after cross (¢)
+            <div class="slider-row">
+              <input id="bot-model-confirm-ext" type="range" min="5" max="30" step="1" />
+              <span class="slider-value" id="bot-model-confirm-ext-value">—</span>
+            </div>
+            <span class="field-hint">If ask already ran this far past the cross, skip — move happened, don't buy the top. Default +15¢.</span>
           </label>
 
           <label><strong>MODEL</strong> min entry (¢)
