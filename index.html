@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> — UP→YES / DOWN→NO. After first full buy+sell, confirm gate applies both ways (YES &amp; NO): see under 50¢ → cross → continue → enter. Each exit resets the gate so it can't rebuy the same level. Lock + live lean ≥8pts. No ¢ stop. TP +7¢ then ride until stall. Final 5m: high possibility may extend; else exit.</p>
+          <p class="settings-hint"><strong>MODEL</strong> plan: see lean correlate → buy → bank quick TP → if price returns under 50¢, re-cross and repeat. Runs <strong>2–3+ coins at once</strong> (max positions). After first full round-trip, confirm gate (YES &amp; NO): under 50 → cross → continue → enter; each exit resets so it won't rebuy the same level. ~30s sit-out after exit (scalp recycle). Lock + live lean ≥8pts. TP +7¢ then stall. Final 5m: high possibility may extend; else exit.</p>
 
           <label><strong>MODEL</strong> min confidence
             <div class="slider-row">
@@ -532,7 +532,7 @@
               <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
               <span class="slider-value" id="bot-maxpos-value">—</span>
             </div>
-            <span class="field-hint">How many trades can be open at once. Default 2 across different coins. Settle: while any hold has tagged 90¢, a temporary 3rd open is allowed at ½ stake. With “second only if green” On, you only get another open when an existing hold is green (or has tagged 90¢).</span>
+            <span class="field-hint">How many trades can be open at once. Default <strong>3</strong> so MODEL can ride several correlating coins together. Still one open per coin. Raise to 4–5 if you want more parallelism.</span>
           </label>
           <label>Second open only if holding green
             <select id="bot-second-green">

@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 39;
+const SETTINGS_DEFAULTS_VERSION = 41;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -310,8 +310,8 @@ const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 5;
 const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 8;
 /** Don't early-exit a Model hold until it's been open at least this long. */
 const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
-/** After Model BE/TP/lean-flip, sit out that coin this long (runCycle used to clear same-tick only). */
-const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 3 * 60 * 1000;
+/** After Model BE/TP/lean-flip, sit out that coin this long (short — scalp recycle at 50¢). */
+const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 30_000;
 /** Lean-exit / momentum TP floor — no micro-banks under this. */
 const MODEL_MIN_TP_CENTS_DEFAULT = 7;
 /** Arm momentum run once this many ¢ green; then hold until stall. */
@@ -2153,8 +2153,9 @@ class TradingBot {
       // Settle NEAR only: risk half stake (thinner book / choppier). Other coins full size.
       halfStakeNear: 'on',
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
-      maxOpenPositions: 2,
+      maxOpenPositions: 3, // MODEL scalp loop: several coins correlating at once
       // With ≥1 open: only allow another if an existing hold is green (bid ≥ entry).
+      // Model ignores this — windows + confirm gate decide.
       secondOpenRequiresGreen: 'on',
       // Opt-in coins (off by default). Flip On anytime to let AUTO / single-symbol trade them.
       tradeDoge: 'off',
@@ -5490,48 +5491,14 @@ class TradingBot {
     }
 
     if (modelMode) {
-      // Already holding: freeze new opens 1m before the late-entry cutoff (default
-      // 5m → freeze at 6m left) so we don't stack into the no-stop end zone.
-      if (this.openTrades.length >= 1) {
-        const lateCutoff = Number.isFinite(Number(this.config.modelMinMinutesToOpen))
-          ? Number(this.config.modelMinMinutesToOpen)
-          : MODEL_MIN_MINUTES_TO_OPEN_DEFAULT;
-        const freezeMins = Math.max(0, lateCutoff) + 1;
-        const nowMs = Date.now();
-        let soonestMins = Infinity;
-        for (const t of this.openTrades) {
-          const closeAt = Number(t && t.windowCloseTime);
-          if (!Number.isFinite(closeAt)) continue;
-          const left = (closeAt - nowMs) / 60000;
-          if (left < soonestMins) soonestMins = left;
-        }
-        if (Number.isFinite(soonestMins) && soonestMins <= freezeMins) {
-          this.lastDecision =
-            `Waiting: open trade has ${soonestMins.toFixed(1)}m left — no new Model entries ` +
-            `within ${freezeMins}m of settle (1m before the ${lateCutoff}m late cutoff).`;
-          return;
-        }
-      }
-      opportunity =
+      // Fill up to maxOpen with ranked MODEL opportunities in one cycle
+      // (several coins can correlate near the same time). Late cutoff is
+      // per-opportunity — one coin near settle must not freeze the others.
+      const ranked =
         this.config.symbol === 'AUTO'
-          ? await this._findBestModelOpportunity(predictions)
-          : await this._evaluateSymbolForModel(this.config.symbol, predictions);
-      if (!opportunity) return;
-      await this._openPosition({
-        symbol: opportunity.symbol,
-        ticker: opportunity.market.ticker,
-        side: opportunity.side,
-        priceCents: opportunity.priceCents,
-        floorStrike: opportunity.market.floor_strike,
-        closeTime: opportunity.closeTime,
-        engineProbability:
-          opportunity.side === 'yes' ? opportunity.window.probabilityUp : opportunity.window.probabilityDown,
-        engineConfidence: opportunity.window.confidence,
-        strategy: 'model',
-        modelWindowKey: opportunity.windowKey,
-        modelDirection: opportunity.direction,
-        uncertain: opportunity.uncertain,
-      });
+          ? await this._findModelOpportunities(predictions)
+          : [await this._evaluateSymbolForModel(this.config.symbol, predictions)].filter(Boolean);
+      await this._openModelRanked(ranked);
       return;
     }
 
@@ -6265,21 +6232,76 @@ class TradingBot {
     };
   }
 
-  async _findBestModelOpportunity(predictions) {
+  async _findModelOpportunities(predictions) {
     const candidates = tradeableKalshiSymbols(this.config).filter(
       (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
     );
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0) return [];
     const evaluations = await Promise.all(
       candidates.map((sym) => this._evaluateSymbolForModel(sym, predictions))
     );
     const valid = evaluations.filter(Boolean);
-    if (valid.length === 0) return null;
     valid.sort((a, b) => {
       if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
       return liquidityPriority(b.symbol) - liquidityPriority(a.symbol);
     });
-    return valid[0];
+    return valid;
+  }
+
+  async _findBestModelOpportunity(predictions) {
+    const ranked = await this._findModelOpportunities(predictions);
+    return ranked[0] || null;
+  }
+
+  _modelOppToOpenArgs(opportunity) {
+    return {
+      symbol: opportunity.symbol,
+      ticker: opportunity.market.ticker,
+      side: opportunity.side,
+      priceCents: opportunity.priceCents,
+      floorStrike: opportunity.market.floor_strike,
+      closeTime: opportunity.closeTime,
+      engineProbability:
+        opportunity.side === 'yes' ? opportunity.window.probabilityUp : opportunity.window.probabilityDown,
+      engineConfidence: opportunity.window.confidence,
+      strategy: 'model',
+      modelWindowKey: opportunity.windowKey,
+      modelDirection: opportunity.direction,
+      uncertain: opportunity.uncertain,
+    };
+  }
+
+  /**
+   * MODEL AUTO: open several correlated tickets in one cycle (up to free slots).
+   * Parallel top-N when multiple slots free so entries land nearly together.
+   */
+  async _openModelRanked(ranked) {
+    if (!ranked || ranked.length === 0) return;
+    const slotsFree = () =>
+      Math.max(0, this._effectiveMaxOpenPositions() - this.openTrades.length);
+    if (slotsFree() <= 0) return;
+
+    const tryOne = async (opp) => this._openPosition(this._modelOppToOpenArgs(opp));
+
+    let i = 0;
+    const parallelN = Math.min(slotsFree(), ranked.length, 3);
+    if (parallelN >= 2) {
+      const batch = ranked.slice(0, parallelN);
+      const names = batch.map((o) => o.symbol).join(' + ');
+      this.lastDecision = `MODEL multi-entry: trying ${names} together.`;
+      this._logActivity(this.lastDecision, {
+        kind: 'open',
+        symbol: names,
+        strategy: 'model',
+      });
+      await Promise.all(batch.map((opp) => tryOne(opp)));
+      i = parallelN;
+    }
+
+    while (i < ranked.length && slotsFree() > 0) {
+      await tryOne(ranked[i]);
+      i += 1;
+    }
   }
 
   /**

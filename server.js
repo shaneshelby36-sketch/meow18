@@ -123,7 +123,7 @@ const bot = KALSHI_ENABLED
           process.env.KALSHI_EDGE_BREAKEVEN_AFTER_MINUTES || '3'
         ),
         stakeDollars: parseFloat(process.env.KALSHI_STAKE_DOLLARS || '3'),
-        maxOpenPositions: parseInt(process.env.KALSHI_MAX_OPEN_POSITIONS || '2', 10),
+        maxOpenPositions: parseInt(process.env.KALSHI_MAX_OPEN_POSITIONS || '3', 10),
         skimMode: process.env.KALSHI_SKIM_MODE || 'insurance',
         skimFixedDollars: parseFloat(process.env.KALSHI_SKIM_FIXED_DOLLARS || '5'),
         skimPercent: parseFloat(process.env.KALSHI_SKIM_PERCENT || '50'),

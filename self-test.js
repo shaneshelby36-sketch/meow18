@@ -6102,7 +6102,7 @@ async function testModelStrategy() {
     checkEq(trade.exitPriceCents, 55, 'paper BE books entry');
   }
 
-  // Post-exit cooldown blocks reopen for ~3m
+  // Post-exit cooldown blocks reopen briefly (~30s scalp recycle)
   {
     const now = Date.now();
     check(
@@ -6113,14 +6113,31 @@ async function testModelStrategy() {
             symbol: 'ETH',
             status: 'closed',
             exitReason: 'model_lean_flip',
-            closedAt: now - 30_000,
+            closedAt: now - 5_000,
           },
         ],
         symbol: 'ETH',
-        cooldownMs: 180_000,
+        cooldownMs: 30_000,
         now,
       }).ok,
-      'post lean-flip cooldown active'
+      'post-exit cooldown active (~30s)'
+    );
+    check(
+      checkModelPostExitCooldown({
+        trades: [
+          {
+            strategy: 'model',
+            symbol: 'ETH',
+            status: 'closed',
+            exitReason: 'take_profit',
+            closedAt: now - 35_000,
+          },
+        ],
+        symbol: 'ETH',
+        cooldownMs: 30_000,
+        now,
+      }).ok,
+      'post-exit cooldown clears after ~30s'
     );
   }
 
