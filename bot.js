@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 33;
+const SETTINGS_DEFAULTS_VERSION = 34;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -306,6 +306,8 @@ function modelDirectionAgainstHeld(direction, side) {
 
 /** Live lean must clear this many points vs the held side (avoids 50.1/49.9 chop). */
 const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 5;
+/** Entry: live lean must favor the locked side by at least this many pts (stricter than exit). */
+const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 8;
 /** Don't early-exit a Model hold until it's been open at least this long. */
 const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
 /** After Model BE/TP/lean-flip, sit out that coin this long (runCycle used to clear same-tick only). */
@@ -367,6 +369,13 @@ function modelLiveLeanMarginPct(config = {}) {
   const n = Number(config.modelLiveLeanMarginPct);
   if (Number.isFinite(n) && n >= 0) return n;
   return MODEL_LIVE_LEAN_MARGIN_DEFAULT;
+}
+
+/** Entry-only live favor margin (stricter than the exit lean-against margin). */
+function modelEntryLiveLeanMarginPct(config = {}) {
+  const n = Number(config.modelEntryLiveLeanMarginPct);
+  if (Number.isFinite(n) && n >= 0) return n;
+  return MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT;
 }
 
 function modelTrailCents(config = {}) {
@@ -1123,6 +1132,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMinTpCents',
   'modelBankGreenCents',
   'modelLiveLeanMarginPct',
+  'modelEntryLiveLeanMarginPct',
   'modelSoftLeanMarginPct',
   'modelTrailCents',
   'modelMaxAdverseCents',
@@ -1957,6 +1967,7 @@ class TradingBot {
       modelMinTpCents: MODEL_MIN_TP_CENTS_DEFAULT,
       modelBankGreenCents: MODEL_BANK_GREEN_CENTS_DEFAULT,
       modelLiveLeanMarginPct: MODEL_LIVE_LEAN_MARGIN_DEFAULT,
+      modelEntryLiveLeanMarginPct: MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT,
       modelSoftLeanMarginPct: MODEL_SOFT_LEAN_MARGIN_DEFAULT,
       modelTrailCents: MODEL_TRAIL_CENTS_DEFAULT,
       modelMaxAdverseCents: MODEL_MAX_ADVERSE_CENTS_DEFAULT,
@@ -5785,7 +5796,7 @@ class TradingBot {
     const side = direction === 'UP' ? 'yes' : 'no';
     // Lock alone is not enough — live probs must still favor that side, or we
     // open into a lean that's already rolling over (then dump / flip).
-    const liveMargin = modelLiveLeanMarginPct(this.config);
+    const liveMargin = modelEntryLiveLeanMarginPct(this.config);
     if (!modelLiveLeanStillFavors(window, side, liveMargin)) {
       const up = Number(window.probabilityUp);
       const down = Number(window.probabilityDown);
@@ -6494,11 +6505,13 @@ module.exports = {
   modelMinTpCents,
   modelBankGreenCents,
   modelLiveLeanMarginPct,
+  modelEntryLiveLeanMarginPct,
   modelSoftLeanMarginPct,
   modelTrailCents,
   modelMaxAdverseCents,
   modelHardAdverseCents,
   MODEL_LIVE_LEAN_MARGIN_DEFAULT,
+  MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT,
   MODEL_MIN_HOLD_MS_DEFAULT,
   MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT,
   MODEL_MIN_TP_CENTS_DEFAULT,
