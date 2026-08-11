@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint">Windows: UP→YES / DOWN→NO. Entries <strong>45–93¢</strong> (25–44¢ if conf≥80% + lean≥15). No entries in last <strong>2m</strong>. Closes all near settle unless losing &gt;50¢. <strong>&lt;70¢</strong> or other unsure signals use <strong>¼ stake</strong>. Follows lean only — <strong>no ¢ stop-loss</strong>. Banks <strong>≥8¢ green</strong>; lean-exit TP ≥3¢. ~60s min hold; ~3m sit-out.</p>
+          <p class="settings-hint">Windows: UP→YES / DOWN→NO. Entries <strong>45–93¢</strong> (25–44¢ if conf≥80% + lean≥15). No entries in last <strong>2m</strong>. Closes all near settle unless losing &gt;50¢. <strong>&lt;70¢</strong> or other unsure signals use <strong>¼ stake</strong>. Follows lean on green/flat only — <strong>no red lean-flip</strong>, no ¢ stop. Banks <strong>≥8¢ green</strong>; lean-exit TP ≥3¢. ~60s min hold; ~3m sit-out.</p>
           <label>Min confidence
             <div class="slider-row">
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />

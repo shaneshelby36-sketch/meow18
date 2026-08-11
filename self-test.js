@@ -5670,7 +5670,7 @@ async function testModelStrategy() {
     check(/confidence/i.test(bot.lastDecision || ''), 'decision cites confidence');
   }
 
-  // Underwater + locked lean against → model_lean_flip (can't invent BE)
+  // Underwater + locked lean against → hold (no red lean-flip; ride toward settle)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -5702,11 +5702,10 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, against);
-    checkEq(trade.status, 'closed', 'model lean flip closes when red');
-    checkEq(trade.exitReason, 'model_lean_flip', 'underwater lean flip reason');
+    checkEq(trade.status, 'open', 'underwater lean against does not flip — holds to settle');
   }
 
-  // Underwater + live lean against (lock still with us) → cut before settle
+  // Underwater + live lean against (lock still with us) → hold, not cut
   {
     const now = Date.now();
     const bot = makeBot(
@@ -5744,11 +5743,10 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, liveFlip);
-    checkEq(trade.exitReason, 'model_lean_flip', 'red + live lean against cuts (lock still UP)');
-    checkEq(trade.exitPriceCents, 50, 'cuts at live bid not 0');
+    checkEq(trade.status, 'open', 'red + live lean against holds (lock still UP)');
   }
 
-  // Underwater + weak confidence (lock + live still with us) → cut before settle
+  // Underwater + weak confidence (lock + live still with us) → hold, not cut
   {
     const now = Date.now();
     const bot = makeBot(
@@ -5778,8 +5776,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, weakRed);
-    checkEq(trade.exitReason, 'model_lean_flip', 'red + weak confidence cuts before settle');
-    checkEq(trade.exitPriceCents, 50, 'weak-conf red exit at bid');
+    checkEq(trade.status, 'open', 'red + weak confidence holds toward settle');
   }
 
   // Green + lean against → model TP only with ≥3¢ green (not +1¢ noise)
@@ -6006,7 +6003,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, mid);
-    checkEq(trade.exitReason, 'model_lean_flip', 'w10 locked DOWN flips early YES');
+    checkEq(trade.status, 'open', 'w10 locked DOWN does not flip underwater YES');
   }
 }
 

@@ -4120,9 +4120,11 @@ class TradingBot {
     }
 
     // Model: follow the window lean only — no price stops (bounce stop-outs bled more
-    // than they saved). Bank decent green. Else hold toward settle unless lean flips.
+    // than they saved). Bank decent green. Lean exits on green/flat only; when red,
+    // hold toward settle (final-minute close handles the rest).
     // — ≥8¢ green → take_profit (don't wait for lean to flip)
-    // — lean against / weak conf → TP (≥3¢) / BE / lean_flip
+    // — lean against / weak conf → TP (≥3¢) / BE when green or flat
+    // — underwater + lean against → hold (no red lean-flip; flicker stop-outs)
     // — hard/soft ¢ stops off by default (config can re-enable)
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
@@ -4222,11 +4224,8 @@ class TradingBot {
         });
         return;
       }
-      if (underwater && leanExit && heldLongEnough) {
-        await this._closePosition(trade, heldSideBidCents, 'model_lean_flip', {
-          liveSellPriceCents: heldSideBidCents,
-        });
-      }
+      // Underwater: no lean-flip — model flicker + bid dips caused the same bounce
+      // stop-outs as ¢ stops. Hold toward settle; final-minute rule banks the rest.
       return;
     }
 
