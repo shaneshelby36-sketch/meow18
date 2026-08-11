@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> plan: see lean correlate → buy → bank quick TP → if price returns under 50¢, re-cross and repeat. Runs <strong>2–3+ coins at once</strong> (max positions). Confirm gate is off until the first MODEL buy+sell of this run, then (YES &amp; NO): under 50 → cross → continue → enter; each exit resets. ~30s sit-out after exit. Lock + live lean ≥8pts. TP +7¢ then stall. Final 5m: high possibility may extend; else exit.</p>
+          <p class="settings-hint"><strong>MODEL</strong> plan: see lean correlate → buy → bank quick TP → if price returns under 50¢, re-cross and repeat. Runs <strong>2–3+ coins at once</strong> (max positions). Confirm gate is off until the first MODEL buy+sell of this run, then (YES &amp; NO): under 50 → cross → continue → enter; each exit resets. ~30s sit-out after exit. Lock + live lean ≥8pts. TP +7¢ then stall. No late forced exit — holds can ride to window end unless TP/other rules fire.</p>
 
           <label><strong>MODEL</strong> min confidence
             <div class="slider-row">
@@ -405,14 +405,6 @@
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
             <span class="field-hint">Arm momentum TP once this many ¢ green. Default 7¢ — no micro banks.</span>
-          </label>
-
-          <label><strong>MODEL</strong> late-extend min confidence
-            <div class="slider-row">
-              <input id="bot-model-late-extend-conf" type="range" min="60" max="95" step="1" />
-              <span class="slider-value" id="bot-model-late-extend-conf-value">—</span>
-            </div>
-            <span class="field-hint">In the final 5 minutes, only extend if confidence is at least this (and lean is still strong). Else exit immediately. Default 78%.</span>
           </label>
         </div>
 

@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 42;
+const SETTINGS_DEFAULTS_VERSION = 43;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -318,10 +318,10 @@ const MODEL_MIN_TP_CENTS_DEFAULT = 7;
 const MODEL_BANK_GREEN_CENTS_DEFAULT = 7;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
-/** Final barrier (minutes left): low possibility exits; high can extend through. */
-const MODEL_LATE_BARRIER_MINUTES_DEFAULT = 5;
-/** Start near-settle closes this many minutes before window end (low-conviction path). */
-const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 5;
+/** Final barrier (minutes left). 0 = off (no forced late exits). */
+const MODEL_LATE_BARRIER_MINUTES_DEFAULT = 0;
+/** Start near-settle closes this many minutes before window end. 0 = off. */
+const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 0;
 /** Confidence required to extend a hold into/through the final 5-minute barrier. */
 const MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT = 78;
 /** After +bank green, TP if bid sits at peak this long without a new high (ms). */
@@ -4369,8 +4369,8 @@ class TradingBot {
         return;
       }
 
-      // Final ~5m barrier: high possibility (strong live lean + high conf) may
-      // extend through; low possibility exits immediately.
+      // Late forced exits off by default (barrier + settle-close minutes = 0).
+      // Keep the hooks so they can be re-enabled via config later.
       const lateBarrierMins = modelLateBarrierMinutes(this.config);
       const settleCloseMins = modelSettleCloseMinutes(this.config);
       const settleCloseThresh = Number.isFinite(Number(this.config.modelSettleCloseLossCents))
