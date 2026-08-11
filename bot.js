@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 35;
+const SETTINGS_DEFAULTS_VERSION = 36;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -324,8 +324,10 @@ const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 4;
 const MODEL_MOMENTUM_STALL_MS_DEFAULT = 12_000;
 /** After +bank green, TP if bid pulls back this many ¢ from peak. */
 const MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT = 1;
-/** Model entries below this ask use ¼ stake (price-only sizing rule). */
+/** Model entries below this ask use reduced stake (see modelLowPriceStakeQuarters). */
 const MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT = 70;
+/** Under-70¢ stake as fourths of full: 1=¼, 2=½ (default), 3=¾. */
+const MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT = 2;
 
 /**
  * Live probs of the active window clearly against the held side (not the frozen lock).
@@ -390,6 +392,24 @@ function modelMomentumPullbackCents(config = {}) {
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return Math.round(n);
   return MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT;
+}
+
+/** Under-70¢ stake multiplier: 0.25 / 0.5 / 0.75 from quarters slider (1–3). */
+function modelLowPriceStakeQuarters(config = {}) {
+  const q = Math.round(Number(config.modelLowPriceStakeQuarters));
+  if (q === 1 || q === 2 || q === 3) return q;
+  return MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT;
+}
+
+function modelLowPriceStakeFraction(config = {}) {
+  return modelLowPriceStakeQuarters(config) / 4;
+}
+
+function modelLowPriceStakeLabel(config = {}) {
+  const q = modelLowPriceStakeQuarters(config);
+  if (q === 1) return '¼';
+  if (q === 3) return '¾';
+  return '½';
 }
 
 function modelLiveLeanMarginPct(config = {}) {
@@ -1171,6 +1191,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMinHoldSeconds',
   'modelPostExitCooldownMinutes',
   'modelMinMinutesToOpen',
+  'modelLowPriceStakeQuarters',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -2010,6 +2031,7 @@ class TradingBot {
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
       modelMinMinutesToOpen: MODEL_MIN_MINUTES_TO_OPEN_DEFAULT,
+      modelLowPriceStakeQuarters: MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
       stopRecoveryCents: 6,
@@ -2618,7 +2640,7 @@ class TradingBot {
 
   /**
    * Stake for this entry.
-   * Model: under 70¢ → ¼ only (no conf/lean quartering).
+   * Model: under 70¢ → fraction of stake (¼ / ½ / ¾ via modelLowPriceStakeQuarters).
    * Settle:
    * - Ask &lt; 80¢: ¼ normal (all coins)
    * - Else NEAR: ½ normal when halfStakeNear is on
@@ -2633,15 +2655,17 @@ class TradingBot {
     const base = Number(this._computeNextStake());
     const safeBase = Number.isFinite(base) && base > 0 ? base : Number(this.config.stakeDollars) || 3;
     const p = Number(priceCents);
-    // Model: only price under 70¢ gets quarter (ignore stale uncertain flags).
+    // Model: only price under 70¢ gets reduced stake.
     if (model) {
       if (Number.isFinite(p) && p < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT) {
-        return Math.max(0.5, +(safeBase / 4).toFixed(2));
+        const frac = modelLowPriceStakeFraction(this.config);
+        return Math.max(0.5, +(safeBase * frac).toFixed(2));
       }
       return safeBase;
     }
     if (modelUncertain) {
-      return Math.max(0.5, +(safeBase / 4).toFixed(2));
+      const frac = modelLowPriceStakeFraction(this.config);
+      return Math.max(0.5, +(safeBase * frac).toFixed(2));
     }
     if (!settle) return safeBase;
     if (Number.isFinite(p) && p < 80) {
@@ -5076,7 +5100,9 @@ class TradingBot {
           `Opened ${symbol} ${side.toUpperCase()} settle position at ${trade.entryPriceCents}¢` +
           ` (hold to settlement${lateNote}${sizeNote}).`;
       } else if (isModel) {
-        const sizeNote = modelQuarter ? ' · quarter stake' : '';
+        const sizeNote = modelQuarter
+          ? ` · ${modelLowPriceStakeLabel(this.config)} stake`
+          : '';
         this.lastDecision =
           `Opened ${symbol} ${side.toUpperCase()} model position at ${trade.entryPriceCents}¢` +
           `${sizeNote} (confidence ${engineConfidence}%).`;
@@ -5343,6 +5369,28 @@ class TradingBot {
     }
 
     if (modelMode) {
+      // Already holding: freeze new opens 1m before the late-entry cutoff (default
+      // 5m → freeze at 6m left) so we don't stack into the no-stop end zone.
+      if (this.openTrades.length >= 1) {
+        const lateCutoff = Number.isFinite(Number(this.config.modelMinMinutesToOpen))
+          ? Number(this.config.modelMinMinutesToOpen)
+          : MODEL_MIN_MINUTES_TO_OPEN_DEFAULT;
+        const freezeMins = Math.max(0, lateCutoff) + 1;
+        const nowMs = Date.now();
+        let soonestMins = Infinity;
+        for (const t of this.openTrades) {
+          const closeAt = Number(t && t.windowCloseTime);
+          if (!Number.isFinite(closeAt)) continue;
+          const left = (closeAt - nowMs) / 60000;
+          if (left < soonestMins) soonestMins = left;
+        }
+        if (Number.isFinite(soonestMins) && soonestMins <= freezeMins) {
+          this.lastDecision =
+            `Waiting: open trade has ${soonestMins.toFixed(1)}m left — no new Model entries ` +
+            `within ${freezeMins}m of settle (1m before the ${lateCutoff}m late cutoff).`;
+          return;
+        }
+      }
       opportunity =
         this.config.symbol === 'AUTO'
           ? await this._findBestModelOpportunity(predictions)
@@ -5889,7 +5937,7 @@ class TradingBot {
     }
 
     const leanStrength = Math.abs(Number(window.probabilityUp) - 50) || 1;
-    // Quarter stake only for asks under 70¢ — not conf/lean.
+    // Reduced stake only for asks under 70¢ (fraction from slider).
     const uncertain = priceCents < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
     return {
       symbol,
@@ -6565,6 +6613,9 @@ module.exports = {
   modelSettleCloseMinutes,
   modelMomentumStallMs,
   modelMomentumPullbackCents,
+  modelLowPriceStakeQuarters,
+  modelLowPriceStakeFraction,
+  modelLowPriceStakeLabel,
   modelLiveLeanMarginPct,
   modelEntryLiveLeanMarginPct,
   modelSoftLeanMarginPct,
@@ -6580,6 +6631,7 @@ module.exports = {
   MODEL_SETTLE_CLOSE_MINUTES_DEFAULT,
   MODEL_MOMENTUM_STALL_MS_DEFAULT,
   MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT,
+  MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT,
   MODEL_TRAIL_CENTS_DEFAULT,
   MODEL_MAX_ADVERSE_CENTS_DEFAULT,
   MODEL_HARD_ADVERSE_CENTS_DEFAULT,

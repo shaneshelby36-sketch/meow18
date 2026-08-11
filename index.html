@@ -341,13 +341,20 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint">Windows: UP→YES / DOWN→NO. Entries require <strong>lock + live lean ≥8pts</strong>. Band <strong>45–93¢</strong> (25–44¢ if conf≥80% + lean≥15). No entries in last <strong>5m</strong>. Late close from <strong>~4m</strong> unless losing &gt;50¢. Ask <strong>&lt;70¢ = ¼ stake</strong>. TP: arm at <strong>+7¢</strong>, ride while lean + momentum; <strong>TP on stall</strong> (1¢ pullback or ~12s flat). No micro-TPs. No red lean-flip / ¢ stop. ~60s min hold; ~3m sit-out.</p>
+          <p class="settings-hint">Windows: UP→YES / DOWN→NO. Entries require <strong>lock + live lean ≥8pts</strong>. Band <strong>45–93¢</strong> (25–44¢ if conf≥80% + lean≥15). No entries in last <strong>5m</strong>; if already holding, freeze new opens from <strong>6m</strong> left. Late close from <strong>~4m</strong> unless losing &gt;50¢. Ask <strong>&lt;70¢</strong> uses the reduced-stake slider below (default <strong>½</strong>). TP: arm at <strong>+7¢</strong>, ride while lean + momentum; <strong>TP on stall</strong> (1¢ pullback or ~12s flat). No micro-TPs. No red lean-flip / ¢ stop. ~60s min hold; ~3m sit-out.</p>
           <label>Min confidence
             <div class="slider-row">
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />
               <span class="slider-value" id="bot-model-confidence-value">—</span>
             </div>
             <span class="field-hint">How sure the engine must be about the active window’s UP/DOWN call before opening (0–100). Below this, skip the coin.</span>
+          </label>
+          <label>Under 70¢ stake size
+            <div class="slider-row">
+              <input id="bot-model-low-stake" type="range" min="1" max="3" step="1" />
+              <span class="slider-value" id="bot-model-low-stake-value">—</span>
+            </div>
+            <span class="field-hint">When Model entry ask is under 70¢, risk this fraction of normal stake: ¼, ½, or ¾. Default ½. 70¢+ still uses full stake.</span>
           </label>
         </div>
 
