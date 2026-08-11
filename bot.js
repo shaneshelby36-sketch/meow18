@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 22;
+const SETTINGS_DEFAULTS_VERSION = 23;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -478,6 +478,8 @@ const STRATEGY_RETRO_MID_CEILING_MINUTES = 8.5;
 const EDGE_MAX_ENTRY_DEFAULT_CENTS = 95;
 /** Model: never buy richer than this (leaves a little room to 100). */
 const MODEL_MAX_ENTRY_DEFAULT_CENTS = 93;
+/** Model: never buy cheaper than this — blocks 1¢ lottery tickets. */
+const MODEL_MIN_ENTRY_DEFAULT_CENTS = 20;
 /** Edge: final-N-minute cash-out allows up to this much position PnL loss (¢). */
 const EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS = 75;
 const EDGE_PRE_CLOSE_MINUTES_DEFAULT = 5;
@@ -914,6 +916,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'settleStuckHoldMinutes',
   'modelMinConfidence',
   'modelMaxEntryCents',
+  'modelMinEntryCents',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -1734,6 +1737,7 @@ class TradingBot {
       // Model tab: window schedule + locked lean; confidence floor; max entry 93¢.
       modelMinConfidence: 55,
       modelMaxEntryCents: MODEL_MAX_ENTRY_DEFAULT_CENTS,
+      modelMinEntryCents: MODEL_MIN_ENTRY_DEFAULT_CENTS,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
       stopRecoveryCents: 6,
@@ -3251,6 +3255,19 @@ class TradingBot {
         if (!this._stoppedSymbolsThisCycle) this._stoppedSymbolsThisCycle = new Set();
         this._stoppedSymbolsThisCycle.add(String(trade.symbol).toUpperCase());
       }
+      // Model: after BE / TP / lean-flip, don't knife-catch the same coin this cycle
+      // (live saw open→BE@1¢→reopen same second).
+      if (
+        isModelTrade(trade) &&
+        trade.symbol &&
+        (reason === 'breakeven' ||
+          reason === 'take_profit' ||
+          reason === 'model_lean_flip' ||
+          reason === 'near_certain')
+      ) {
+        if (!this._stoppedSymbolsThisCycle) this._stoppedSymbolsThisCycle = new Set();
+        this._stoppedSymbolsThisCycle.add(String(trade.symbol).toUpperCase());
+      }
       const entryFees = Math.max(0, Math.round(Number(trade.entryFeesCents) || 0));
       const exitFees = Math.max(0, Math.round(Number(trade.exitFeesCents) || 0));
       trade.feesCents = entryFees + exitFees;
@@ -4237,14 +4254,14 @@ class TradingBot {
     }
     const isModel = strategy === 'model';
     const symKey = String(symbol || '').toUpperCase();
-    // Never reopen a coin that stopped earlier in this same cycle (same-second knife-catch).
-    // Model ignores Edge knife-catch locks — windows decide re-entry.
-    if (!isModel && this._stoppedSymbolsThisCycle && this._stoppedSymbolsThisCycle.has(symKey)) {
+    // Never reopen a coin that exited earlier in this same cycle (same-second knife-catch).
+    if (this._stoppedSymbolsThisCycle && this._stoppedSymbolsThisCycle.has(symKey)) {
       this.lastDecision =
-        `Skipped ${symbol}: stopped earlier this cycle — no same-turn reopen.`;
+        `Skipped ${symbol}: exited earlier this cycle — no same-turn reopen.`;
       return false;
     }
     // Hard same-side sit-out after stop (belt-and-suspenders vs evaluate-time gate).
+    // Model skips Edge/Settle sit-outs; same-cycle block above covers knife-catch.
     if (!isModel) {
       const lastStop = this._lastStopLossTrade();
       if (lastStop) {
@@ -4329,9 +4346,17 @@ class TradingBot {
         return false;
       }
     } else if (isModel) {
+      const minEntry = Number.isFinite(Number(this.config.modelMinEntryCents))
+        ? Number(this.config.modelMinEntryCents)
+        : MODEL_MIN_ENTRY_DEFAULT_CENTS;
       const maxEntry = Number.isFinite(Number(this.config.modelMaxEntryCents))
         ? Number(this.config.modelMaxEntryCents)
         : MODEL_MAX_ENTRY_DEFAULT_CENTS;
+      if (minEntry > 0 && priceCents < minEntry) {
+        this.lastDecision =
+          `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: below model min entry ${minEntry}¢ (longshot ban).`;
+        return false;
+      }
       if (maxEntry > 0 && priceCents > maxEntry) {
         this.lastDecision =
           `Skipped ${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢: above model max entry ${maxEntry}¢.`;
@@ -5417,6 +5442,14 @@ class TradingBot {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
       return null;
     }
+    const minEntry = Number.isFinite(Number(this.config.modelMinEntryCents))
+      ? Number(this.config.modelMinEntryCents)
+      : MODEL_MIN_ENTRY_DEFAULT_CENTS;
+    if (minEntry > 0 && priceCents < minEntry) {
+      this.lastDecision =
+        `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — below model min entry ${minEntry}¢ (skipping longshots).`;
+      return null;
+    }
     const maxEntry = Number.isFinite(Number(this.config.modelMaxEntryCents))
       ? Number(this.config.modelMaxEntryCents)
       : MODEL_MAX_ENTRY_DEFAULT_CENTS;
@@ -6134,6 +6167,7 @@ module.exports = {
   scoreMarketRegime,
   EDGE_MAX_ENTRY_DEFAULT_CENTS,
   MODEL_MAX_ENTRY_DEFAULT_CENTS,
+  MODEL_MIN_ENTRY_DEFAULT_CENTS,
   EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS,
   EDGE_PRE_CLOSE_MINUTES_DEFAULT,
   EDGE_BREAKEVEN_AFTER_MINUTES_DEFAULT,

@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint">Pure engine windows: UP→YES, DOWN→NO. Minutes left pick the window (&gt;10m w5, 5–10m w10, ≤5m w5). Never enters above 93¢. Exits when locked lean flips, <em>live</em> lean turns against the hold, or confidence drops under the floor — green→take_profit, flat→breakeven, red→model_lean_flip (cuts before full settle). Otherwise hold to settlement.</p>
+          <p class="settings-hint">Pure engine windows: UP→YES, DOWN→NO. Minutes left pick the window (&gt;10m w5, 5–10m w10, ≤5m w5). Entry band <strong>20–93¢</strong> (no 1¢ lottery tickets). Exits when locked lean flips, live lean turns against, or confidence drops — green→take_profit, flat→breakeven, red→model_lean_flip. After BE/TP/flip, no same-cycle reopen on that coin. Otherwise hold to settlement.</p>
           <label>Min confidence
             <div class="slider-row">
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />
