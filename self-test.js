@@ -5314,8 +5314,8 @@ async function testModelStrategy() {
   check(isModelStrategyMode({ strategyMode: 'model' }), 'model mode helper');
   check(isModelTrade({ strategy: 'model' }), 'model trade helper');
   checkEq(MODEL_MAX_ENTRY_DEFAULT_CENTS, 93, 'model max entry default 93¢');
-  checkEq(MODEL_MIN_ENTRY_DEFAULT_CENTS, 45, 'model min entry default 45¢');
-  checkEq(MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, 25, 'perfect floor 25¢');
+  checkEq(MODEL_MIN_ENTRY_DEFAULT_CENTS, 60, 'model min entry default 60¢');
+  checkEq(MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, 60, 'perfect floor matches min (no sub-60)');
   checkEq(MODEL_TRAIL_CENTS_DEFAULT, 0, 'trail off by default (simplified exits)');
   checkEq(MODEL_MAX_ADVERSE_CENTS_DEFAULT, 0, 'soft dip off by default');
   checkEq(MODEL_HARD_ADVERSE_CENTS_DEFAULT, 0, 'hard cliff off — no bounce stop-outs');
@@ -5330,13 +5330,17 @@ async function testModelStrategy() {
     '30¢ blocked without perfect conf/lean'
   );
   check(
+    !modelPriceAllowed(55, { ...win(70, 85), confidence: 85 }, {}).ok,
+    '55¢ blocked under default 60¢ min even with high conf'
+  );
+  check(
     modelPriceAllowed(30, { ...win(70, 85), confidence: 85 }, {
       modelMinEntryCents: 45,
       modelPerfectMinEntryCents: 25,
       modelPerfectConfidence: 80,
       modelPerfectLeanPts: 15,
     }).ok,
-    '30¢ allowed when conf+lean perfect'
+    '30¢ allowed when config still permits perfect exception'
   );
   check(!modelPriceAllowed(20, { ...win(70, 85), confidence: 85 }, {}).ok, '20¢ under perfect floor');
 
@@ -5349,10 +5353,10 @@ async function testModelStrategy() {
         status: 'open',
         floor_strike: 3000,
         close_time: new Date(closeMs).toISOString(),
-        yes_bid: 52,
-        yes_ask: 55,
-        no_bid: 45,
-        no_ask: 48,
+        yes_bid: 62,
+        yes_ask: 65,
+        no_bid: 35,
+        no_ask: 38,
       }),
       { strategyMode: 'model', modelMinConfidence: 55 }
     );
@@ -5437,7 +5441,7 @@ async function testModelStrategy() {
     check(/max entry 93/i.test(bot.lastDecision || ''), 'decision cites model max entry');
   }
 
-  // Never enter below 45¢ without perfect call (blocks mid/longshot junk)
+  // Never enter below 60¢ (default floor)
   {
     const closeMs = Date.now() + 12 * 60 * 1000;
     const bot = makeBot(
@@ -5465,8 +5469,8 @@ async function testModelStrategy() {
       },
     };
     const cheap = await bot._evaluateSymbolForModel('ETH', preds);
-    checkEq(cheap, null, 'blocks model entry at 38¢ without perfect lean');
-    check(/below 45/i.test(bot.lastDecision || ''), 'decision cites 45¢ min');
+    checkEq(cheap, null, 'blocks model entry at 38¢ under 60¢ min');
+    check(/below 60/i.test(bot.lastDecision || ''), 'decision cites 60¢ min');
   }
 
   // +7¢+ green with lean + new peak → hold (momentum run)
@@ -5678,10 +5682,10 @@ async function testModelStrategy() {
       status: 'open',
       floor_strike: 3000,
       close_time: new Date(closeMs).toISOString(),
-      yes_bid: 52,
-      yes_ask: 55,
-      no_bid: 45,
-      no_ask: 48,
+      yes_bid: 62,
+      yes_ask: 65,
+      no_bid: 35,
+      no_ask: 38,
     });
     const bot = makeBot(client, { strategyMode: 'model', modelMinConfidence: 50 });
     bot._stoppedSymbolsThisCycle = new Set();
@@ -5689,7 +5693,7 @@ async function testModelStrategy() {
       symbol: 'ETH',
       ticker: 'KXETH15M-REOPEN',
       side: 'yes',
-      priceCents: 55,
+      priceCents: 65,
       floorStrike: 3000,
       closeTime: closeMs,
       engineProbability: 62,
@@ -5701,7 +5705,7 @@ async function testModelStrategy() {
     check(opened, 'first model open ok');
     const trade = bot.openTrades[0];
     check(trade, 'model trade on book');
-    await bot._closePosition(trade, 55, 'breakeven', { skipLiveSell: true });
+    await bot._closePosition(trade, 65, 'breakeven', { skipLiveSell: true });
     check(
       bot._stoppedSymbolsThisCycle && bot._stoppedSymbolsThisCycle.has('ETH'),
       'BE marks ETH blocked this cycle'
@@ -5710,7 +5714,7 @@ async function testModelStrategy() {
       symbol: 'ETH',
       ticker: 'KXETH15M-REOPEN',
       side: 'yes',
-      priceCents: 55,
+      priceCents: 65,
       floorStrike: 3000,
       closeTime: closeMs,
       engineProbability: 62,

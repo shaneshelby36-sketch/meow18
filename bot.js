@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 37;
+const SETTINGS_DEFAULTS_VERSION = 38;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -422,7 +422,13 @@ function modelMomentumPullbackCents(config = {}) {
   return MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT;
 }
 
-/** Under-70¢ stake multiplier: 0.25 / 0.5 / 0.75 from quarters slider (1–3). */
+function modelLowPriceMaxCents(config = {}) {
+  const n = Number(config.modelLowPriceMaxCents);
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
+}
+
+/** Under-threshold stake multiplier: 0.25 / 0.5 / 0.75 from quarters slider (1–3). */
 function modelLowPriceStakeQuarters(config = {}) {
   const q = Math.round(Number(config.modelLowPriceStakeQuarters));
   if (q === 1 || q === 2 || q === 3) return q;
@@ -494,8 +500,8 @@ function modelLiveLeanStillFavors(window, side, keepMargin = MODEL_SOFT_LEAN_MAR
 }
 
 /**
- * Normal entries need ≥ modelMinEntry (45¢). Below that only if confidence + lean
- * are especially strong, and never below the perfect floor (25¢).
+ * Normal entries need ≥ modelMinEntry (default 60¢). Below that only if confidence + lean
+ * are especially strong, and never below the perfect floor.
  */
 function modelPriceAllowed(priceCents, window, config = {}) {
   const price = Number(priceCents);
@@ -744,10 +750,10 @@ const STRATEGY_RETRO_MID_CEILING_MINUTES = 8.5;
 const EDGE_MAX_ENTRY_DEFAULT_CENTS = 95;
 /** Model: never buy richer than this (leaves a little room to 100). */
 const MODEL_MAX_ENTRY_DEFAULT_CENTS = 93;
-/** Model: never buy cheaper than this unless the call is especially perfect. */
-const MODEL_MIN_ENTRY_DEFAULT_CENTS = 45;
-/** Absolute floor even when the call is “perfect.” */
-const MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS = 25;
+/** Model: never buy cheaper than this (normal floor). */
+const MODEL_MIN_ENTRY_DEFAULT_CENTS = 60;
+/** Absolute floor even when the call is “perfect.” (matches min — no sub-60 longshots). */
+const MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS = 60;
 /** Don't open Model entries in the last this many minutes (freeze-into-settle). */
 const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 5.0;
 /** Confidence required to allow entries below the normal min. */
@@ -1201,6 +1207,8 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMinConfidence',
   'modelMaxEntryCents',
   'modelMinEntryCents',
+  'modelLowPriceMaxCents',
+  'modelLowPriceStakeQuarters',
   'modelPerfectMinEntryCents',
   'modelPerfectConfidence',
   'modelPerfectLeanPts',
@@ -1221,7 +1229,6 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMinHoldSeconds',
   'modelPostExitCooldownMinutes',
   'modelMinMinutesToOpen',
-  'modelLowPriceStakeQuarters',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -2043,6 +2050,7 @@ class TradingBot {
       modelMinConfidence: MODEL_MIN_CONFIDENCE_DEFAULT,
       modelMaxEntryCents: MODEL_MAX_ENTRY_DEFAULT_CENTS,
       modelMinEntryCents: MODEL_MIN_ENTRY_DEFAULT_CENTS,
+      modelLowPriceMaxCents: MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT,
       modelPerfectMinEntryCents: MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS,
       modelPerfectConfidence: MODEL_PERFECT_CONFIDENCE_DEFAULT,
       modelPerfectLeanPts: MODEL_PERFECT_LEAN_DEFAULT,
@@ -2256,6 +2264,14 @@ class TradingBot {
     }
     normalizeInsuranceThresholds(this.config);
     normalizeSettleStopLossCents(this.config);
+    // Model: no sub-floor "perfect" longshots — perfect floor tracks min entry slider.
+    if (applied.modelMinEntryCents != null) {
+      const minE = Number(this.config.modelMinEntryCents);
+      if (Number.isFinite(minE) && minE > 0) {
+        this.config.modelPerfectMinEntryCents = minE;
+        applied.modelPerfectMinEntryCents = minE;
+      }
+    }
     if (applied.settleStopLossCents != null) {
       applied.settleStopLossCents = this.config.settleStopLossCents;
     }
@@ -2672,7 +2688,7 @@ class TradingBot {
 
   /**
    * Stake for this entry.
-   * Model: under 70¢ → fraction of stake (¼ / ½ / ¾ via modelLowPriceStakeQuarters).
+   * Model: under modelLowPriceMaxCents → fraction of stake (¼ / ½ / ¾).
    * Settle:
    * - Ask &lt; 80¢: ¼ normal (all coins)
    * - Else NEAR: ½ normal when halfStakeNear is on
@@ -2687,9 +2703,9 @@ class TradingBot {
     const base = Number(this._computeNextStake());
     const safeBase = Number.isFinite(base) && base > 0 ? base : Number(this.config.stakeDollars) || 3;
     const p = Number(priceCents);
-    // Model: only price under 70¢ gets reduced stake.
+    // Model: only price under low-price threshold gets reduced stake.
     if (model) {
-      if (Number.isFinite(p) && p < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT) {
+      if (Number.isFinite(p) && p < modelLowPriceMaxCents(this.config)) {
         const frac = modelLowPriceStakeFraction(this.config);
         return Math.max(0.5, +(safeBase * frac).toFixed(2));
       }
@@ -4709,9 +4725,9 @@ class TradingBot {
       return false;
     }
     const isModel = strategy === 'model';
-    // Model quarter stake = ask under 70¢ only.
+    // Model reduced stake = ask under low-price threshold only.
     let modelQuarter =
-      isModel && Number.isFinite(priceCents) && priceCents < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
+      isModel && Number.isFinite(priceCents) && priceCents < modelLowPriceMaxCents(this.config);
     const symKey = String(symbol || '').toUpperCase();
     // Never reopen a coin that exited earlier in this same cycle (same-second knife-catch).
     if (this._stoppedSymbolsThisCycle && this._stoppedSymbolsThisCycle.has(symKey)) {
@@ -4955,11 +4971,11 @@ class TradingBot {
           }
         }
 
-        // Re-check under-70 on the live working ask (chase can move through the line).
+        // Re-check reduced-stake threshold on the live working ask.
         const liveQuarter =
           isModel &&
           Number.isFinite(workingPrice) &&
-          workingPrice < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
+          workingPrice < modelLowPriceMaxCents(this.config);
         let attemptContracts = Math.max(
           1,
           Math.floor(
@@ -5102,7 +5118,7 @@ class TradingBot {
       if (
         isModel &&
         Number.isFinite(trade.entryPriceCents) &&
-        trade.entryPriceCents < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT
+        trade.entryPriceCents < modelLowPriceMaxCents(this.config)
       ) {
         modelQuarter = true;
         trade.modelUncertain = true;
@@ -6002,8 +6018,8 @@ class TradingBot {
     }
 
     const leanStrength = Math.abs(Number(window.probabilityUp) - 50) || 1;
-    // Reduced stake only for asks under 70¢ (fraction from slider).
-    const uncertain = priceCents < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
+    // Reduced stake only for asks under the low-price threshold.
+    const uncertain = priceCents < modelLowPriceMaxCents(this.config);
     return {
       symbol,
       market,
@@ -6681,6 +6697,7 @@ module.exports = {
   modelLateExtendOk,
   modelMomentumStallMs,
   modelMomentumPullbackCents,
+  modelLowPriceMaxCents,
   modelLowPriceStakeQuarters,
   modelLowPriceStakeFraction,
   modelLowPriceStakeLabel,

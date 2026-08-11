@@ -1383,12 +1383,17 @@ const SLIDER_UNITS = {
   'bot-takeprofit': (v) => `+${Math.round(v)}¢`,
   'bot-minentries': (v) => `${Math.round(v)}¢`,
   'bot-model-confidence': (v) => `${Math.round(v)}%`,
+  'bot-model-min-entry': (v) => `${Math.round(v)}¢`,
+  'bot-model-max-entry': (v) => `${Math.round(v)}¢`,
+  'bot-model-low-price': (v) => `under ${Math.round(v)}¢`,
   'bot-model-low-stake': (v) => {
     const q = Math.round(Number(v));
     if (q === 1) return '¼ stake';
     if (q === 3) return '¾ stake';
     return '½ stake';
   },
+  'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
+  'bot-model-late-extend-conf': (v) => `${Math.round(v)}%`,
   'bot-settle-min': (v) => `${Math.round(v)}¢`,
   'bot-settle-max': (v) => `${Math.round(v)}¢`,
   'bot-settle-stoploss': (v) => `−${Math.round(v)}¢`,
@@ -1405,7 +1410,7 @@ const SLIDER_UNITS = {
 function strategyModeLabel(mode) {
   const m = String(mode || '').toLowerCase();
   if (m === 'settle') return 'Settle';
-  if (m === 'model') return 'Model';
+  if (m === 'model') return 'MODEL';
   return 'Edge';
 }
 
@@ -1534,7 +1539,12 @@ function wireSliderDisplays() {
     'bot-takeprofit',
     'bot-minentries',
     'bot-model-confidence',
+    'bot-model-min-entry',
+    'bot-model-max-entry',
+    'bot-model-low-price',
     'bot-model-low-stake',
+    'bot-model-bank-green',
+    'bot-model-late-extend-conf',
     'bot-settle-min',
     'bot-settle-max',
     'bot-settle-stoploss',
@@ -1642,7 +1652,12 @@ function wireBotConfigAutoSave() {
     'bot-takeprofit',
     'bot-minentries',
     'bot-model-confidence',
+    'bot-model-min-entry',
+    'bot-model-max-entry',
+    'bot-model-low-price',
     'bot-model-low-stake',
+    'bot-model-bank-green',
+    'bot-model-late-extend-conf',
     'bot-settle-min',
     'bot-settle-max',
     'bot-settle-stoploss',
@@ -1704,10 +1719,22 @@ async function loadBotConfigIntoForm() {
     document.getElementById('bot-minentries').value = c.minEntryCents != null ? c.minEntryCents : 40;
     const modelConf = document.getElementById('bot-model-confidence');
     if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 66;
+    const modelMinEntry = document.getElementById('bot-model-min-entry');
+    if (modelMinEntry) modelMinEntry.value = c.modelMinEntryCents != null ? c.modelMinEntryCents : 60;
+    const modelMaxEntry = document.getElementById('bot-model-max-entry');
+    if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 93;
+    const modelLowPrice = document.getElementById('bot-model-low-price');
+    if (modelLowPrice) modelLowPrice.value = c.modelLowPriceMaxCents != null ? c.modelLowPriceMaxCents : 70;
     const modelLowStake = document.getElementById('bot-model-low-stake');
     if (modelLowStake) {
       const q = Number(c.modelLowPriceStakeQuarters);
       modelLowStake.value = q === 1 || q === 2 || q === 3 ? q : 2;
+    }
+    const modelBankGreen = document.getElementById('bot-model-bank-green');
+    if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 7;
+    const modelLateExt = document.getElementById('bot-model-late-extend-conf');
+    if (modelLateExt) {
+      modelLateExt.value = c.modelLateExtendMinConfidence != null ? c.modelLateExtendMinConfidence : 78;
     }
     const settleMin = document.getElementById('bot-settle-min');
     if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 80;
@@ -1802,7 +1829,12 @@ async function loadBotConfigIntoForm() {
       'bot-takeprofit',
       'bot-minentries',
       'bot-model-confidence',
+      'bot-model-min-entry',
+      'bot-model-max-entry',
+      'bot-model-low-price',
       'bot-model-low-stake',
+      'bot-model-bank-green',
+      'bot-model-late-extend-conf',
       'bot-settle-min',
       'bot-settle-max',
       'bot-settle-stoploss',
@@ -1947,10 +1979,18 @@ async function saveBotConfig(opts = {}) {
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '66'),
+    modelMinEntryCents: parseFloat(document.getElementById('bot-model-min-entry')?.value || '60'),
+    modelMaxEntryCents: parseFloat(document.getElementById('bot-model-max-entry')?.value || '93'),
+    modelLowPriceMaxCents: parseFloat(document.getElementById('bot-model-low-price')?.value || '70'),
     modelLowPriceStakeQuarters: (() => {
       const q = Math.round(parseFloat(document.getElementById('bot-model-low-stake')?.value || '2'));
       return q === 1 || q === 2 || q === 3 ? q : 2;
     })(),
+    modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
+    modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
+    modelLateExtendMinConfidence: parseFloat(
+      document.getElementById('bot-model-late-extend-conf')?.value || '78'
+    ),
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '80'),
     settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '94'),
     settleStopLossCents: Math.max(
