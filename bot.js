@@ -2579,9 +2579,15 @@ class TradingBot {
    * Under-80 quarter wins over NEAR/3rd — no stacking to ⅛.
    * Edge mode: always full (unless caller forces settle sizing).
    */
-  _stakeDollarsForEntry(priceCents, { settle = false, symbol = null, thirdSlot = false } = {}) {
+  _stakeDollarsForEntry(
+    priceCents,
+    { settle = false, symbol = null, thirdSlot = false, modelUncertain = false } = {}
+  ) {
     const base = Number(this._computeNextStake());
     const safeBase = Number.isFinite(base) && base > 0 ? base : Number(this.config.stakeDollars) || 3;
+    if (modelUncertain) {
+      return Math.max(0.5, +(safeBase / 4).toFixed(2));
+    }
     if (!settle) return safeBase;
     const p = Number(priceCents);
     if (Number.isFinite(p) && p < 80) {
@@ -4678,10 +4684,8 @@ class TradingBot {
       settle: isSettle,
       symbol,
       thirdSlot,
+      modelUncertain: isModel && uncertain,
     });
-    if (isModel && uncertain) {
-      stakeDollars = Math.max(0.5, +(stakeDollars / 4).toFixed(2));
-    }
     const contracts = Math.max(1, Math.floor((stakeDollars * 100) / priceCents));
     const entryCostCents = contracts * priceCents;
     const capital = this._capitalStatus();
@@ -4714,6 +4718,7 @@ class TradingBot {
         ? {
             modelWindowKey: modelWindowKey || null,
             modelDirection: modelDirection || null,
+            ...(uncertain ? { modelUncertain: true } : {}),
           }
         : {}),
     };
@@ -4783,7 +4788,13 @@ class TradingBot {
         let attemptContracts = Math.max(
           1,
           Math.floor(
-            (this._stakeDollarsForEntry(workingPrice, { settle: isSettle, symbol, thirdSlot }) * 100) /
+            (this._stakeDollarsForEntry(workingPrice, {
+              settle: isSettle,
+              symbol,
+              thirdSlot,
+              modelUncertain: isModel && uncertain,
+            }) *
+              100) /
               workingPrice
           )
         );
@@ -4969,6 +4980,11 @@ class TradingBot {
         this.lastDecision =
           `Opened ${symbol} ${side.toUpperCase()} settle position at ${trade.entryPriceCents}¢` +
           ` (hold to settlement${lateNote}${sizeNote}).`;
+      } else if (isModel) {
+        const sizeNote = uncertain ? ' · quarter stake' : '';
+        this.lastDecision =
+          `Opened ${symbol} ${side.toUpperCase()} model position at ${trade.entryPriceCents}¢` +
+          `${sizeNote} (confidence ${engineConfidence}%).`;
       } else {
         this.lastDecision =
           `Opened ${symbol} ${side.toUpperCase()} ${this.config.mode} position at ${trade.entryPriceCents}¢` +
