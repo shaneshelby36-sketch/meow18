@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> — UP→YES / DOWN→NO. Confirm gate: see under 50¢ → cross → continue → enter (won't buy tops). Lock + live lean ≥8pts. No ¢ stop. TP +7¢ then ride until stall. Final 5m: high possibility may extend; else exit. No new entries last 5m (6m if holding).</p>
+          <p class="settings-hint"><strong>MODEL</strong> — UP→YES / DOWN→NO. After first full buy+sell, confirm gate applies both ways (YES &amp; NO): see under 50¢ → cross → continue → enter. Each exit resets the gate so it can't rebuy the same level. Lock + live lean ≥8pts. No ¢ stop. TP +7¢ then ride until stall. Final 5m: high possibility may extend; else exit.</p>
 
           <label><strong>MODEL</strong> min confidence
             <div class="slider-row">
@@ -356,7 +356,7 @@
               <input id="bot-model-confirm-cross" type="range" min="0" max="65" step="1" />
               <span class="slider-value" id="bot-model-confirm-cross-value">—</span>
             </div>
-            <span class="field-hint">Must see ask <strong>below</strong> this, then cross it, before entry is eligible. Default <strong>50¢</strong>. Set <strong>0 = off</strong>.</span>
+            <span class="field-hint">After the first full MODEL buy+sell, must see ask <strong>below</strong> this then cross it (YES and NO). Each exit resets — can't rebuy where you just were. Default <strong>50¢</strong>. <strong>0 = off</strong>.</span>
           </label>
 
           <label><strong>MODEL</strong> max run after cross (¢)

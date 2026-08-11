@@ -5345,6 +5345,17 @@ async function testModelStrategy() {
         modelConfirmMinContinueCents: 2,
       }
     );
+    // Gate only arms after one full MODEL buy+sell.
+    bot.ledger.trades.unshift({
+      id: 'seed-model-rt',
+      strategy: 'model',
+      status: 'closed',
+      symbol: 'SOL',
+      side: 'yes',
+      entryPriceCents: 60,
+      exitPriceCents: 70,
+      closedAt: Date.now() - 60_000,
+    });
     const preds = {
       ETH: {
         ready: true,
@@ -5358,7 +5369,7 @@ async function testModelStrategy() {
     };
     const top = await bot._evaluateSymbolForModel('ETH', preds);
     checkEq(top, null, '86¢ without under-50 print → blocked (no buy top)');
-    check(/never saw|under 50/i.test(bot.lastDecision || ''), 'cites missing under-50 print');
+    check(/fresh print under|never saw|under 50/i.test(bot.lastDecision || ''), 'cites need fresh under-50');
 
     bot.client = mockClient({
       ticker: 'KXETH15M-CONFIRM',

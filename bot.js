@@ -3639,6 +3639,8 @@ class TradingBot {
       trade.exitReason = reason;
       // Clear miss cooldown/streak for this coin once we're done with the ticket.
       this._clearEntryMiss(trade.symbol, trade.side);
+      // MODEL: after a full exit, require a fresh under-50¢ print before rebuy (YES or NO).
+      this._resetModelConfirmGatesForTrade(trade);
       if (reason === 'stop_loss' && trade.symbol) {
         if (!this._stoppedSymbolsThisCycle) this._stoppedSymbolsThisCycle = new Set();
         this._stoppedSymbolsThisCycle.add(String(trade.symbol).toUpperCase());
@@ -5927,17 +5929,63 @@ class TradingBot {
   }
 
   /**
+   * Confirm gate stays off until at least one MODEL buy+sell has completed
+   * (avoids blocking the very first trade of a session).
+   */
+  _hasCompletedModelRoundTrip() {
+    const trades = (this.ledger && this.ledger.trades) || [];
+    return trades.some(
+      (t) =>
+        t &&
+        String(t.strategy || '').toLowerCase() === 'model' &&
+        String(t.status || '').toLowerCase() === 'closed' &&
+        Number.isFinite(Number(t.entryPriceCents)) &&
+        Number.isFinite(Number(t.exitPriceCents))
+    );
+  }
+
+  /**
+   * After a MODEL close, wipe confirm state for that market (YES and NO).
+   * Forces a fresh under-50¢ print before rebuying — no re-entry where we just were.
+   */
+  _resetModelConfirmGatesForTrade(trade) {
+    if (!trade || !isModelTrade(trade)) return;
+    if (!this._modelConfirmGates) return;
+    const ticker = String(trade.ticker || '');
+    const symbol = String(trade.symbol || '').toUpperCase();
+    for (const key of Object.keys(this._modelConfirmGates)) {
+      const k = String(key);
+      if (ticker && k.startsWith(`${ticker}:`)) {
+        delete this._modelConfirmGates[key];
+        continue;
+      }
+      // Fallback keys that used symbol when ticker was missing.
+      if (symbol && (k.startsWith(`${symbol}:`) || k.includes(`:${symbol.toLowerCase()}:`))) {
+        delete this._modelConfirmGates[key];
+      }
+    }
+  }
+
+  /**
    * Model confirmation gate (optional):
+   * Inactive until one full MODEL round-trip (buy+sell) has completed.
+   * Then, for YES and NO alike:
    * 1) Must observe ask below confirmCross (default 50¢) this market
    * 2) Then see it cross ≥ confirmCross → arm
-   * 3) Enter only after min continuation above the cross, while still in band
+   * 3) Enter only after min continuation above the cross
    * 4) If ask runs too far past the cross → too late / buying the top
    * 5) If ask falls back under confirmCross → disarm (no chase)
+   * Closing a MODEL trade resets the gate so it can't rebuy the same level.
    * Set modelConfirmCrossCents = 0 to disable.
    */
   _checkModelConfirmGate({ ticker, symbol, side, priceCents, closeTime }) {
     const confirm = modelConfirmCrossCents(this.config);
     if (!(confirm > 0)) return { ok: true, skipped: true };
+
+    // Don't enforce until we've done at least one full MODEL buy → sell.
+    if (!this._hasCompletedModelRoundTrip()) {
+      return { ok: true, skipped: true, warmup: true };
+    }
 
     if (!this._modelConfirmGates) this._modelConfirmGates = Object.create(null);
     const key = `${String(ticker || symbol)}:${String(side || '').toLowerCase()}`;
@@ -5976,7 +6024,7 @@ class TradingBot {
         ok: false,
         reason:
           `Waiting: ${symbol} ${String(side).toUpperCase()} at ${ask}¢ — need cross of ${confirm}¢ ` +
-          `before MODEL entry is eligible (confirm gate).`,
+          `before MODEL re-entry (confirm gate; both YES/NO).`,
       };
     }
 
@@ -5986,8 +6034,8 @@ class TradingBot {
       return {
         ok: false,
         reason:
-          `Waiting: ${symbol} ${String(side).toUpperCase()} already ${ask}¢ — never saw it under ` +
-          `${confirm}¢ this window (won't buy the top; need a print below ${confirm}¢ first).`,
+          `Waiting: ${symbol} ${String(side).toUpperCase()} already ${ask}¢ — need a fresh print under ` +
+          `${confirm}¢ after the last exit (won't rebuy where we just were).`,
       };
     }
 
@@ -6013,7 +6061,6 @@ class TradingBot {
     g.lastAsk = ask;
 
     if (falling && ask < confirm + Math.max(1, minCont)) {
-      // Soft fade right after cross — don't chase.
       return {
         ok: false,
         reason:
@@ -6039,7 +6086,6 @@ class TradingBot {
       };
     }
 
-    // Strengthening: at/above prior ask, or clearly above cross.
     const strengthening =
       !Number.isFinite(prevAsk) || ask >= prevAsk || (Number.isFinite(crossAsk) && ask > crossAsk);
     if (!strengthening) {
