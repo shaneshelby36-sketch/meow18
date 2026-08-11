@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 32;
+const SETTINGS_DEFAULTS_VERSION = 33;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -314,6 +314,8 @@ const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 3 * 60 * 1000;
 const MODEL_MIN_TP_CENTS_DEFAULT = 3;
 /** Bank this much green even without a lean flip (follow winners). */
 const MODEL_BANK_GREEN_CENTS_DEFAULT = 8;
+/** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
+const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 
 /**
  * Live probs of the active window clearly against the held side (not the frozen lock).
@@ -661,7 +663,7 @@ const MODEL_MIN_ENTRY_DEFAULT_CENTS = 45;
 /** Absolute floor even when the call is “perfect.” */
 const MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS = 25;
 /** Don't open Model entries in the last this many minutes (freeze-into-settle). */
-const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 1.5;
+const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 2.0;
 /** Confidence required to allow entries below the normal min. */
 const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
@@ -1960,6 +1962,7 @@ class TradingBot {
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
       modelMinMinutesToOpen: MODEL_MIN_MINUTES_TO_OPEN_DEFAULT,
+      modelSettleCloseLossCents: MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
       stopRecoveryCents: 6,
@@ -4176,6 +4179,22 @@ class TradingBot {
         });
         return;
       }
+      // Near settle: close all trades unless deeply underwater (>50¢ loss).
+      // Locks in small wins / scratches; only rides big losers to final settle.
+      const settleCloseThresh = Number.isFinite(Number(this.config.modelSettleCloseLossCents))
+        ? Number(this.config.modelSettleCloseLossCents)
+        : MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT;
+      if (settleCloseThresh > 0 && minutesRemaining <= 1.0 && bidOk) {
+        const redCents = underwater ? adverseCents : 0;
+        if (redCents <= settleCloseThresh) {
+          const reason = flatOrGreen ? 'take_profit' : 'breakeven';
+          const fill = this.config.mode === 'paper' && flatOrGreen ? heldSideBidCents : heldSideBidCents;
+          await this._closePosition(trade, fill, reason, {
+            liveSellPriceCents: heldSideBidCents,
+          });
+          return;
+        }
+      }
       if (bidOk && leanExit && heldLongEnough && isBankableGreen) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
@@ -4508,6 +4527,7 @@ class TradingBot {
     entryAttempts = null,
     modelWindowKey = null,
     modelDirection = null,
+    uncertain = false,
   }) {
     // A paper trade must obey the same price rules as a live order. Without
     // this guard an empty Kalshi quote could be stored as `null` and then
@@ -4652,11 +4672,14 @@ class TradingBot {
     // Each Kalshi contract costs `priceCents` cents and pays out $1 if it
     // wins, so buying (stakeDollars * 100 / priceCents) contracts risks
     // approximately stakeDollars. Always at least 1 contract.
-    const stakeDollars = this._stakeDollarsForEntry(priceCents, {
+    let stakeDollars = this._stakeDollarsForEntry(priceCents, {
       settle: isSettle,
       symbol,
       thirdSlot,
     });
+    if (isModel && uncertain) {
+      stakeDollars = Math.max(0.5, +(stakeDollars / 4).toFixed(2));
+    }
     const contracts = Math.max(1, Math.floor((stakeDollars * 100) / priceCents));
     const entryCostCents = contracts * priceCents;
     const capital = this._capitalStatus();
@@ -5225,6 +5248,7 @@ class TradingBot {
         strategy: 'model',
         modelWindowKey: opportunity.windowKey,
         modelDirection: opportunity.direction,
+        uncertain: opportunity.uncertain,
       });
       return;
     }
@@ -5740,6 +5764,11 @@ class TradingBot {
     }
 
     const leanStrength = Math.abs(Number(window.probabilityUp) - 50) || 1;
+    // Uncertain flag: confidence near floor, lean weak, or cheap-band entry.
+    const confNearFloor = window.confidence < minConf + 5;
+    const leanWeak = leanStrength < 8;
+    const cheapBand = priceCents < MODEL_MIN_ENTRY_DEFAULT_CENTS;
+    const uncertain = !!(confNearFloor || leanWeak || cheapBand);
     return {
       symbol,
       market,
@@ -5750,6 +5779,7 @@ class TradingBot {
       priceCents,
       closeTime,
       rankScore: leanStrength * (window.confidence / 100),
+      uncertain,
     };
   }
 
