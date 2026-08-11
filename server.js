@@ -262,15 +262,24 @@ async function fetchKalshiTargets() {
   await Promise.all(
     Object.entries(series).map(async ([symbol, ticker]) => {
       try {
-        const markets = await kalshiClient.getOpenMarkets(ticker, 5);
+        const markets = await kalshiClient.getOpenMarkets(ticker, 20);
         const now = Date.now();
-        // Skip markets that are already past close — during the settlement
-        // gap Kalshi can still list one with status=open briefly, which made
-        // the dashboard countdown stick on "Settling…" forever.
-        const m = (Array.isArray(markets) ? markets : []).find((market) => {
-          const closeMs = market.close_time ? new Date(market.close_time).getTime() : NaN;
-          return Number.isFinite(closeMs) && closeMs > now + 1500;
-        });
+        // Prefer soonest still-live close (current window). During settlement
+        // gaps status=open can briefly be empty — getOpenMarkets falls back.
+        let m = null;
+        if (typeof kalshiClient.getLiveOpenMarket === 'function') {
+          m = await kalshiClient.getLiveOpenMarket(ticker, { minMsLeft: 1500 });
+        }
+        if (!m) {
+          const live = (Array.isArray(markets) ? markets : [])
+            .map((market) => {
+              const closeMs = market.close_time ? new Date(market.close_time).getTime() : NaN;
+              return { market, closeMs };
+            })
+            .filter(({ closeMs }) => Number.isFinite(closeMs) && closeMs > now + 1500)
+            .sort((a, b) => a.closeMs - b.closeMs);
+          m = live[0] && live[0].market;
+        }
 
         if (m) {
           targets[symbol] = {

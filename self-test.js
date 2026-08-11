@@ -5373,6 +5373,22 @@ async function testModelStrategy() {
       'confirm gate off before first MODEL close this run (even with old ledger RT)'
     );
     checkEq(bot._modelConfirmGateArmed, false, 'armed flag still false');
+    checkEq(
+      bot._hasCompletedModelRoundTrip('ETH'),
+      false,
+      'ETH not armed before its own RT'
+    );
+    // Closing another coin must not arm ETH.
+    bot._modelConfirmProcessStartedAt = Date.now() - 60_000;
+    bot._resetModelConfirmGatesForTrade({
+      strategy: 'model',
+      symbol: 'BTC',
+      ticker: 'KXBTC15M-X',
+      openedAt: Date.now() - 1000,
+      status: 'closed',
+    });
+    checkEq(bot._hasCompletedModelRoundTrip('BTC'), true, 'BTC armed after its RT');
+    checkEq(bot._hasCompletedModelRoundTrip('ETH'), false, 'ETH still unarmed after BTC RT');
   }
 
   // Confirm gate: must see below 50, cross, then continue — not buy the top
@@ -5398,7 +5414,8 @@ async function testModelStrategy() {
         modelConfirmMinContinueCents: 2,
       }
     );
-    // Gate only arms after a MODEL buy+sell in this run (not old ledger).
+    // Gate only arms for THAT coin after a MODEL buy+sell opened this run.
+    bot._modelConfirmArmedSymbols = new Set(['ETH']);
     bot._modelConfirmGateArmed = true;
     const preds = {
       ETH: {

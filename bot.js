@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 43;
+const SETTINGS_DEFAULTS_VERSION = 44;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -69,6 +69,31 @@ const SERIES_BY_SYMBOL = {
   NEAR: 'KXNEAR15M',
   HYPE: 'KXHYPE15M',
 };
+
+/**
+ * Pick the soonest-closing market that still has enough time left.
+ * Prefer the current 15m window over a later one Kalshi may also list as open.
+ */
+function pickLiveOpenMarket(markets, nowMs = Date.now(), minMsLeft = 5000) {
+  const live = (Array.isArray(markets) ? markets : [])
+    .map((m) => {
+      const closeRaw = m && (m.close_time != null ? m.close_time : m.expected_expiration_time);
+      let closeMs = NaN;
+      if (closeRaw != null && closeRaw !== '') {
+        if (typeof closeRaw === 'number' && Number.isFinite(closeRaw)) {
+          // Unix seconds vs ms.
+          closeMs = closeRaw < 1e12 ? closeRaw * 1000 : closeRaw;
+        } else {
+          closeMs = new Date(closeRaw).getTime();
+        }
+      }
+      return { m, closeMs };
+    })
+    .filter(({ closeMs }) => Number.isFinite(closeMs) && closeMs > nowMs + minMsLeft);
+  if (!live.length) return null;
+  live.sort((a, b) => a.closeMs - b.closeMs);
+  return live[0].m;
+}
 
 // Opt-in coins: mapped for exits/management, but new entries stay off until
 // tradeDoge / tradeNear is flipped On in settings (can re-enable anytime).
@@ -2213,8 +2238,11 @@ class TradingBot {
     this._entryMissSessionClose = Object.create(null);
     // Model confirm gate: ticker:side → { seenBelow, armed, crossAsk, peakAsk, lastAsk, closeTime }
     this._modelConfirmGates = Object.create(null);
-    // Confirm rule stays OFF until a MODEL buy+sell closes in this process.
-    // Old ledger history must not arm it on reboot (that felt like "always on").
+    // Per-symbol: confirm only after THAT coin completes a MODEL buy+sell opened
+    // in this process (leftover settles / other coins must not arm it).
+    this._modelConfirmArmedSymbols = new Set();
+    this._modelConfirmProcessStartedAt = Date.now();
+    // Legacy flag kept for tests / status; prefer _modelConfirmArmedSymbols.
     this._modelConfirmGateArmed = false;
     const runState = loadRunState();
     this.isRunning = runState.isRunning !== false;
@@ -4006,6 +4034,23 @@ class TradingBot {
   }
 
   /**
+   * Current tradeable Kalshi 15m market for a series (soonest still-live close).
+   */
+  async _fetchLiveMarket(seriesTicker, minMsLeft = 5000) {
+    if (!seriesTicker || !this.client) return null;
+    if (typeof this.client.getLiveOpenMarket === 'function') {
+      try {
+        const live = await this.client.getLiveOpenMarket(seriesTicker, { minMsLeft, limit: 20 });
+        if (live) return live;
+      } catch (_) {
+        // fall through to list + pick
+      }
+    }
+    const markets = await this.client.getOpenMarkets(seriesTicker, 20);
+    return pickLiveOpenMarket(markets, Date.now(), minMsLeft);
+  }
+
+  /**
    * Second (and further) opens only when at least one existing open is green,
    * or (settle) any open has tagged 90¢ — that latch unlocks a temporary 3rd slot.
    * First open always allowed. Off via secondOpenRequiresGreen: 'off'.
@@ -5700,12 +5745,7 @@ class TradingBot {
         };
       }
       try {
-        const markets = await this.client.getOpenMarkets(seriesTicker, 5);
-        const nowMs = Date.now();
-        const market = (markets || []).find((m) => {
-          const closeMs = m.close_time ? new Date(m.close_time).getTime() : NaN;
-          return Number.isFinite(closeMs) && closeMs > nowMs + 5000;
-        });
+        const market = await this._fetchLiveMarket(seriesTicker, 5000);
         if (!market) {
           return {
             ok: false,
@@ -5714,6 +5754,7 @@ class TradingBot {
               `check before entering ${candidateSymbol}.`,
           };
         }
+        const nowMs = Date.now();
         const yesBid = Number(market.yes_bid);
         const yesAsk = Number(market.yes_ask);
         priceCents = lastStop.side === 'yes' ? yesAsk : 100 - yesBid;
@@ -5787,19 +5828,14 @@ class TradingBot {
 
     let market;
     try {
-      const markets = await this.client.getOpenMarkets(seriesTicker, 5);
-      const nowMs = Date.now();
-      market = (markets || []).find((m) => {
-        const closeMs = m.close_time ? new Date(m.close_time).getTime() : NaN;
-        return Number.isFinite(closeMs) && closeMs > nowMs + 5000;
-      });
+      market = await this._fetchLiveMarket(seriesTicker, 5000);
     } catch (err) {
       this.lastError = `Failed to fetch Kalshi market for ${seriesTicker}: ${err.message}`;
       console.error('[bot]', this.lastError);
       return null;
     }
     if (!market) {
-      this.lastDecision = `Waiting: no open Kalshi market found for ${symbol}.`;
+      this.lastDecision = `Waiting: no open Kalshi market found for ${symbol} (rollover gap or API empty — retrying next cycle).`;
       return null;
     }
     if (this._hasOpenOnTicker(market.ticker)) {
@@ -5899,23 +5935,32 @@ class TradingBot {
   }
 
   /**
-   * Confirm gate stays off until a MODEL buy+sell closes in this run.
-   * (Not ledger history — that would arm it on every reboot after trade #1.)
+   * Confirm gate stays off for a symbol until that symbol completes a MODEL
+   * buy+sell that was opened in this process.
    */
-  _hasCompletedModelRoundTrip() {
-    return this._modelConfirmGateArmed === true;
+  _hasCompletedModelRoundTrip(symbol = null) {
+    if (!symbol) return this._modelConfirmGateArmed === true;
+    const sym = String(symbol || '').toUpperCase();
+    return !!(this._modelConfirmArmedSymbols && this._modelConfirmArmedSymbols.has(sym));
   }
 
   /**
-   * After a MODEL close, arm the confirm rule (if configured) and wipe per-market
-   * gate state so rebuy needs a fresh under-50¢ print — no re-entry where we just were.
+   * After a MODEL close of a trade opened this run, arm confirm for that coin
+   * and wipe per-market gate state so rebuy needs a fresh under-cross print.
    */
   _resetModelConfirmGatesForTrade(trade) {
     if (!trade || !isModelTrade(trade)) return;
-    this._modelConfirmGateArmed = true;
+    const symbol = String(trade.symbol || '').toUpperCase();
+    const openedAt = Number(trade.openedAt);
+    const startedAt = Number(this._modelConfirmProcessStartedAt) || 0;
+    const openedThisRun = Number.isFinite(openedAt) && openedAt >= startedAt;
+    if (openedThisRun && symbol) {
+      if (!this._modelConfirmArmedSymbols) this._modelConfirmArmedSymbols = new Set();
+      this._modelConfirmArmedSymbols.add(symbol);
+      this._modelConfirmGateArmed = true;
+    }
     if (!this._modelConfirmGates) return;
     const ticker = String(trade.ticker || '');
-    const symbol = String(trade.symbol || '').toUpperCase();
     for (const key of Object.keys(this._modelConfirmGates)) {
       const k = String(key);
       if (ticker && k.startsWith(`${ticker}:`)) {
@@ -5931,7 +5976,7 @@ class TradingBot {
 
   /**
    * Model confirmation gate (optional):
-   * Inactive until one full MODEL round-trip (buy+sell) has completed.
+   * Off for a coin until that coin finishes a MODEL buy+sell opened this run.
    * Then, for YES and NO alike:
    * 1) Must observe ask below confirmCross (default 50¢) this market
    * 2) Then see it cross ≥ confirmCross → arm
@@ -5945,8 +5990,8 @@ class TradingBot {
     const confirm = modelConfirmCrossCents(this.config);
     if (!(confirm > 0)) return { ok: true, skipped: true };
 
-    // Don't enforce until we've done at least one full MODEL buy → sell.
-    if (!this._hasCompletedModelRoundTrip()) {
+    // Don't enforce until THIS coin has done a MODEL buy → sell this run.
+    if (!this._hasCompletedModelRoundTrip(symbol)) {
       return { ok: true, skipped: true, warmup: true };
     }
 
@@ -6107,19 +6152,14 @@ class TradingBot {
 
     let market;
     try {
-      const markets = await this.client.getOpenMarkets(seriesTicker, 5);
-      const nowMs = Date.now();
-      market = (markets || []).find((m) => {
-        const closeMs = m.close_time ? new Date(m.close_time).getTime() : NaN;
-        return Number.isFinite(closeMs) && closeMs > nowMs + 5000;
-      });
+      market = await this._fetchLiveMarket(seriesTicker, 5000);
     } catch (err) {
       this.lastError = `Failed to fetch Kalshi market for ${seriesTicker}: ${err.message}`;
       console.error('[bot]', this.lastError);
       return null;
     }
     if (!market) {
-      this.lastDecision = `Waiting: no open Kalshi market found for ${symbol}.`;
+      this.lastDecision = `Waiting: no open Kalshi market found for ${symbol} (rollover gap or API empty — retrying next cycle).`;
       return null;
     }
     if (this._hasOpenOnTicker(market.ticker)) {
@@ -6336,19 +6376,14 @@ class TradingBot {
 
     let market;
     try {
-      const markets = await this.client.getOpenMarkets(seriesTicker, 5);
-      const nowMs = Date.now();
-      market = (markets || []).find((m) => {
-        const closeMs = m.close_time ? new Date(m.close_time).getTime() : NaN;
-        return Number.isFinite(closeMs) && closeMs > nowMs + 5000;
-      });
+      market = await this._fetchLiveMarket(seriesTicker, 5000);
     } catch (err) {
       this.lastError = `Failed to fetch Kalshi market for ${seriesTicker}: ${err.message}`;
       console.error('[bot]', this.lastError);
       return null;
     }
     if (!market) {
-      say(`Waiting: no open Kalshi market found for ${symbol}.`);
+      say(`Waiting: no open Kalshi market found for ${symbol} (rollover gap or API empty — retrying next cycle).`);
       return null;
     }
     if (this._hasOpenOnTicker(market.ticker)) {
@@ -6911,6 +6946,7 @@ class TradingBot {
 module.exports = {
   TradingBot,
   SERIES_BY_SYMBOL,
+  pickLiveOpenMarket,
   DISABLED_TRADE_SYMBOLS,
   OPTIONAL_TRADE_SYMBOLS,
   isKalshiTradeEnabled,
