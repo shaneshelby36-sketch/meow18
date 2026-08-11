@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 28;
+const SETTINGS_DEFAULTS_VERSION = 30;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -369,6 +369,14 @@ function modelMaxAdverseCents(config = {}) {
   return MODEL_MAX_ADVERSE_CENTS_DEFAULT;
 }
 
+/** Hard cliff (¢ below entry) — always exit, lean irrelevant. 0 = off. */
+function modelHardAdverseCents(config = {}) {
+  const n = Number(config.modelHardAdverseCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_HARD_ADVERSE_CENTS_DEFAULT;
+}
+
 function modelSoftLeanMarginPct(config = {}) {
   const n = Number(config.modelSoftLeanMarginPct);
   if (Number.isFinite(n) && n >= 0) return n;
@@ -648,12 +656,16 @@ const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 1.5;
 const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
 const MODEL_PERFECT_LEAN_DEFAULT = 15;
+/** Model confidence floor default. */
+const MODEL_MIN_CONFIDENCE_DEFAULT = 66;
 /** Trail off peak (¢) — bank/cut before a dump finishes (after min-hold). */
 const MODEL_TRAIL_CENTS_DEFAULT = 4;
 /** Soft “still with us” margin — lose this lead while flat/green → bank early. */
 const MODEL_SOFT_LEAN_MARGIN_DEFAULT = 3;
-/** Hard dip stop: exit if held bid falls this many ¢ below entry (real dumps only). */
+/** Soft dip: −N¢ from entry + lean weakening → cut (wobble can breathe if lean firm). */
 const MODEL_MAX_ADVERSE_CENTS_DEFAULT = 12;
+/** Hard cliff: −N¢ from entry → cut no matter what (no ride to 0). */
+const MODEL_HARD_ADVERSE_CENTS_DEFAULT = 20;
 /** Edge: final-N-minute cash-out allows up to this much position PnL loss (¢). */
 const EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS = 75;
 const EDGE_PRE_CLOSE_MINUTES_DEFAULT = 5;
@@ -1099,6 +1111,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelSoftLeanMarginPct',
   'modelTrailCents',
   'modelMaxAdverseCents',
+  'modelHardAdverseCents',
   'modelMinHoldSeconds',
   'modelPostExitCooldownMinutes',
   'modelMinMinutesToOpen',
@@ -1907,9 +1920,9 @@ class TradingBot {
     this.config = {
       symbol: 'AUTO',
       // 'settle' | 'edge' | 'model' (engine UP/DOWN → YES/NO by window schedule).
-      strategyMode: 'settle',
+      strategyMode: 'model',
       edgeThresholdPct: 1, // minimum probability-point edge vs Kalshi to bother trading
-      minConfidence: 55, // engine confidence (0-100) required to act
+      minConfidence: 55, // engine confidence (0-100) required to act (Edge tab)
       stopLossCents: 23, // exit if held bid falls this many cents below entry
       takeProfitCents: 15, // exit if held bid rises this many cents above entry (see final-5 override)
       nearCertainExitCents: 97, // if held bid reaches this, bank it — don't wait on settlement for the last few ¢
@@ -1920,7 +1933,7 @@ class TradingBot {
       edgeBreakevenAfterMinutes: EDGE_BREAKEVEN_AFTER_MINUTES_DEFAULT,
       minMinutesToOpen: 3, // don't open when fewer than this many minutes remain in the window
       // Model tab: window schedule + locked lean; confidence floor; max entry 93¢.
-      modelMinConfidence: 55,
+      modelMinConfidence: MODEL_MIN_CONFIDENCE_DEFAULT,
       modelMaxEntryCents: MODEL_MAX_ENTRY_DEFAULT_CENTS,
       modelMinEntryCents: MODEL_MIN_ENTRY_DEFAULT_CENTS,
       modelPerfectMinEntryCents: MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS,
@@ -1931,6 +1944,7 @@ class TradingBot {
       modelSoftLeanMarginPct: MODEL_SOFT_LEAN_MARGIN_DEFAULT,
       modelTrailCents: MODEL_TRAIL_CENTS_DEFAULT,
       modelMaxAdverseCents: MODEL_MAX_ADVERSE_CENTS_DEFAULT,
+      modelHardAdverseCents: MODEL_HARD_ADVERSE_CENTS_DEFAULT,
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
       modelMinMinutesToOpen: MODEL_MIN_MINUTES_TO_OPEN_DEFAULT,
@@ -1975,7 +1989,7 @@ class TradingBot {
       settleStuckHoldMinutes: 3,
       // AUTO settle: prefer asks below this before 95¢+ “almost certain” tickets.
       settleRichAskFloorCents: 95,
-      stakeDollars: 10, // how much money to risk per trade; contracts are computed from this at entry time
+      stakeDollars: 3, // how much money to risk per trade; contracts are computed from this at entry time
       // Settle NEAR only: risk half stake (thinner book / choppier). Other coins full size.
       halfStakeNear: 'on',
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
@@ -2550,7 +2564,7 @@ class TradingBot {
    */
   _stakeDollarsForEntry(priceCents, { settle = false, symbol = null, thirdSlot = false } = {}) {
     const base = Number(this._computeNextStake());
-    const safeBase = Number.isFinite(base) && base > 0 ? base : Number(this.config.stakeDollars) || 10;
+    const safeBase = Number.isFinite(base) && base > 0 ? base : Number(this.config.stakeDollars) || 3;
     if (!settle) return safeBase;
     const p = Number(priceCents);
     if (Number.isFinite(p) && p < 80) {
@@ -4082,9 +4096,10 @@ class TradingBot {
       return;
     }
 
-    // Model: window lean + predict falls early (soften / trail) + hard dip stop.
+    // Model: window lean + predict falls early (soften / trail) + two-tier dip.
+    // Soft dip (−12¢): only with lean weakening. Hard cliff (−20¢): always cut.
     // Flat/green: bank when lean softens, confidence drops, locks flip, or bid trails peak.
-    // Red: cut on max adverse ¢ from entry (no lean needed), trail, or hard lean/conf.
+    // Red: trail / lean / conf after min-hold; dips can fire early.
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
       const entry = Number(trade.entryPriceCents);
@@ -4104,9 +4119,8 @@ class TradingBot {
       const underwater = bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents < entry;
       const adverseCents =
         underwater && Number.isFinite(entry) ? Math.round(entry - heldSideBidCents) : 0;
-      const maxAdverse = modelMaxAdverseCents(this.config);
-      // Price backstop — fires even during min-hold (gaps/bleeds don't wait for lean).
-      const dipStop = underwater && maxAdverse > 0 && adverseCents >= maxAdverse;
+      const softAdverse = modelMaxAdverseCents(this.config);
+      const hardAdverse = modelHardAdverseCents(this.config);
       const againstLocked =
         picked &&
         picked.direction &&
@@ -4121,12 +4135,18 @@ class TradingBot {
         !modelLiveLeanStillFavors(picked.window, trade.side, modelSoftLeanMarginPct(this.config));
       const minConf = Number.isFinite(Number(this.config.modelMinConfidence))
         ? Number(this.config.modelMinConfidence)
-        : 55;
+        : MODEL_MIN_CONFIDENCE_DEFAULT;
       const weakConf =
         picked &&
         picked.window &&
         Number.isFinite(picked.window.confidence) &&
         picked.window.confidence < minConf;
+      const leanWeakening = !!(leanSoftening || liveAgainst || againstLocked || weakConf);
+      // Soft: −12¢ + lean fading. Hard: −20¢ cliff regardless of lean / min-hold.
+      const softDip =
+        underwater && softAdverse > 0 && adverseCents >= softAdverse && leanWeakening;
+      const hardDip = underwater && hardAdverse > 0 && adverseCents >= hardAdverse;
+      const dipStop = softDip || hardDip;
 
       const peakRaw = Number(trade.peakHeldBidCents);
       const peak =
@@ -4150,7 +4170,7 @@ class TradingBot {
       // Predictive bank while still flat/green — don't wait for a hard lean flip into red.
       const predictFall =
         heldLongEnough && (leanSoftening || trailDrop || weakConf || againstLocked || liveAgainst);
-      // Red cuts only after min-hold (noise). Dip stop above is the sole early price backstop.
+      // Red cuts only after min-hold (noise). Dip stop above is the early price backstop.
       const cutRed =
         heldLongEnough && (againstLocked || liveAgainst || weakConf || trailDrop);
 
@@ -5691,7 +5711,7 @@ class TradingBot {
     const { window, direction, key: windowKey } = picked;
     const minConf = Number.isFinite(Number(this.config.modelMinConfidence))
       ? Number(this.config.modelMinConfidence)
-      : 55;
+      : MODEL_MIN_CONFIDENCE_DEFAULT;
     if (!Number.isFinite(window.confidence) || window.confidence < minConf) {
       const confidence = Number.isFinite(window.confidence) ? window.confidence : 'unavailable';
       this.lastDecision =
@@ -6398,12 +6418,15 @@ module.exports = {
   modelSoftLeanMarginPct,
   modelTrailCents,
   modelMaxAdverseCents,
+  modelHardAdverseCents,
   MODEL_LIVE_LEAN_MARGIN_DEFAULT,
   MODEL_MIN_HOLD_MS_DEFAULT,
   MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT,
   MODEL_MIN_TP_CENTS_DEFAULT,
   MODEL_TRAIL_CENTS_DEFAULT,
   MODEL_MAX_ADVERSE_CENTS_DEFAULT,
+  MODEL_HARD_ADVERSE_CENTS_DEFAULT,
+  MODEL_MIN_CONFIDENCE_DEFAULT,
   MODEL_SOFT_LEAN_MARGIN_DEFAULT,
   MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS,
   MODEL_PERFECT_CONFIDENCE_DEFAULT,

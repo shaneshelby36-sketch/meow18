@@ -1682,7 +1682,7 @@ async function loadBotConfigIntoForm() {
     renderSettleExitTable(data.settleExitTiers);
     renderSettleExitTableNote(c);
     document.getElementById('bot-symbol').value = c.symbol;
-    setBotStrategyTab(c.strategyMode || 'settle');
+    setBotStrategyTab(c.strategyMode || 'model');
     const backtestSymbol = document.getElementById('backtest-symbol');
     if (backtestSymbol && [...backtestSymbol.options].some((o) => o.value === c.symbol)) {
       backtestSymbol.value = c.symbol;
@@ -1695,7 +1695,7 @@ async function loadBotConfigIntoForm() {
     document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 15;
     document.getElementById('bot-minentries').value = c.minEntryCents != null ? c.minEntryCents : 40;
     const modelConf = document.getElementById('bot-model-confidence');
-    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 55;
+    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 66;
     const settleMin = document.getElementById('bot-settle-min');
     if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 80;
     const settleMax = document.getElementById('bot-settle-max');
@@ -1925,14 +1925,14 @@ async function saveBotConfig(opts = {}) {
   const skimAmount = parseFloat(document.getElementById('bot-skim-amount').value);
   const payload = {
     symbol: document.getElementById('bot-symbol').value,
-    strategyMode: document.getElementById('bot-strategy-mode')?.value || 'settle',
+    strategyMode: document.getElementById('bot-strategy-mode')?.value || 'model',
     edgeThresholdPct: parseFloat(document.getElementById('bot-edge').value),
     minConfidence: parseFloat(document.getElementById('bot-confidence').value),
     stopLossCents: parseFloat(document.getElementById('bot-stoploss').value),
     stopRecoveryCents: parseFloat(document.getElementById('bot-stoprecovery').value),
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
-    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '55'),
+    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '66'),
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '80'),
     settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '94'),
     settleStopLossCents: Math.max(

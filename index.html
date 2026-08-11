@@ -254,10 +254,10 @@
         <div id="bot-settings-fields">
         <div class="bot-strategy-tabs" role="tablist" aria-label="Strategy">
           <button type="button" class="bot-strategy-tab" data-strategy="edge" id="bot-tab-edge">Edge</button>
-          <button type="button" class="bot-strategy-tab active" data-strategy="settle" id="bot-tab-settle">Settle (80–94¢)</button>
-          <button type="button" class="bot-strategy-tab" data-strategy="model" id="bot-tab-model">Model</button>
+          <button type="button" class="bot-strategy-tab" data-strategy="settle" id="bot-tab-settle">Settle (80–94¢)</button>
+          <button type="button" class="bot-strategy-tab active" data-strategy="model" id="bot-tab-model">Model</button>
         </div>
-        <input type="hidden" id="bot-strategy-mode" value="settle" />
+        <input type="hidden" id="bot-strategy-mode" value="model" />
 
         <div class="bot-field-grid">
           <label>Asset to trade
@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint">Windows: UP→YES / DOWN→NO. Normal entries <strong>45–93¢</strong> (25–44¢ only if conf≥80% and lean≥15pts). No new entries in the <strong>last 1.5 minutes</strong>. Dip stop at <strong>−12¢ from entry</strong> (early backstop only). Peak trail 4¢ after ~90s hold; lean soften. TP ≥3¢ green; ~3m sit-out after exits.</p>
+          <p class="settings-hint">Windows: UP→YES / DOWN→NO. Normal entries <strong>45–93¢</strong> (25–44¢ only if conf≥80% and lean≥15pts). No new entries in the <strong>last 1.5 minutes</strong>. Soft dip <strong>−12¢ + lean fading</strong>; hard cliff <strong>−20¢</strong> always. Peak trail 4¢ after ~90s hold. TP ≥3¢ green; ~3m sit-out after exits.</p>
           <label>Min confidence
             <div class="slider-row">
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />
