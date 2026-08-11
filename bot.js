@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 41;
+const SETTINGS_DEFAULTS_VERSION = 42;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -784,8 +784,8 @@ const MODEL_MAX_ENTRY_DEFAULT_CENTS = 93;
 const MODEL_MIN_ENTRY_DEFAULT_CENTS = 60;
 /** Absolute floor even when the call is “perfect.” (matches min — no sub-60 longshots). */
 const MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS = 60;
-/** Don't open Model entries in the last this many minutes (freeze-into-settle). */
-const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 5.0;
+/** Don't open Model entries in the last this many minutes. 0 = no late cutoff (off for now). */
+const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 0;
 /** Confidence required to allow entries below the normal min. */
 const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */

@@ -5459,7 +5459,7 @@ async function testModelStrategy() {
   checkEq(MODEL_HARD_ADVERSE_CENTS_DEFAULT, 0, 'hard cliff off — no bounce stop-outs');
   checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 7, 'bank / momentum arm at ≥7¢ green');
   checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 7, 'min TP 7¢ — no micro banks');
-  checkEq(MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, 5, 'no new model entries in last 5m');
+  checkEq(MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, 0, 'model late entry cutoff off');
   checkEq(MODEL_LIVE_LEAN_MARGIN_DEFAULT, 5, 'live lean margin 5pts');
   checkEq(MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, 8, 'entry live lean margin 8pts');
 
