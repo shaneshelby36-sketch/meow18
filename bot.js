@@ -316,7 +316,7 @@ const MODEL_MIN_TP_CENTS_DEFAULT = 3;
 const MODEL_BANK_GREEN_CENTS_DEFAULT = 8;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
-/** Model entries below this ask use ¼ stake (uncertain sizing). */
+/** Model entries below this ask use ¼ stake (price-only sizing rule). */
 const MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT = 70;
 
 /**
@@ -2572,7 +2572,9 @@ class TradingBot {
   }
 
   /**
-   * Stake for this settle entry.
+   * Stake for this entry.
+   * Model: under 70¢ → ¼ only (no conf/lean quartering).
+   * Settle:
    * - Ask &lt; 80¢: ¼ normal (all coins)
    * - Else NEAR: ½ normal when halfStakeNear is on
    * - Else 3rd concurrent open (touched-90 bonus slot): ½ normal
@@ -2581,15 +2583,22 @@ class TradingBot {
    */
   _stakeDollarsForEntry(
     priceCents,
-    { settle = false, symbol = null, thirdSlot = false, modelUncertain = false } = {}
+    { settle = false, symbol = null, thirdSlot = false, modelUncertain = false, model = false } = {}
   ) {
     const base = Number(this._computeNextStake());
     const safeBase = Number.isFinite(base) && base > 0 ? base : Number(this.config.stakeDollars) || 3;
+    const p = Number(priceCents);
+    // Model: only price under 70¢ gets quarter (ignore stale uncertain flags).
+    if (model) {
+      if (Number.isFinite(p) && p < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT) {
+        return Math.max(0.5, +(safeBase / 4).toFixed(2));
+      }
+      return safeBase;
+    }
     if (modelUncertain) {
       return Math.max(0.5, +(safeBase / 4).toFixed(2));
     }
     if (!settle) return safeBase;
-    const p = Number(priceCents);
     if (Number.isFinite(p) && p < 80) {
       return Math.max(0.5, +(safeBase / 4).toFixed(2));
     }
@@ -4544,6 +4553,9 @@ class TradingBot {
       return false;
     }
     const isModel = strategy === 'model';
+    // Model quarter stake = ask under 70¢ only.
+    let modelQuarter =
+      isModel && Number.isFinite(priceCents) && priceCents < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
     const symKey = String(symbol || '').toUpperCase();
     // Never reopen a coin that exited earlier in this same cycle (same-second knife-catch).
     if (this._stoppedSymbolsThisCycle && this._stoppedSymbolsThisCycle.has(symKey)) {
@@ -4683,7 +4695,8 @@ class TradingBot {
       settle: isSettle,
       symbol,
       thirdSlot,
-      modelUncertain: isModel && uncertain,
+      model: isModel,
+      modelUncertain: modelQuarter,
     });
     const contracts = Math.max(1, Math.floor((stakeDollars * 100) / priceCents));
     const entryCostCents = contracts * priceCents;
@@ -4717,7 +4730,7 @@ class TradingBot {
         ? {
             modelWindowKey: modelWindowKey || null,
             modelDirection: modelDirection || null,
-            ...(uncertain ? { modelUncertain: true } : {}),
+            ...(modelQuarter ? { modelUncertain: true } : {}),
           }
         : {}),
     };
@@ -4784,6 +4797,11 @@ class TradingBot {
           }
         }
 
+        // Re-check under-70 on the live working ask (chase can move through the line).
+        const liveQuarter =
+          isModel &&
+          Number.isFinite(workingPrice) &&
+          workingPrice < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
         let attemptContracts = Math.max(
           1,
           Math.floor(
@@ -4791,7 +4809,8 @@ class TradingBot {
               settle: isSettle,
               symbol,
               thirdSlot,
-              modelUncertain: isModel && uncertain,
+              model: isModel,
+              modelUncertain: liveQuarter,
             }) *
               100) /
               workingPrice
@@ -4922,6 +4941,14 @@ class TradingBot {
         }
       }
       trade.entryFeesCents = this._orderFeesCents(fill && fill.order);
+      if (
+        isModel &&
+        Number.isFinite(trade.entryPriceCents) &&
+        trade.entryPriceCents < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT
+      ) {
+        modelQuarter = true;
+        trade.modelUncertain = true;
+      }
       trade.liveOrderId = orderId;
       this._clearEntryMiss(symbol, side);
     }
@@ -4980,7 +5007,7 @@ class TradingBot {
           `Opened ${symbol} ${side.toUpperCase()} settle position at ${trade.entryPriceCents}¢` +
           ` (hold to settlement${lateNote}${sizeNote}).`;
       } else if (isModel) {
-        const sizeNote = uncertain ? ' · quarter stake' : '';
+        const sizeNote = modelQuarter ? ' · quarter stake' : '';
         this.lastDecision =
           `Opened ${symbol} ${side.toUpperCase()} model position at ${trade.entryPriceCents}¢` +
           `${sizeNote} (confidence ${engineConfidence}%).`;
@@ -5793,11 +5820,8 @@ class TradingBot {
     }
 
     const leanStrength = Math.abs(Number(window.probabilityUp) - 50) || 1;
-    // Uncertain flag: confidence near floor, lean weak, or sub-70¢ entry.
-    const confNearFloor = window.confidence < minConf + 5;
-    const leanWeak = leanStrength < 8;
-    const lowPrice = priceCents < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
-    const uncertain = !!(confNearFloor || leanWeak || lowPrice);
+    // Quarter stake only for asks under 70¢ — not conf/lean.
+    const uncertain = priceCents < MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
     return {
       symbol,
       market,
