@@ -5756,6 +5756,18 @@ class TradingBot {
     }
 
     const side = direction === 'UP' ? 'yes' : 'no';
+    // Lock alone is not enough — live probs must still favor that side, or we
+    // open into a lean that's already rolling over (then dump / flip).
+    const liveMargin = modelLiveLeanMarginPct(this.config);
+    if (!modelLiveLeanStillFavors(window, side, liveMargin)) {
+      const up = Number(window.probabilityUp);
+      const down = Number(window.probabilityDown);
+      this.lastDecision =
+        `Waiting: ${symbol} lock is ${direction} but live lean is ` +
+        `${Number.isFinite(up) ? up.toFixed(0) : '?'}% UP / ${Number.isFinite(down) ? down.toFixed(0) : '?'}% DOWN` +
+        ` (need live favor by ≥${liveMargin}pts).`;
+      return null;
+    }
     const yesBid = Number(market.yes_bid);
     const yesAsk = Number(market.yes_ask);
     if (!Number.isFinite(yesBid) || !Number.isFinite(yesAsk) || yesBid < 1 || yesAsk > 99 || yesBid > yesAsk) {

@@ -5369,6 +5369,39 @@ async function testModelStrategy() {
     checkEq(opp && opp.windowKey, 'w5', '12m left uses w5');
   }
 
+  // Lock UP but live lean flipped DOWN → no entry
+  {
+    const closeMs = Date.now() + 12 * 60 * 1000;
+    const bot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-STALE',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(closeMs).toISOString(),
+        yes_bid: 52,
+        yes_ask: 55,
+        no_bid: 45,
+        no_ask: 48,
+      }),
+      { strategyMode: 'model', modelMinConfidence: 55 }
+    );
+    const preds = {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: {
+          // Lock still UP; live probs already DOWN hard.
+          w5: { ...win(35, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(40, 70),
+          w15: win(45, 60),
+        },
+      },
+    };
+    const blocked = await bot._evaluateSymbolForModel('ETH', preds);
+    checkEq(blocked, null, 'stale lock + live against → no entry');
+    check(/live lean/i.test(bot.lastDecision || ''), 'decision cites live lean disagreement');
+  }
+
   // Never enter above 93¢
   {
     const closeMs = Date.now() + 12 * 60 * 1000;
