@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 23;
+const SETTINGS_DEFAULTS_VERSION = 24;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -304,15 +304,96 @@ function modelDirectionAgainstHeld(direction, side) {
   return (side === 'yes' && direction === 'DOWN') || (side === 'no' && direction === 'UP');
 }
 
-/** Live probs of the active window clearly against the held side (not the frozen lock). */
-function modelLiveLeanAgainstHeld(window, side) {
+/** Live lean must clear this many points vs the held side (avoids 50.1/49.9 chop). */
+const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 8;
+/** Don't early-exit a Model hold until it's been open at least this long. */
+const MODEL_MIN_HOLD_MS_DEFAULT = 90_000;
+/** After Model BE/TP/lean-flip, sit out that coin this long (runCycle used to clear same-tick only). */
+const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 3 * 60 * 1000;
+/** Model TP needs at least this many ¢ of green — don't bank a 1¢ tick. */
+const MODEL_MIN_TP_CENTS_DEFAULT = 3;
+
+/**
+ * Live probs of the active window clearly against the held side (not the frozen lock).
+ * Requires a margin so 51/49 noise doesn't churn lean-flips.
+ */
+function modelLiveLeanAgainstHeld(window, side, marginPct = MODEL_LIVE_LEAN_MARGIN_DEFAULT) {
   if (!window) return false;
   const up = Number(window.probabilityUp);
   const down = Number(window.probabilityDown);
   if (!Number.isFinite(up) || !Number.isFinite(down)) return false;
-  if (side === 'yes') return down > up;
-  if (side === 'no') return up > down;
+  const margin = Number.isFinite(Number(marginPct)) ? Math.max(0, Number(marginPct)) : MODEL_LIVE_LEAN_MARGIN_DEFAULT;
+  if (side === 'yes') return down >= up + margin;
+  if (side === 'no') return up >= down + margin;
   return false;
+}
+
+function modelMinHoldMs(config = {}) {
+  const mins = Number(config.modelMinHoldSeconds);
+  if (Number.isFinite(mins) && mins <= 0) return 0;
+  if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 1000);
+  return MODEL_MIN_HOLD_MS_DEFAULT;
+}
+
+function modelPostExitCooldownMs(config = {}) {
+  const mins = Number(config.modelPostExitCooldownMinutes);
+  if (Number.isFinite(mins) && mins <= 0) return 0;
+  if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 60 * 1000);
+  return MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT;
+}
+
+function modelMinTpCents(config = {}) {
+  const n = Number(config.modelMinTpCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_MIN_TP_CENTS_DEFAULT;
+}
+
+function modelLiveLeanMarginPct(config = {}) {
+  const n = Number(config.modelLiveLeanMarginPct);
+  if (Number.isFinite(n) && n >= 0) return n;
+  return MODEL_LIVE_LEAN_MARGIN_DEFAULT;
+}
+
+/**
+ * After a Model BE/TP/lean-flip on this coin, block new model entries until cooldown elapses.
+ */
+function checkModelPostExitCooldown({ trades, symbol, cooldownMs, now = Date.now() } = {}) {
+  const sym = String(symbol || '').toUpperCase();
+  const cd = Number(cooldownMs);
+  if (!sym || !Number.isFinite(cd) || cd <= 0) return { ok: true };
+  let best = null;
+  let bestAt = -Infinity;
+  for (const t of trades || []) {
+    if (!t || String(t.strategy || '').toLowerCase() !== 'model') continue;
+    if (String(t.symbol || '').toUpperCase() !== sym) continue;
+    if (t.status && String(t.status) !== 'closed') continue;
+    const reason = String(t.exitReason || '');
+    if (
+      reason !== 'model_lean_flip' &&
+      reason !== 'breakeven' &&
+      reason !== 'take_profit' &&
+      reason !== 'near_certain'
+    ) {
+      continue;
+    }
+    const at = Number(t.closedAt);
+    const score = Number.isFinite(at) ? at : -Infinity;
+    if (score >= bestAt) {
+      bestAt = score;
+      best = t;
+    }
+  }
+  if (!best || !Number.isFinite(bestAt)) return { ok: true };
+  const elapsed = Number(now) - bestAt;
+  if (elapsed < cd) {
+    const remainSec = Math.max(1, Math.ceil((cd - elapsed) / 1000));
+    return {
+      ok: false,
+      reason: `Waiting: ${sym} model sit-out after ${best.exitReason} (~${remainSec}s left) — avoids chop reopen.`,
+    };
+  }
+  return { ok: true };
 }
 
 /** Entry-tiered settle TP/stale exits (default on). Off → stop + hold to settlement only. */
@@ -917,6 +998,10 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMinConfidence',
   'modelMaxEntryCents',
   'modelMinEntryCents',
+  'modelMinTpCents',
+  'modelLiveLeanMarginPct',
+  'modelMinHoldSeconds',
+  'modelPostExitCooldownMinutes',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -1738,6 +1823,10 @@ class TradingBot {
       modelMinConfidence: 55,
       modelMaxEntryCents: MODEL_MAX_ENTRY_DEFAULT_CENTS,
       modelMinEntryCents: MODEL_MIN_ENTRY_DEFAULT_CENTS,
+      modelMinTpCents: MODEL_MIN_TP_CENTS_DEFAULT,
+      modelLiveLeanMarginPct: MODEL_LIVE_LEAN_MARGIN_DEFAULT,
+      modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
+      modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
       stopRecoveryCents: 6,
@@ -3886,9 +3975,8 @@ class TradingBot {
     }
 
     // Model: window lean + don't lose much + model-driven bank.
-    // Exit when locked lean flips, live lean turns against, or confidence collapses.
-    // Green → take_profit at bid; flat → breakeven; red → model_lean_flip.
-    // Else hold to settle.
+    // Live lean needs a clear margin (not 50.1/49.9). Min hold before early exits.
+    // TP only with ≥N¢ green — tiny greens hold through noise.
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
       const entry = Number(trade.entryPriceCents);
@@ -3897,16 +3985,23 @@ class TradingBot {
         Number.isFinite(heldSideBidCents) &&
         heldSideBidCents >= 1 &&
         heldSideBidCents <= 99;
+      const minTp = modelMinTpCents(this.config);
       const flatOrGreen =
         bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents >= entry;
-      const isGreen = flatOrGreen && heldSideBidCents > entry;
+      // Bankable green only — +1¢/+2¢ is noise, not a take-profit.
+      const isBankableGreen =
+        flatOrGreen && heldSideBidCents >= entry + Math.max(1, minTp || 0);
+      const exactlyFlat =
+        bidOk && Number.isFinite(entry) && Math.round(heldSideBidCents) === Math.round(entry);
       const underwater = bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents < entry;
       const againstLocked =
         picked &&
         picked.direction &&
         modelDirectionAgainstHeld(picked.direction, trade.side);
       const liveAgainst =
-        picked && picked.window && modelLiveLeanAgainstHeld(picked.window, trade.side);
+        picked &&
+        picked.window &&
+        modelLiveLeanAgainstHeld(picked.window, trade.side, modelLiveLeanMarginPct(this.config));
       const minConf = Number.isFinite(Number(this.config.modelMinConfidence))
         ? Number(this.config.modelMinConfidence)
         : 55;
@@ -3916,15 +4011,24 @@ class TradingBot {
         Number.isFinite(picked.window.confidence) &&
         picked.window.confidence < minConf;
 
-      // Locked flip, live lean flip, or confidence collapse — any is enough to leave.
-      const modelSaysExit = againstLocked || liveAgainst || weakConf;
-      if (bidOk && modelSaysExit && isGreen) {
+      const openedAt = Number(trade.openedAt);
+      const heldMs = Number.isFinite(openedAt) ? now - openedAt : Infinity;
+      const minHold = modelMinHoldMs(this.config);
+      const heldLongEnough = minHold <= 0 || heldMs >= minHold;
+
+      // Locked window switch can exit anytime after min hold; live/weak need hold too.
+      const softExit = (liveAgainst || weakConf) && heldLongEnough;
+      const hardExit = againstLocked && heldLongEnough;
+      const modelSaysExit = hardExit || softExit;
+
+      if (bidOk && modelSaysExit && isBankableGreen) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
         });
         return;
       }
-      if (bidOk && modelSaysExit && flatOrGreen) {
+      // Exactly flat + exit signal → scratch. Tiny green (+1/+2) → hold for a real TP or red flip.
+      if (bidOk && modelSaysExit && exactlyFlat) {
         const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
         await this._closePosition(trade, beFill, 'breakeven', {
           liveSellPriceCents: heldSideBidCents,
@@ -5365,6 +5469,17 @@ class TradingBot {
       return null;
     }
 
+    const cooldown = checkModelPostExitCooldown({
+      trades: this.ledger.trades,
+      symbol,
+      cooldownMs: modelPostExitCooldownMs(this.config),
+      now: Date.now(),
+    });
+    if (!cooldown.ok) {
+      this.lastDecision = cooldown.reason;
+      return null;
+    }
+
     const assetPrediction = predictions[symbol];
     if (!assetPrediction || !assetPrediction.ready) {
       this.lastDecision = `Waiting: ${symbol} prediction data is still seeding.`;
@@ -6123,6 +6238,15 @@ module.exports = {
   modelWindowDirection,
   modelDirectionAgainstHeld,
   modelLiveLeanAgainstHeld,
+  checkModelPostExitCooldown,
+  modelMinHoldMs,
+  modelPostExitCooldownMs,
+  modelMinTpCents,
+  modelLiveLeanMarginPct,
+  MODEL_LIVE_LEAN_MARGIN_DEFAULT,
+  MODEL_MIN_HOLD_MS_DEFAULT,
+  MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT,
+  MODEL_MIN_TP_CENTS_DEFAULT,
   isSettleTieredExitsEnabled,
   settleExitPlan,
   settleExitTiersForDashboard,
