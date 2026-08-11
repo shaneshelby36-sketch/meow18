@@ -329,6 +329,21 @@ function modelDirectionAgainstHeld(direction, side) {
   return (side === 'yes' && direction === 'DOWN') || (side === 'no' && direction === 'UP');
 }
 
+/** Fade the model: buy the opposite Kalshi side of the locked lean. Default off. */
+function isModelInvertSide(config = {}) {
+  return isOnOffEnabled(config && config.modelInvertSide, false);
+}
+
+function modelSignalSideFromDirection(direction) {
+  return direction === 'UP' ? 'yes' : direction === 'DOWN' ? 'no' : null;
+}
+
+function flipKalshiSide(side) {
+  if (side === 'yes') return 'no';
+  if (side === 'no') return 'yes';
+  return side;
+}
+
 /** Live lean must clear this many points vs the held side (avoids 50.1/49.9 chop). */
 const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 5;
 /** Entry: live lean must favor the locked side by at least this many pts (stricter than exit). */
@@ -1898,6 +1913,7 @@ const EDITABLE_STRING_FIELDS = {
   secondOpenRequiresGreen: (v) => parseOnOffField(v, true),
   tradeDoge: (v) => parseOnOffField(v, false),
   tradeNear: (v) => parseOnOffField(v, false),
+  modelInvertSide: (v) => parseOnOffField(v, false),
   skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
 };
@@ -2113,6 +2129,7 @@ class TradingBot {
       modelConfirmCrossCents: MODEL_CONFIRM_CROSS_CENTS_DEFAULT,
       modelConfirmMaxExtensionCents: MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT,
       modelConfirmMinContinueCents: MODEL_CONFIRM_MIN_CONTINUE_CENTS_DEFAULT,
+      modelInvertSide: 'off', // fade: lock UP→buy NO, DOWN→buy YES
       modelPerfectMinEntryCents: MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS,
       modelPerfectConfidence: MODEL_PERFECT_CONFIDENCE_DEFAULT,
       modelPerfectLeanPts: MODEL_PERFECT_LEAN_DEFAULT,
@@ -4364,6 +4381,8 @@ class TradingBot {
       const adverseCents =
         underwater && Number.isFinite(entry) ? Math.round(entry - heldSideBidCents) : 0;
       const hardAdverse = modelHardAdverseCents(this.config);
+      const faded =
+        trade.modelInverted === true || isModelInvertSide(this.config);
       const againstLocked =
         picked &&
         picked.direction &&
@@ -4384,7 +4403,11 @@ class TradingBot {
         picked.window &&
         Number.isFinite(picked.window.confidence) &&
         picked.window.confidence < minConf;
-      const leanExit = !!(againstLocked || liveAgainst || weakConf);
+      // Fade holds are *supposed* to sit against the lock — don't BE-scratch
+      // just because the signal still points the original way.
+      const leanExit = faded
+        ? !!weakConf
+        : !!(againstLocked || liveAgainst || weakConf);
 
       const openedAt = Number(trade.openedAt);
       const heldMs = Number.isFinite(openedAt) ? now - openedAt : Infinity;
@@ -4403,8 +4426,9 @@ class TradingBot {
       const momentumStalled =
         (stallPullback > 0 && pullback >= stallPullback) ||
         (stallMs > 0 && peakAgeMs >= stallMs);
-      // Keep running only while engine still agrees and price hasn't stalled.
-      const momentumRun = !!(liveFavors && !momentumStalled);
+      // Keep running while price hasn't stalled. Fade rides the opposite
+      // contract on price, not on engine agreement with the held side.
+      const momentumRun = faded ? !momentumStalled : !!(liveFavors && !momentumStalled);
 
       const hardDip = underwater && hardAdverse > 0 && adverseCents >= hardAdverse;
       if (hardDip) {
@@ -4805,6 +4829,7 @@ class TradingBot {
     modelWindowKey = null,
     modelDirection = null,
     uncertain = false,
+    modelInverted = false,
   }) {
     // A paper trade must obey the same price rules as a live order. Without
     // this guard an empty Kalshi quote could be stored as `null` and then
@@ -4993,6 +5018,7 @@ class TradingBot {
         ? {
             modelWindowKey: modelWindowKey || null,
             modelDirection: modelDirection || null,
+            ...(modelInverted || isModelInvertSide(this.config) ? { modelInverted: true } : {}),
             ...(modelQuarter ? { modelUncertain: true } : {}),
           }
         : {}),
@@ -6199,7 +6225,13 @@ class TradingBot {
       return null;
     }
 
-    const side = direction === 'UP' ? 'yes' : 'no';
+    const signalSide = modelSignalSideFromDirection(direction);
+    if (!signalSide) {
+      this.lastDecision = `Waiting: ${symbol} has no usable model window lean.`;
+      return null;
+    }
+    const invert = isModelInvertSide(this.config);
+    const side = invert ? flipKalshiSide(signalSide) : signalSide;
     const yesBid = Number(market.yes_bid);
     const yesAsk = Number(market.yes_ask);
     if (!Number.isFinite(yesBid) || !Number.isFinite(yesAsk) || yesBid < 1 || yesAsk > 99 || yesBid > yesAsk) {
@@ -6232,9 +6264,11 @@ class TradingBot {
       return null;
     }
 
-    // Lock alone is not enough — live probs must still favor that side.
+    // Lock alone is not enough — live probs must still favor the SIGNAL
+    // (then fade buys the other side). Don't require lean to already agree
+    // with the faded ticket or we'd never enter.
     const liveMargin = modelEntryLiveLeanMarginPct(this.config);
-    if (!modelLiveLeanStillFavors(window, side, liveMargin)) {
+    if (!modelLiveLeanStillFavors(window, signalSide, liveMargin)) {
       const up = Number(window.probabilityUp);
       const down = Number(window.probabilityDown);
       this.lastDecision =
@@ -6264,6 +6298,8 @@ class TradingBot {
       closeTime,
       rankScore: leanStrength * (window.confidence / 100),
       uncertain,
+      invert,
+      signalSide,
       confirmCrossAsk: confirmGate.crossAsk != null ? confirmGate.crossAsk : null,
     };
   }
@@ -6298,12 +6334,15 @@ class TradingBot {
       floorStrike: opportunity.market.floor_strike,
       closeTime: opportunity.closeTime,
       engineProbability:
-        opportunity.side === 'yes' ? opportunity.window.probabilityUp : opportunity.window.probabilityDown,
+        (opportunity.signalSide || opportunity.side) === 'yes'
+          ? opportunity.window.probabilityUp
+          : opportunity.window.probabilityDown,
       engineConfidence: opportunity.window.confidence,
       strategy: 'model',
       modelWindowKey: opportunity.windowKey,
       modelDirection: opportunity.direction,
       uncertain: opportunity.uncertain,
+      modelInverted: opportunity.invert === true,
     };
   }
 
@@ -6964,6 +7003,9 @@ module.exports = {
   isSettleTrade,
   isModelStrategyMode,
   isModelTrade,
+  isModelInvertSide,
+  modelSignalSideFromDirection,
+  flipKalshiSide,
   pickModelWindowKey,
   pickModelWindow,
   modelWindowDirection,

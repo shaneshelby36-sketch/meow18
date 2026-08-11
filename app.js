@@ -1690,6 +1690,7 @@ function wireBotConfigAutoSave() {
     'bot-second-green',
     'bot-trade-near',
     'bot-trade-doge',
+    'bot-model-invert',
     'bot-symbol',
     'bot-strategy-mode',
   ]) {
@@ -1723,6 +1724,15 @@ async function loadBotConfigIntoForm() {
     if (stopRecEl) stopRecEl.value = c.stopRecoveryCents != null ? c.stopRecoveryCents : 6;
     document.getElementById('bot-takeprofit').value = c.takeProfitCents != null ? c.takeProfitCents : 15;
     document.getElementById('bot-minentries').value = c.minEntryCents != null ? c.minEntryCents : 40;
+    const modelInvert = document.getElementById('bot-model-invert');
+    if (modelInvert) {
+      const on =
+        c.modelInvertSide === true ||
+        c.modelInvertSide === 1 ||
+        c.modelInvertSide === 'on' ||
+        c.modelInvertSide === 'true';
+      modelInvert.value = on ? 'on' : 'off';
+    }
     const modelConf = document.getElementById('bot-model-confidence');
     if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 66;
     const modelConfirmCross = document.getElementById('bot-model-confirm-cross');
@@ -1996,6 +2006,7 @@ async function saveBotConfig(opts = {}) {
     stopRecoveryCents: parseFloat(document.getElementById('bot-stoprecovery').value),
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
+    modelInvertSide: document.getElementById('bot-model-invert')?.value || 'off',
     modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '66'),
     modelConfirmCrossCents: parseFloat(document.getElementById('bot-model-confirm-cross')?.value || '50'),
     modelConfirmMaxExtensionCents: parseFloat(

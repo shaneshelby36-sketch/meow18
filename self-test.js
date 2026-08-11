@@ -5531,6 +5531,38 @@ async function testModelStrategy() {
     checkEq(opp && opp.windowKey, 'w5', '12m left uses w5');
   }
 
+  // Fade: lock UP still requires live UP lean, but buys NO
+  {
+    const closeMs = Date.now() + 12 * 60 * 1000;
+    const bot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-FADE',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(closeMs).toISOString(),
+        yes_bid: 34,
+        yes_ask: 38,
+        no_bid: 62,
+        no_ask: 65,
+      }),
+      { strategyMode: 'model', modelMinConfidence: 55, modelInvertSide: 'on' }
+    );
+    const preds = {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: {
+          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(50, 60),
+        },
+      },
+    };
+    const opp = await bot._evaluateSymbolForModel('ETH', preds);
+    check(opp && opp.side === 'no' && opp.invert === true, 'fade UP → NO entry');
+    checkEq(opp && opp.priceCents, 65, 'fade buys NO ask');
+  }
+
   // Lock UP but live lean flipped DOWN → no entry
   {
     const closeMs = Date.now() + 12 * 60 * 1000;
