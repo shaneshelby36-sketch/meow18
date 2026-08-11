@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 26;
+const SETTINGS_DEFAULTS_VERSION = 27;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -362,6 +362,13 @@ function modelTrailCents(config = {}) {
   return MODEL_TRAIL_CENTS_DEFAULT;
 }
 
+function modelMaxAdverseCents(config = {}) {
+  const n = Number(config.modelMaxAdverseCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_MAX_ADVERSE_CENTS_DEFAULT;
+}
+
 function modelSoftLeanMarginPct(config = {}) {
   const n = Number(config.modelSoftLeanMarginPct);
   if (Number.isFinite(n) && n >= 0) return n;
@@ -442,6 +449,7 @@ function checkModelPostExitCooldown({ trades, symbol, cooldownMs, now = Date.now
     const reason = String(t.exitReason || '');
     if (
       reason !== 'model_lean_flip' &&
+      reason !== 'model_dip_stop' &&
       reason !== 'breakeven' &&
       reason !== 'take_profit' &&
       reason !== 'near_certain'
@@ -641,9 +649,11 @@ const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
 const MODEL_PERFECT_LEAN_DEFAULT = 15;
 /** Trail off peak (¢) — bank/cut before a dump finishes. */
-const MODEL_TRAIL_CENTS_DEFAULT = 4;
+const MODEL_TRAIL_CENTS_DEFAULT = 3;
 /** Soft “still with us” margin — lose this lead while flat/green → bank early. */
 const MODEL_SOFT_LEAN_MARGIN_DEFAULT = 3;
+/** Hard dip stop: exit if held bid falls this many ¢ below entry (gap/bleed protection). */
+const MODEL_MAX_ADVERSE_CENTS_DEFAULT = 8;
 /** Edge: final-N-minute cash-out allows up to this much position PnL loss (¢). */
 const EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS = 75;
 const EDGE_PRE_CLOSE_MINUTES_DEFAULT = 5;
@@ -1088,6 +1098,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelLiveLeanMarginPct',
   'modelSoftLeanMarginPct',
   'modelTrailCents',
+  'modelMaxAdverseCents',
   'modelMinHoldSeconds',
   'modelPostExitCooldownMinutes',
   'modelMinMinutesToOpen',
@@ -1919,6 +1930,7 @@ class TradingBot {
       modelLiveLeanMarginPct: MODEL_LIVE_LEAN_MARGIN_DEFAULT,
       modelSoftLeanMarginPct: MODEL_SOFT_LEAN_MARGIN_DEFAULT,
       modelTrailCents: MODEL_TRAIL_CENTS_DEFAULT,
+      modelMaxAdverseCents: MODEL_MAX_ADVERSE_CENTS_DEFAULT,
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
       modelMinMinutesToOpen: MODEL_MIN_MINUTES_TO_OPEN_DEFAULT,
@@ -3447,6 +3459,7 @@ class TradingBot {
         (reason === 'breakeven' ||
           reason === 'take_profit' ||
           reason === 'model_lean_flip' ||
+          reason === 'model_dip_stop' ||
           reason === 'near_certain')
       ) {
         if (!this._stoppedSymbolsThisCycle) this._stoppedSymbolsThisCycle = new Set();
@@ -4069,9 +4082,9 @@ class TradingBot {
       return;
     }
 
-    // Model: window lean + predict falls early (soften / trail) + don't lose much.
+    // Model: window lean + predict falls early (soften / trail) + hard dip stop.
     // Flat/green: bank when lean softens, confidence drops, locks flip, or bid trails peak.
-    // Red: cut on hard live lean, lock flip, weak conf, or trail off peak.
+    // Red: cut on max adverse ¢ from entry (no lean needed), trail, or hard lean/conf.
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
       const entry = Number(trade.entryPriceCents);
@@ -4089,6 +4102,11 @@ class TradingBot {
         bidOk && Number.isFinite(entry) && Math.round(heldSideBidCents) === Math.round(entry);
       const tinyGreen = flatOrGreen && !exactlyFlat && !isBankableGreen;
       const underwater = bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents < entry;
+      const adverseCents =
+        underwater && Number.isFinite(entry) ? Math.round(entry - heldSideBidCents) : 0;
+      const maxAdverse = modelMaxAdverseCents(this.config);
+      // Price backstop — fires even during min-hold (gaps/bleeds don't wait for lean).
+      const dipStop = underwater && maxAdverse > 0 && adverseCents >= maxAdverse;
       const againstLocked =
         picked &&
         picked.direction &&
@@ -4132,10 +4150,17 @@ class TradingBot {
       // Predictive bank while still flat/green — don't wait for a hard lean flip into red.
       const predictFall =
         heldLongEnough && (leanSoftening || trailDrop || weakConf || againstLocked || liveAgainst);
-      // Red cuts: hard signals + trail off peak (SOL 70→27 style).
+      // Red cuts: lean/conf after min-hold; trail while underwater even during min-hold.
       const cutRed =
-        heldLongEnough && (againstLocked || liveAgainst || weakConf || trailDrop);
+        (heldLongEnough && (againstLocked || liveAgainst || weakConf || trailDrop)) ||
+        (underwater && trailDrop);
 
+      if (dipStop) {
+        await this._closePosition(trade, heldSideBidCents, 'model_dip_stop', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
       if (bidOk && predictFall && isBankableGreen) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
@@ -6373,11 +6398,13 @@ module.exports = {
   modelLiveLeanMarginPct,
   modelSoftLeanMarginPct,
   modelTrailCents,
+  modelMaxAdverseCents,
   MODEL_LIVE_LEAN_MARGIN_DEFAULT,
   MODEL_MIN_HOLD_MS_DEFAULT,
   MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT,
   MODEL_MIN_TP_CENTS_DEFAULT,
   MODEL_TRAIL_CENTS_DEFAULT,
+  MODEL_MAX_ADVERSE_CENTS_DEFAULT,
   MODEL_SOFT_LEAN_MARGIN_DEFAULT,
   MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS,
   MODEL_PERFECT_CONFIDENCE_DEFAULT,
