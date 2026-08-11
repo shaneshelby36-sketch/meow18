@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 34;
+const SETTINGS_DEFAULTS_VERSION = 35;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -312,12 +312,18 @@ const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 8;
 const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
 /** After Model BE/TP/lean-flip, sit out that coin this long (runCycle used to clear same-tick only). */
 const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 3 * 60 * 1000;
-/** Lean-exit TP needs at least this many ¢ of green — don't bank a 1¢ tick. */
-const MODEL_MIN_TP_CENTS_DEFAULT = 3;
-/** Bank this much green even without a lean flip (follow winners). */
-const MODEL_BANK_GREEN_CENTS_DEFAULT = 8;
+/** Lean-exit / momentum TP floor — no micro-banks under this. */
+const MODEL_MIN_TP_CENTS_DEFAULT = 7;
+/** Arm momentum run once this many ¢ green; then hold until stall. */
+const MODEL_BANK_GREEN_CENTS_DEFAULT = 7;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
+/** Start near-settle closes this many minutes before window end. */
+const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 4;
+/** After +bank green, TP if bid sits at peak this long without a new high (ms). */
+const MODEL_MOMENTUM_STALL_MS_DEFAULT = 12_000;
+/** After +bank green, TP if bid pulls back this many ¢ from peak. */
+const MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT = 1;
 /** Model entries below this ask use ¼ stake (price-only sizing rule). */
 const MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT = 70;
 
@@ -363,6 +369,27 @@ function modelBankGreenCents(config = {}) {
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return Math.round(n);
   return MODEL_BANK_GREEN_CENTS_DEFAULT;
+}
+
+function modelSettleCloseMinutes(config = {}) {
+  const n = Number(config.modelSettleCloseMinutes);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return n;
+  return MODEL_SETTLE_CLOSE_MINUTES_DEFAULT;
+}
+
+function modelMomentumStallMs(config = {}) {
+  const n = Number(config.modelMomentumStallSeconds);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n * 1000);
+  return MODEL_MOMENTUM_STALL_MS_DEFAULT;
+}
+
+function modelMomentumPullbackCents(config = {}) {
+  const n = Number(config.modelMomentumPullbackCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT;
 }
 
 function modelLiveLeanMarginPct(config = {}) {
@@ -674,7 +701,7 @@ const MODEL_MIN_ENTRY_DEFAULT_CENTS = 45;
 /** Absolute floor even when the call is “perfect.” */
 const MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS = 25;
 /** Don't open Model entries in the last this many minutes (freeze-into-settle). */
-const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 2.0;
+const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 5.0;
 /** Confidence required to allow entries below the normal min. */
 const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
@@ -1131,6 +1158,10 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelPerfectLeanPts',
   'modelMinTpCents',
   'modelBankGreenCents',
+  'modelSettleCloseLossCents',
+  'modelSettleCloseMinutes',
+  'modelMomentumStallSeconds',
+  'modelMomentumPullbackCents',
   'modelLiveLeanMarginPct',
   'modelEntryLiveLeanMarginPct',
   'modelSoftLeanMarginPct',
@@ -1966,6 +1997,10 @@ class TradingBot {
       modelPerfectLeanPts: MODEL_PERFECT_LEAN_DEFAULT,
       modelMinTpCents: MODEL_MIN_TP_CENTS_DEFAULT,
       modelBankGreenCents: MODEL_BANK_GREEN_CENTS_DEFAULT,
+      modelSettleCloseLossCents: MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT,
+      modelSettleCloseMinutes: MODEL_SETTLE_CLOSE_MINUTES_DEFAULT,
+      modelMomentumStallSeconds: MODEL_MOMENTUM_STALL_MS_DEFAULT / 1000,
+      modelMomentumPullbackCents: MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT,
       modelLiveLeanMarginPct: MODEL_LIVE_LEAN_MARGIN_DEFAULT,
       modelEntryLiveLeanMarginPct: MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT,
       modelSoftLeanMarginPct: MODEL_SOFT_LEAN_MARGIN_DEFAULT,
@@ -1975,7 +2010,6 @@ class TradingBot {
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
       modelMinMinutesToOpen: MODEL_MIN_MINUTES_TO_OPEN_DEFAULT,
-      modelSettleCloseLossCents: MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
       stopRecoveryCents: 6,
@@ -4028,7 +4062,10 @@ class TradingBot {
       const nextPeak = Math.max(base, heldSideBidCents);
       if (!Number.isFinite(prevPeak) || nextPeak > prevPeak) {
         trade.peakHeldBidCents = nextPeak;
+        trade.peakHeldBidAt = now;
         this._persist();
+      } else if (!Number.isFinite(Number(trade.peakHeldBidAt))) {
+        trade.peakHeldBidAt = now;
       }
     }
     // For stop/TP timing use the earliest known close so we don't hold into the next session.
@@ -4139,13 +4176,11 @@ class TradingBot {
       return;
     }
 
-    // Model: follow the window lean only — no price stops (bounce stop-outs bled more
-    // than they saved). Bank decent green. Lean exits on green/flat only; when red,
-    // hold toward settle (final-minute close handles the rest).
-    // — ≥8¢ green → take_profit (don't wait for lean to flip)
-    // — lean against / weak conf → TP (≥3¢) / BE when green or flat
-    // — underwater + lean against → hold (no red lean-flip; flicker stop-outs)
-    // — hard/soft ¢ stops off by default (config can re-enable)
+    // Model: no price stops. Bank real green (≥7¢) with momentum run — hold while
+    // live lean still favors and bid keeps making highs; TP as soon as it stalls.
+    // Lean exits only bank ≥7¢ green or flat BE — no micro TPs.
+    // Underwater lean against → hold (no red lean-flip).
+    // Near settle (~4m): close unless losing >50¢.
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
       const entry = Number(trade.entryPriceCents);
@@ -4164,7 +4199,6 @@ class TradingBot {
       const isDecentGreen = flatOrGreen && bankGreen > 0 && greenCents >= bankGreen;
       const exactlyFlat =
         bidOk && Number.isFinite(entry) && Math.round(heldSideBidCents) === Math.round(entry);
-      const tinyGreen = flatOrGreen && !exactlyFlat && !isBankableGreen;
       const underwater = bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents < entry;
       const adverseCents =
         underwater && Number.isFinite(entry) ? Math.round(entry - heldSideBidCents) : 0;
@@ -4177,6 +4211,10 @@ class TradingBot {
         picked &&
         picked.window &&
         modelLiveLeanAgainstHeld(picked.window, trade.side, modelLiveLeanMarginPct(this.config));
+      const liveFavors =
+        picked &&
+        picked.window &&
+        modelLiveLeanStillFavors(picked.window, trade.side, modelSoftLeanMarginPct(this.config));
       const minConf = Number.isFinite(Number(this.config.modelMinConfidence))
         ? Number(this.config.modelMinConfidence)
         : MODEL_MIN_CONFIDENCE_DEFAULT;
@@ -4185,16 +4223,27 @@ class TradingBot {
         picked.window &&
         Number.isFinite(picked.window.confidence) &&
         picked.window.confidence < minConf;
-      // Follow the model: locked window call, live probs, or confidence floor.
       const leanExit = !!(againstLocked || liveAgainst || weakConf);
 
       const openedAt = Number(trade.openedAt);
       const heldMs = Number.isFinite(openedAt) ? now - openedAt : Infinity;
       const minHold = modelMinHoldMs(this.config);
       const heldLongEnough = minHold <= 0 || heldMs >= minHold;
-      // Bank winners a bit earlier than lean-flip cuts (30s or half min-hold).
       const bankHoldMs = minHold > 0 ? Math.min(minHold, 30_000) : 0;
       const heldForBank = bankHoldMs <= 0 || heldMs >= bankHoldMs;
+
+      const peak = Number(trade.peakHeldBidCents);
+      const peakAt = Number(trade.peakHeldBidAt);
+      const pullback =
+        bidOk && Number.isFinite(peak) ? Math.max(0, Math.round(peak - heldSideBidCents)) : 0;
+      const stallMs = modelMomentumStallMs(this.config);
+      const stallPullback = modelMomentumPullbackCents(this.config);
+      const peakAgeMs = Number.isFinite(peakAt) ? now - peakAt : Infinity;
+      const momentumStalled =
+        (stallPullback > 0 && pullback >= stallPullback) ||
+        (stallMs > 0 && peakAgeMs >= stallMs);
+      // Keep running only while engine still agrees and price hasn't stalled.
+      const momentumRun = !!(liveFavors && !momentumStalled);
 
       const hardDip = underwater && hardAdverse > 0 && adverseCents >= hardAdverse;
       if (hardDip) {
@@ -4203,35 +4252,43 @@ class TradingBot {
         });
         return;
       }
-      if (bidOk && isDecentGreen && heldForBank) {
-        await this._closePosition(trade, heldSideBidCents, 'take_profit', {
-          liveSellPriceCents: heldSideBidCents,
-        });
-        return;
-      }
-      // Near settle: close all trades unless deeply underwater (>50¢ loss).
-      // Locks in small wins / scratches; only rides big losers to final settle.
+
+      // Near settle: close unless deeply underwater (>50¢ loss).
+      const settleCloseMins = modelSettleCloseMinutes(this.config);
       const settleCloseThresh = Number.isFinite(Number(this.config.modelSettleCloseLossCents))
         ? Number(this.config.modelSettleCloseLossCents)
         : MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT;
-      if (settleCloseThresh > 0 && minutesRemaining <= 1.0 && bidOk) {
+      if (settleCloseMins > 0 && settleCloseThresh > 0 && minutesRemaining <= settleCloseMins && bidOk) {
         const redCents = underwater ? adverseCents : 0;
         if (redCents <= settleCloseThresh) {
-          const reason = flatOrGreen ? 'take_profit' : 'breakeven';
-          const fill = this.config.mode === 'paper' && flatOrGreen ? heldSideBidCents : heldSideBidCents;
-          await this._closePosition(trade, fill, reason, {
+          const reason = flatOrGreen
+            ? 'take_profit'
+            : exactlyFlat
+              ? 'breakeven'
+              : 'model_late_exit';
+          await this._closePosition(trade, heldSideBidCents, reason, {
             liveSellPriceCents: heldSideBidCents,
           });
           return;
         }
       }
-      if (bidOk && leanExit && heldLongEnough && isBankableGreen) {
+
+      // +7¢+ green: ride while momentum + lean agree; TP the moment it stalls.
+      if (bidOk && isDecentGreen && heldForBank) {
+        if (momentumRun) {
+          this.lastDecision =
+            `Holding ${trade.symbol} model winner +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — momentum still with us.`;
+          return;
+        }
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
         });
         return;
       }
-      if (bidOk && leanExit && heldLongEnough && tinyGreen) {
+
+      // Lean against / weak conf: only bank real green (≥7¢) or scratch flat BE.
+      // Sub-+7 green holds — don't donate fees on micro TPs.
+      if (bidOk && leanExit && heldLongEnough && isBankableGreen) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
         });
@@ -4244,8 +4301,7 @@ class TradingBot {
         });
         return;
       }
-      // Underwater: no lean-flip — model flicker + bid dips caused the same bounce
-      // stop-outs as ¢ stops. Hold toward settle; final-minute rule banks the rest.
+      // Underwater: no lean-flip — hold toward settle / late-exit window.
       return;
     }
 
@@ -4736,7 +4792,9 @@ class TradingBot {
       engineProbability,
       engineConfidence,
       status: 'open',
-      ...(isSettle || isModel ? { peakHeldBidCents: Math.round(priceCents) } : {}),
+      ...(isSettle || isModel
+        ? { peakHeldBidCents: Math.round(priceCents), peakHeldBidAt: Date.now() }
+        : {}),
       ...(isModel
         ? {
             modelWindowKey: modelWindowKey || null,
@@ -6504,6 +6562,9 @@ module.exports = {
   modelPostExitCooldownMs,
   modelMinTpCents,
   modelBankGreenCents,
+  modelSettleCloseMinutes,
+  modelMomentumStallMs,
+  modelMomentumPullbackCents,
   modelLiveLeanMarginPct,
   modelEntryLiveLeanMarginPct,
   modelSoftLeanMarginPct,
@@ -6516,6 +6577,9 @@ module.exports = {
   MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT,
   MODEL_MIN_TP_CENTS_DEFAULT,
   MODEL_BANK_GREEN_CENTS_DEFAULT,
+  MODEL_SETTLE_CLOSE_MINUTES_DEFAULT,
+  MODEL_MOMENTUM_STALL_MS_DEFAULT,
+  MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT,
   MODEL_TRAIL_CENTS_DEFAULT,
   MODEL_MAX_ADVERSE_CENTS_DEFAULT,
   MODEL_HARD_ADVERSE_CENTS_DEFAULT,

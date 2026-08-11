@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint">Windows: UP→YES / DOWN→NO. Entries require <strong>lock + live lean agree by ≥8pts</strong>. Band <strong>45–93¢</strong> (25–44¢ if conf≥80% + lean≥15). No entries in last <strong>2m</strong>. Closes all near settle unless losing &gt;50¢. Model ask <strong>&lt;70¢ = ¼ stake only</strong> (70¢+ = full). Follows lean on green/flat only — <strong>no red lean-flip</strong>, no ¢ stop. Banks <strong>≥8¢ green</strong>; lean-exit TP ≥3¢. ~60s min hold; ~3m sit-out.</p>
+          <p class="settings-hint">Windows: UP→YES / DOWN→NO. Entries require <strong>lock + live lean ≥8pts</strong>. Band <strong>45–93¢</strong> (25–44¢ if conf≥80% + lean≥15). No entries in last <strong>5m</strong>. Late close from <strong>~4m</strong> unless losing &gt;50¢. Ask <strong>&lt;70¢ = ¼ stake</strong>. TP: arm at <strong>+7¢</strong>, ride while lean + momentum; <strong>TP on stall</strong> (1¢ pullback or ~12s flat). No micro-TPs. No red lean-flip / ¢ stop. ~60s min hold; ~3m sit-out.</p>
           <label>Min confidence
             <div class="slider-row">
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />

@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelPriceAllowed, checkModelPostExitCooldown, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelPriceAllowed, checkModelPostExitCooldown, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -5319,7 +5319,9 @@ async function testModelStrategy() {
   checkEq(MODEL_TRAIL_CENTS_DEFAULT, 0, 'trail off by default (simplified exits)');
   checkEq(MODEL_MAX_ADVERSE_CENTS_DEFAULT, 0, 'soft dip off by default');
   checkEq(MODEL_HARD_ADVERSE_CENTS_DEFAULT, 0, 'hard cliff off — no bounce stop-outs');
-  checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 8, 'bank ≥8¢ green without lean flip');
+  checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 7, 'bank / momentum arm at ≥7¢ green');
+  checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 7, 'min TP 7¢ — no micro banks');
+  checkEq(MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, 5, 'no new model entries in last 5m');
   checkEq(MODEL_LIVE_LEAN_MARGIN_DEFAULT, 5, 'live lean margin 5pts');
   checkEq(MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, 8, 'entry live lean margin 8pts');
 
@@ -5467,7 +5469,7 @@ async function testModelStrategy() {
     check(/below 45/i.test(bot.lastDecision || ''), 'decision cites 45¢ min');
   }
 
-  // Bank ≥8¢ green without waiting for lean flip
+  // +7¢+ green with lean + new peak → hold (momentum run)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -5477,7 +5479,13 @@ async function testModelStrategy() {
         yes_bid: 64,
         no_bid: 36,
       }),
-      { strategyMode: 'model', modelMinHoldSeconds: 60, modelBankGreenCents: 8 }
+      {
+        strategyMode: 'model',
+        modelMinHoldSeconds: 0,
+        modelBankGreenCents: 7,
+        modelMomentumStallSeconds: 12,
+        modelMomentumPullbackCents: 1,
+      }
     );
     const trade = openTrade(bot, {
       strategy: 'model',
@@ -5486,6 +5494,7 @@ async function testModelStrategy() {
       windowCloseTime: now + 12 * 60 * 1000,
       openedAt: now - 35_000,
       peakHeldBidCents: 64,
+      peakHeldBidAt: now - 1_000,
     });
     const stillUp = {
       ETH: {
@@ -5499,8 +5508,50 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, stillUp);
-    checkEq(trade.exitReason, 'take_profit', '≥8¢ green banks without lean flip');
-    checkEq(trade.exitPriceCents, 64, 'bank TP at live bid');
+    checkEq(trade.status, 'open', '+7¢ at peak with lean holds (momentum run)');
+  }
+
+  // +7¢+ green but 1¢ off peak → TP (momentum stalled)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 63,
+        no_bid: 37,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinHoldSeconds: 0,
+        modelBankGreenCents: 7,
+        modelMomentumStallSeconds: 12,
+        modelMomentumPullbackCents: 1,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 35_000,
+      peakHeldBidCents: 64,
+      peakHeldBidAt: now - 2_000,
+    });
+    const stillUp = {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    };
+    await bot._manageOpenTrade(trade, stillUp);
+    checkEq(trade.exitReason, 'take_profit', '+7¢ with 1¢ pullback from peak → TP');
+    checkEq(trade.exitPriceCents, 63, 'stall TP at live bid');
   }
 
   // Mid underwater with firm lean holds (no price stops)
@@ -5763,7 +5814,7 @@ async function testModelStrategy() {
       '51/49-ish live lean does not flip YES (needs margin)'
     );
     checkEq(MODEL_LIVE_LEAN_MARGIN_DEFAULT, 5, 'live lean margin default 5pts');
-    checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 3, 'model min TP 3¢');
+    checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 7, 'model min TP 7¢');
     const liveFlip = {
       ETH: {
         ready: true,
@@ -5813,7 +5864,7 @@ async function testModelStrategy() {
     checkEq(trade.status, 'open', 'red + weak confidence holds toward settle');
   }
 
-  // Green + lean against → model TP only with ≥3¢ green (not +1¢ noise)
+  // Green +3¢ + lean against → hold (under min TP 7¢ — no micro bank)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -5823,7 +5874,7 @@ async function testModelStrategy() {
         yes_bid: 58,
         no_bid: 42,
       }),
-      { strategyMode: 'model', modelMinConfidence: 55, modelMinHoldSeconds: 0 }
+      { strategyMode: 'model', modelMinConfidence: 55, modelMinHoldSeconds: 0, modelMinTpCents: 7 }
     );
     const trade = openTrade(bot, {
       strategy: 'model',
@@ -5844,8 +5895,43 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, against);
-    checkEq(trade.exitReason, 'take_profit', 'green +3¢ + lean against → model TP');
-    checkEq(trade.exitPriceCents, 58, 'model TP banks the bid');
+    checkEq(trade.status, 'open', 'green +3¢ + lean against holds (no micro TP)');
+  }
+
+  // Green +7¢ + lean against → TP (real bank)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 62,
+        no_bid: 38,
+      }),
+      { strategyMode: 'model', modelMinConfidence: 55, modelMinHoldSeconds: 0, modelMinTpCents: 7 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 5 * 60 * 1000,
+      peakHeldBidCents: 62,
+    });
+    const against = {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(35, 70), tracking: { predictedDirection: 'DOWN' } },
+          w10: win(40, 70),
+          w15: win(45, 60),
+        },
+      },
+    };
+    await bot._manageOpenTrade(trade, against);
+    checkEq(trade.exitReason, 'take_profit', 'green +7¢ + lean against → model TP');
+    checkEq(trade.exitPriceCents, 62, 'model TP banks the bid');
   }
 
   // +1¢ green with lean still firm → hold (noise, not a predicted fall)
