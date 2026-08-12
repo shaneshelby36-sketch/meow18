@@ -364,6 +364,8 @@ const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 30_000;
 const MODEL_MIN_TP_CENTS_DEFAULT = 7;
 /** Arm momentum run once this many ¢ green; then hold until stall. */
 const MODEL_BANK_GREEN_CENTS_DEFAULT = 7;
+/** Start trailing / allow stall-TP once at least this many ¢ green (don't wait for +7). */
+const MODEL_TRAIL_ARM_CENTS_DEFAULT = 3;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /** Final barrier (minutes left). 0 = off (no forced late exits). */
@@ -372,8 +374,8 @@ const MODEL_LATE_BARRIER_MINUTES_DEFAULT = 0;
 const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 0;
 /** Confidence required to extend a hold into/through the final 5-minute barrier. */
 const MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT = 78;
-/** After +bank green, TP if bid sits at peak this long without a new high (ms). */
-const MODEL_MOMENTUM_STALL_MS_DEFAULT = 12_000;
+/** After trail is armed, TP if bid sits at peak this long without a new high (ms). */
+const MODEL_MOMENTUM_STALL_MS_DEFAULT = 4_000;
 /** After +bank green, TP if bid pulls back this many ¢ from peak. */
 const MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT = 1;
 /** Model entries below this ask use reduced stake (see modelLowPriceStakeQuarters). */
@@ -432,6 +434,13 @@ function modelBankGreenCents(config = {}) {
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return Math.round(n);
   return MODEL_BANK_GREEN_CENTS_DEFAULT;
+}
+
+/** ¢ green before we trail and TP on a tiny stall. Caps at 3 so +7 slider doesn't skip 52→55. */
+function modelTrailArmCents(config = {}) {
+  const bank = modelBankGreenCents(config);
+  if (!(bank > 0)) return MODEL_TRAIL_ARM_CENTS_DEFAULT;
+  return Math.max(2, Math.min(MODEL_TRAIL_ARM_CENTS_DEFAULT, bank));
 }
 
 function modelSettleCloseMinutes(config = {}) {
@@ -4395,7 +4404,7 @@ class TradingBot {
       return;
     }
 
-    // Model: no price stops. Bank as soon as ≥7¢ green (no stall / min-hold wait).
+    // Model: no price stops. Follow from ~+3¢ green; TP on a 1¢ stall.
     // Lean exits only bank ≥7¢ green or flat BE — no micro TPs.
     // Underwater lean against → hold (no red lean-flip).
     // Final 5m: high possibility may extend; low possibility exits immediately.
@@ -4566,12 +4575,22 @@ class TradingBot {
         }
       }
 
-      // Bank as soon as ≥ bank-green (default +7¢ / fade −7¢ on lean side).
-      // Don't wait on stall or min-hold — scalp was missing the window.
-      if (bidOk && isDecentGreen) {
+      // Follow the bid from a small green (+2–3¢). Bank when it stalls even
+      // a little (1¢ off peak, or ~4s flat). Never TP if the ticket is red.
+      const armCents = modelTrailArmCents(this.config);
+      const armed = flatOrGreen && greenCents >= armCents;
+      const priceStalled =
+        (stallPullback > 0 && pullback >= stallPullback) ||
+        (stallMs > 0 && peakAgeMs >= stallMs);
+      if (bidOk && armed && priceStalled) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
         });
+        return;
+      }
+      if (bidOk && armed && !priceStalled) {
+        this.lastDecision =
+          `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — following, TP on a small stall.`;
         return;
       }
 
@@ -7100,6 +7119,7 @@ module.exports = {
   modelPostExitCooldownMs,
   modelMinTpCents,
   modelBankGreenCents,
+  modelTrailArmCents,
   modelSettleCloseMinutes,
   modelLateBarrierMinutes,
   modelLateExtendMinConfidence,

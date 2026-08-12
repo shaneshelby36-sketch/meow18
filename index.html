@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> plan: see lean correlate → buy → bank quick TP → if price returns under 50¢, re-cross and repeat. Runs <strong>2–3+ coins at once</strong> (max positions). Confirm gate is off per coin until that coin’s first MODEL buy+sell this run, then (YES &amp; NO): under 50 → cross → continue → enter; each exit resets. ~30s sit-out after exit. Live favor default 3pts (slider). TP as soon as +7¢ (no stall wait). No late forced exit. Optional fade: bid the opposite Kalshi side of the lean.</p>
+          <p class="settings-hint"><strong>MODEL</strong> plan: see lean correlate → buy → follow the bid from ~+3¢ → bank when it stalls even 1¢ off the peak. Runs <strong>2–3+ coins at once</strong> (max positions). Confirm gate is off per coin until that coin’s first MODEL buy+sell this run. ~30s sit-out after exit. Live favor default 3pts. No late forced exit. Optional fade: bid the opposite Kalshi side of the lean.</p>
 
           <label><strong>MODEL</strong> fade (opposite side)
             <select id="bot-model-invert">
@@ -420,7 +420,7 @@
               <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
-            <span class="field-hint">Bank as soon as this many ¢ prints (no stall wait). Follow = +N on the held side. Fade = −N on the lean/current side. Default 7¢.</span>
+            <span class="field-hint">Follow from about +3¢ (even if this slider is 7). TP when the bid dips <strong>1¢ off the peak</strong> or sits ~4s. Never sells red as TP.</span>
           </label>
         </div>
 

@@ -5742,8 +5742,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, stillUp);
-    checkEq(trade.exitReason, 'take_profit', '+7¢ banks immediately even at a new peak');
-    checkEq(trade.exitPriceCents, 64, 'immediate TP at live bid');
+    checkEq(trade.status, 'open', '+9¢ at a fresh peak still follows (no stall yet)');
   }
 
   // +7¢+ green but 1¢ off peak → TP (momentum stalled)
@@ -5787,6 +5786,48 @@ async function testModelStrategy() {
     await bot._manageOpenTrade(trade, stillUp);
     checkEq(trade.exitReason, 'take_profit', '+7¢ with 1¢ pullback from peak → TP');
     checkEq(trade.exitPriceCents, 63, 'stall TP at live bid');
+  }
+
+  // 52¢ entry: +3¢ then 1¢ off peak → TP (does not wait for +7)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 54,
+        no_bid: 46,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinHoldSeconds: 0,
+        modelBankGreenCents: 7,
+        modelMomentumStallSeconds: 12,
+        modelMomentumPullbackCents: 1,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 52,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 8_000,
+      peakHeldBidCents: 55,
+      peakHeldBidAt: now - 2_000,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    });
+    checkEq(trade.exitReason, 'take_profit', '52→55 peak then 54 (1¢ stall) banks without +7');
+    checkEq(trade.exitPriceCents, 54, 'small-stall TP at live bid');
   }
 
   // Mid underwater with firm lean holds (no price stops)
