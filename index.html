@@ -274,9 +274,42 @@
             </select>
             <span class="field-hint">AUTO scans enabled coins (BTC/ETH/SOL/XRP/BNB/HYPE by default).</span>
           </label>
+          <label>Stake per trade
+            <div class="slider-row">
+              <input id="bot-stake" type="range" min="1" max="500" step="1" />
+              <span class="slider-value" id="bot-stake-value">—</span>
+            </div>
+            <span class="field-hint">Dollar amount risked per trade (all strategies).</span>
+          </label>
+          <label>Max open positions
+            <div class="slider-row">
+              <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
+              <span class="slider-value" id="bot-maxpos-value">—</span>
+            </div>
+            <span class="field-hint">Default 3 parallel coins. Still one open per coin.</span>
+          </label>
+          <label>Second open only if holding green
+            <select id="bot-second-green">
+              <option value="on">On (default)</option>
+              <option value="off">Off — fill up to max anytime</option>
+            </select>
+          </label>
+          <label>Trade NEAR
+            <select id="bot-trade-near">
+              <option value="off">Off (default)</option>
+              <option value="on">On</option>
+            </select>
+          </label>
+          <label>Trade DOGE
+            <select id="bot-trade-doge">
+              <option value="off">Off (default)</option>
+              <option value="on">On</option>
+            </select>
+          </label>
         </div>
 
         <div id="bot-settings-edge" class="bot-field-grid" hidden>
+          <p class="settings-hint"><strong>Edge</strong> — probability edge vs Kalshi only. Sizing / coins are above.</p>
           <label>Edge threshold
             <div class="slider-row">
               <input id="bot-edge" type="range" min="1" max="30" step="0.5" />
@@ -327,40 +360,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> — all knobs for this strategy live here. Lean → buy → bank early when the model turns (live prob, signalScore, drift) or bid gaps. Confirm cross default <strong>off</strong>; min conf default <strong>44%</strong>.</p>
-
-          <h4 class="bot-panel-subhead">Sizing &amp; coins</h4>
-          <label>Stake per trade
-            <div class="slider-row">
-              <input id="bot-stake" type="range" min="1" max="500" step="1" />
-              <span class="slider-value" id="bot-stake-value">—</span>
-            </div>
-          </label>
-          <label>Max open positions
-            <div class="slider-row">
-              <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
-              <span class="slider-value" id="bot-maxpos-value">—</span>
-            </div>
-            <span class="field-hint">Default 3 parallel coins. Still one open per coin.</span>
-          </label>
-          <label>Second open only if holding green
-            <select id="bot-second-green">
-              <option value="on">On (default)</option>
-              <option value="off">Off — fill up to max anytime</option>
-            </select>
-          </label>
-          <label>Trade NEAR
-            <select id="bot-trade-near">
-              <option value="off">Off (default)</option>
-              <option value="on">On</option>
-            </select>
-          </label>
-          <label>Trade DOGE
-            <select id="bot-trade-doge">
-              <option value="off">Off (default)</option>
-              <option value="on">On</option>
-            </select>
-          </label>
+          <p class="settings-hint"><strong>MODEL</strong> only — lean → buy only when the model is clearly with the ticket; skips if live probs / signalScore say it dumps. Confirm cross default <strong>off</strong>; min conf <strong>44%</strong>. Sizing / coins are above.</p>
 
           <h4 class="bot-panel-subhead">Entry</h4>
           <label>MODEL fade (opposite side)
@@ -427,7 +427,7 @@
               <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
-            <span class="field-hint">Trail from ~+3¢; bank on 1¢ stall or at 96¢. Model lean cut is separate and preemptive.</span>
+            <span class="field-hint">Trail from ~+3¢; bank on 1¢ stall or at 96¢. If model turns, sells immediately (BE or lean-stop) — doesn't wait for a dump.</span>
           </label>
           <label>MODEL post-exit sit-out (sec)
             <div class="slider-row">
@@ -438,8 +438,8 @@
           </label>
         </div>
 
-        <div id="bot-settings-settle" class="bot-field-grid">
-          <p class="settings-hint">Buys YES or NO when ask is in the band (default 80–94¢). 90–94¢ hold to settlement (stop still on). Skips “rich” asks (≥95¢). Coinbase lean only breaks ties when both sides qualify. Late fallback can dip lower. Entry-tiered exits On = TP/stale/stuck by entry; Off = stop + hold to settle.</p>
+        <div id="bot-settings-settle" class="bot-field-grid" hidden>
+          <p class="settings-hint"><strong>Settle</strong> only — buy 80–94¢ band. Sizing / coins are above. Half-stake NEAR is settle-only below.</p>
           <label>Settle entry min (¢)
             <div class="slider-row">
               <input id="bot-settle-min" type="range" min="65" max="95" step="1" />
@@ -537,28 +537,6 @@
               <span class="slider-value" id="bot-settle-late-floor-value">—</span>
             </div>
             <span class="field-hint">Lowest ask allowed in the late window (default 70). Still prefers the highest available ask (e.g. 82 over 70).</span>
-          </label>
-        </div>
-
-        <div id="bot-settings-shared-trading" class="bot-field-grid">
-          <label>Stake per trade
-            <div class="slider-row">
-              <input id="bot-stake-edge" type="range" min="1" max="500" step="1" />
-              <span class="slider-value" id="bot-stake-edge-value">—</span>
-            </div>
-            <span class="field-hint">Dollar amount risked per trade.</span>
-          </label>
-          <label>Max open positions
-            <div class="slider-row">
-              <input id="bot-maxpos-edge" type="range" min="1" max="10" step="1" />
-              <span class="slider-value" id="bot-maxpos-edge-value">—</span>
-            </div>
-          </label>
-          <label>Second open only if holding green
-            <select id="bot-second-green-edge">
-              <option value="on">On (default)</option>
-              <option value="off">Off — fill up to max anytime</option>
-            </select>
           </label>
         </div>
 

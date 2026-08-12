@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 50;
+const SETTINGS_DEFAULTS_VERSION = 51;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -722,6 +722,85 @@ function modelEngineClearlyWithUs({ window, direction, side, entryHeldProb, conf
   const ss = window.signalScore;
   if (ss && ss.trend === 'weakening') return false;
   return true;
+}
+
+/**
+ * Pre-entry dump risk: model already thinks the ticket will fall (or is priced below ask).
+ * Used before placing — don't buy into a dump you can see in live probs / signalScore.
+ * Returns { dump: true, reason } or { dump: false }.
+ */
+function modelEntryDumpRisk({
+  window,
+  direction,
+  side,
+  priceCents,
+  minConf,
+  config = {},
+  fade = false,
+} = {}) {
+  if (!window || !side) return { dump: true, reason: 'no model window' };
+  const up = Number(window.probabilityUp);
+  const down = Number(window.probabilityDown);
+  const heldProb = side === 'yes' ? up : side === 'no' ? down : NaN;
+  const ask = Number(priceCents);
+  const conf = Number(window.confidence);
+  if (Number.isFinite(minConf) && Number.isFinite(conf) && conf < minConf) {
+    return { dump: true, reason: `confidence ${Math.round(conf)}% under ${minConf}%` };
+  }
+
+  const ss = window.signalScore;
+  // Weakening trend = expect the move to reverse / dump — block follow AND fade.
+  if (ss && ss.trend === 'weakening') {
+    return { dump: true, reason: 'signalScore trend weakening — expect dump' };
+  }
+
+  // Fade buys the underdog on purpose — only the weakening check above applies.
+  if (fade) return { dump: false };
+
+  // Live lean already against / tied on the ticket we would buy.
+  if (modelLiveProbNotWithUs(window, side)) {
+    return {
+      dump: true,
+      reason: `live lean ${Number.isFinite(up) ? up.toFixed(0) : '?'}% UP / ${
+        Number.isFinite(down) ? down.toFixed(0) : '?'
+      }% DOWN — not with ${String(side).toUpperCase()}`,
+    };
+  }
+  if (direction && modelDirectionAgainstHeld(direction, side)) {
+    return { dump: true, reason: `locked ${direction} against ${String(side).toUpperCase()}` };
+  }
+  if (modelLiveLeanAgainstHeld(window, side, modelEntryLiveLeanMarginPct(config))) {
+    return {
+      dump: true,
+      reason: `live lean against ${String(side).toUpperCase()}`,
+    };
+  }
+  if (modelSignalTurningAgainst(window, side)) {
+    return { dump: true, reason: 'signalScore weakening / dominance flipped' };
+  }
+  // Model fair value well below ask → buying into expected drop toward fair.
+  // Slack so normal ask>mid still enters.
+  if (Number.isFinite(heldProb) && Number.isFinite(ask) && ask >= 1 && heldProb + 3 < ask) {
+    return {
+      dump: true,
+      reason: `model ${Math.round(heldProb)}% vs ask ${Math.round(ask)}¢ — priced to fall`,
+    };
+  }
+  if (
+    !modelEngineClearlyWithUs({
+      window,
+      direction,
+      side,
+      entryHeldProb: heldProb,
+      config,
+    })
+  ) {
+    return {
+      dump: true,
+      reason: `model not clearly with ${String(side).toUpperCase()}`,
+    };
+  }
+  return { dump: false };
 }
 
 /**
@@ -4608,9 +4687,10 @@ class TradingBot {
         picked.window.confidence < minConf;
       // Fade holds are *supposed* to sit against the lock — don't BE-scratch
       // just because the signal still points the original way.
+      // Follow: exit as soon as the model is no longer clearly with us (BE if flat).
       const leanExit = faded
         ? !!weakConf
-        : !!engineTurning;
+        : !!(engineTurning || (picked && picked.window && !engineClearlyWithUs));
 
       const openedAt = Number(trade.openedAt);
       const heldMs = Number.isFinite(openedAt) ? now - openedAt : Infinity;
@@ -4684,8 +4764,9 @@ class TradingBot {
         return;
       }
 
-      // Model-native preemptive exit: lean turning before the bid dumps.
-      if (!faded && bidOk && engineTurning) {
+      // Model-native preemptive exit: lean soft/turning before the bid dumps.
+      // Flat → BE immediately; red → lean-stop. Don't wait for the dump.
+      if (!faded && bidOk && leanExit) {
         if (underwater) {
           await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
             liveSellPriceCents: heldSideBidCents,
@@ -6644,6 +6725,20 @@ class TradingBot {
     }
 
     const entryHeldProb = side === 'yes' ? Number(window.probabilityUp) : Number(window.probabilityDown);
+    // Don't place if the model already thinks this ticket dumps (weakening / fair < ask / lean soft).
+    const dumpRisk = modelEntryDumpRisk({
+      window,
+      direction,
+      side,
+      priceCents,
+      minConf,
+      config: this.config,
+      fade: invert,
+    });
+    if (dumpRisk.dump) {
+      this.lastDecision = `Waiting: ${symbol} — skip entry, ${dumpRisk.reason}.`;
+      return null;
+    }
     if (
       modelEngineTurningAgainst({
         window,
@@ -7438,6 +7533,7 @@ module.exports = {
   modelProbDriftAgainst,
   modelProbDriftPts,
   modelEngineTurningAgainst,
+  modelEntryDumpRisk,
   modelEngineClearlyWithUs,
   modelPriceAllowed,
   checkModelPostExitCooldown,

@@ -1398,9 +1398,6 @@ const SLIDER_UNITS = {
   },
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
   'bot-model-sitout': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
-  'bot-model-late-extend-conf': (v) => `${Math.round(v)}%`,
-  'bot-stake-edge': (v) => `$${Math.round(v)}`,
-  'bot-maxpos-edge': (v) => `${Math.round(v)}`,
   'bot-settle-min': (v) => `${Math.round(v)}¢`,
   'bot-settle-max': (v) => `${Math.round(v)}¢`,
   'bot-settle-stoploss': (v) => `−${Math.round(v)}¢`,
@@ -1415,41 +1412,21 @@ const SLIDER_UNITS = {
 };
 
 function syncTradingSlidersFromConfig(c) {
-  const stake = c.stakeDollars != null ? c.stakeDollars : 5;
-  const maxPos = c.maxOpenPositions != null ? c.maxOpenPositions : 3;
-  const secondGreen = c.secondOpenRequiresGreen === 'off' ? 'off' : 'on';
-  for (const id of ['bot-stake', 'bot-stake-edge']) {
-    const el = document.getElementById(id);
-    if (el) el.value = stake;
-  }
-  for (const id of ['bot-maxpos', 'bot-maxpos-edge']) {
-    const el = document.getElementById(id);
-    if (el) el.value = maxPos;
-  }
-  for (const id of ['bot-second-green', 'bot-second-green-edge']) {
-    const el = document.getElementById(id);
-    if (el) el.value = secondGreen;
+  const stakeEl = document.getElementById('bot-stake');
+  if (stakeEl) stakeEl.value = c.stakeDollars != null ? c.stakeDollars : 5;
+  const maxEl = document.getElementById('bot-maxpos');
+  if (maxEl) maxEl.value = c.maxOpenPositions != null ? c.maxOpenPositions : 3;
+  const secondGreen = document.getElementById('bot-second-green');
+  if (secondGreen) {
+    secondGreen.value = c.secondOpenRequiresGreen === 'off' ? 'off' : 'on';
   }
 }
 
 function readTradingSlidersFromForm() {
-  const mode = document.getElementById('bot-strategy-mode')?.value || 'model';
-  const stakeEl =
-    mode === 'model'
-      ? document.getElementById('bot-stake')
-      : document.getElementById('bot-stake-edge') || document.getElementById('bot-stake');
-  const maxEl =
-    mode === 'model'
-      ? document.getElementById('bot-maxpos')
-      : document.getElementById('bot-maxpos-edge') || document.getElementById('bot-maxpos');
-  const greenEl =
-    mode === 'model'
-      ? document.getElementById('bot-second-green')
-      : document.getElementById('bot-second-green-edge') || document.getElementById('bot-second-green');
   return {
-    stakeDollars: parseFloat(stakeEl?.value || '5'),
-    maxOpenPositions: parseFloat(maxEl?.value || '3'),
-    secondOpenRequiresGreen: greenEl?.value || 'on',
+    stakeDollars: parseFloat(document.getElementById('bot-stake')?.value || '5'),
+    maxOpenPositions: parseFloat(document.getElementById('bot-maxpos')?.value || '3'),
+    secondOpenRequiresGreen: document.getElementById('bot-second-green')?.value || 'on',
   };
 }
 
@@ -1471,11 +1448,9 @@ function setBotStrategyTab(mode) {
   const edgePanel = document.getElementById('bot-settings-edge');
   const settlePanel = document.getElementById('bot-settings-settle');
   const modelPanel = document.getElementById('bot-settings-model');
-  const sharedTrading = document.getElementById('bot-settings-shared-trading');
   if (edgePanel) edgePanel.hidden = strategy !== 'edge';
   if (settlePanel) settlePanel.hidden = strategy !== 'settle';
   if (modelPanel) modelPanel.hidden = strategy !== 'model';
-  if (sharedTrading) sharedTrading.hidden = strategy === 'model';
   syncSettleExitTableEnabled();
 }
 
@@ -1721,9 +1696,7 @@ function wireBotConfigAutoSave() {
     'bot-settle-late-floor',
     'bot-settle-stuck',
     'bot-stake',
-    'bot-stake-edge',
     'bot-maxpos',
-    'bot-maxpos-edge',
     'bot-paper-balance',
     'bot-skim-mode',
     'bot-skim-amount',
@@ -1738,7 +1711,6 @@ function wireBotConfigAutoSave() {
     'bot-settle-tiered',
     'bot-half-stake-near',
     'bot-second-green',
-    'bot-second-green-edge',
     'bot-trade-near',
     'bot-trade-doge',
     'bot-model-invert',
@@ -1921,9 +1893,7 @@ async function loadBotConfigIntoForm() {
       'bot-settle-late-floor',
       'bot-settle-stuck',
       'bot-stake',
-      'bot-stake-edge',
       'bot-maxpos',
-      'bot-maxpos-edge',
       'bot-paper-balance',
     ].forEach(updateSliderDisplay);
     updateSkimSliderDisplay();
