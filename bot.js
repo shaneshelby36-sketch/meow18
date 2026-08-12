@@ -3542,6 +3542,17 @@ class TradingBot {
 
     let bookedExit = Number(exitPriceCents);
     try {
+      const entryPx = Number(trade.entryPriceCents);
+      if (
+        reason === 'take_profit' &&
+        Number.isFinite(entryPx) &&
+        Number.isFinite(bookedExit) &&
+        bookedExit < entryPx
+      ) {
+        this.lastDecision =
+          `Blocked fake TP on ${trade.symbol}: bid ${Math.round(bookedExit)}¢ is below entry ${Math.round(entryPx)}¢ — holding.`;
+        return false;
+      }
       const isLive = this._isLiveTrade(trade);
       // Official Kalshi settlement pays 0/100 — never send a live sell at those prices.
       const skipLiveSell = opts.skipLiveSell === true || reason === 'settled';
@@ -4410,8 +4421,7 @@ class TradingBot {
       const adverseCents =
         underwater && Number.isFinite(entry) ? Math.round(entry - heldSideBidCents) : 0;
       const hardAdverse = modelHardAdverseCents(this.config);
-      const faded =
-        trade.modelInverted === true || isModelInvertSide(this.config);
+      const faded = trade.modelInverted === true;
       const againstLocked =
         picked &&
         picked.direction &&
@@ -4482,8 +4492,9 @@ class TradingBot {
           trade.troughSignalBidAt = now;
         }
         fadeSignalDrop = modelSignalDropCents(signalEntry, signalBid);
-        isBankableGreen = fadeSignalDrop >= Math.max(1, minTp || 0);
-        isDecentGreen = bankGreen > 0 && fadeSignalDrop >= bankGreen;
+        // Lean-side −N¢ is the thesis, but TAKE_PROFIT must be real ¢ on the
+        // held ticket. Don't overwrite held green with a signal-drop flag —
+        // that was booking 54→50 / 65→38 as "TP".
         const trough = Number(trade.troughSignalBidCents);
         const troughAt = Number(trade.troughSignalBidAt);
         const bounce = Number.isFinite(trough) ? Math.max(0, Math.round(signalBid - trough)) : 0;

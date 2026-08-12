@@ -5568,6 +5568,44 @@ async function testModelStrategy() {
   checkEq(modelSignalDropCents(70, 63), 7, 'fade TP: UP 70→63 is −7 on lean side');
   checkEq(modelSignalDropCents(70, 71), 0, 'fade TP: lean side up is not a drop');
 
+  // Fade must not TP when the held ticket is red (lean-side drop is not cash)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 30,
+        yes_ask: 32,
+        no_bid: 50,
+        no_ask: 52,
+      }),
+      { strategyMode: 'model', modelMinHoldSeconds: 0, modelBankGreenCents: 7 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'no',
+      entryPriceCents: 65,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 5_000,
+      modelInverted: true,
+      modelSignalSide: 'yes',
+      modelSignalEntryCents: 38,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    });
+    checkEq(trade.status, 'open', 'fade signal drop does not TP a red NO ticket');
+  }
+
   // Lock UP but live lean flipped DOWN → no entry
   {
     const closeMs = Date.now() + 12 * 60 * 1000;
