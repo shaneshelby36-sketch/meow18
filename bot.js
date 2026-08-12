@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 48;
+const SETTINGS_DEFAULTS_VERSION = 50;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -373,13 +373,15 @@ const MODEL_RED_GIVEUP_MS_DEFAULT = 8_000;
 /** Soft lean + still green: bank after this (preemptive — don't wait for the dump). */
 const MODEL_SOFT_BANK_MS_DEFAULT = 0;
 /** Kalshi bid slide from peak — cut before engine probs catch up (predict the dump). */
-const MODEL_DUMP_PULLBACK_CENTS_DEFAULT = 5;
+const MODEL_DUMP_PULLBACK_CENTS_DEFAULT = 3;
 /** Underwater this many ¢ → stop now (bid leading lean; don't wait for give-up). */
-const MODEL_FAST_RED_CENTS_DEFAULT = 4;
+const MODEL_FAST_RED_CENTS_DEFAULT = 2;
 /** Min drop in held-side live prob (pts) from entry before model exit fires. */
 const MODEL_PROB_DRIFT_PTS_DEFAULT = 3;
-/** Min hold before fast-red (avoids spread noise right on fill). */
-const MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT = 1_000;
+/** Min hold before fast-red (0 = cut same tick if bid gaps on fill). */
+const MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT = 0;
+/** Max ask−bid spread allowed at entry — blocks 62 ask / 49 bid gaps. */
+const MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT = 4;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /** Final barrier (minutes left). 0 = off (no forced late exits). */
@@ -400,7 +402,7 @@ const MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT = 2;
  * Confirmation gate: must observe ask below this, then cross it, before entry
  * is eligible. 0 = off. Default 50¢ — don't buy after the move already ran.
  */
-const MODEL_CONFIRM_CROSS_CENTS_DEFAULT = 50;
+const MODEL_CONFIRM_CROSS_CENTS_DEFAULT = 0;
 /** After the cross, skip if ask has already run this many ¢ past the cross (chase). */
 const MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT = 15;
 /** Need at least this many ¢ of continuation above the cross before buying. */
@@ -514,6 +516,26 @@ function modelFastRedCents(config = {}) {
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return Math.round(n);
   return MODEL_FAST_RED_CENTS_DEFAULT;
+}
+
+function modelActualSideBidCents(market, side) {
+  if (!market || !side) return null;
+  if (side === 'yes') {
+    const bid = Number(market.yes_bid);
+    return Number.isFinite(bid) ? bid : null;
+  }
+  if (side === 'no') {
+    const bid = Number(market.no_bid);
+    return Number.isFinite(bid) ? bid : null;
+  }
+  return null;
+}
+
+function modelMaxEntrySpreadCents(config = {}) {
+  const n = Number(config.modelMaxEntrySpreadCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT;
 }
 
 function modelLowPriceMaxCents(config = {}) {
@@ -965,7 +987,7 @@ const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
 const MODEL_PERFECT_LEAN_DEFAULT = 15;
 /** Model confidence floor default. */
-const MODEL_MIN_CONFIDENCE_DEFAULT = 66;
+const MODEL_MIN_CONFIDENCE_DEFAULT = 44;
 /** Trail off peak — unused by simplified Model exits (kept for config compat). */
 const MODEL_TRAIL_CENTS_DEFAULT = 0;
 /** Soft lean margin — treat 52/48 as turning (bank before the dump). */
@@ -1435,6 +1457,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelHardAdverseCents',
   'modelMinHoldSeconds',
   'modelPostExitCooldownMinutes',
+  'modelMaxEntrySpreadCents',
   'modelMinMinutesToOpen',
   'stakeDollars',
   'maxOpenPositions',
@@ -2283,6 +2306,7 @@ class TradingBot {
       modelHardAdverseCents: MODEL_HARD_ADVERSE_CENTS_DEFAULT,
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
+      modelMaxEntrySpreadCents: MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT,
       modelMinMinutesToOpen: MODEL_MIN_MINUTES_TO_OPEN_DEFAULT,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
       // Null/unset uses stopRecoveryCentsRequired() (~40% of stop, min 5¢).
@@ -6601,6 +6625,40 @@ class TradingBot {
       return null;
     }
 
+    const noBid = modelActualSideBidCents(market, 'no');
+    const heldBid = side === 'yes' ? modelActualSideBidCents(market, 'yes') : noBid;
+    const maxSpread = modelMaxEntrySpreadCents(this.config);
+    if (maxSpread > 0) {
+      if (!Number.isFinite(heldBid) || heldBid < 1) {
+        this.lastDecision =
+          `Waiting: ${symbol} ${String(side).toUpperCase()} has no live bid — won't buy blind into the ask.`;
+        return null;
+      }
+      const spread = Math.round(priceCents - heldBid);
+      if (spread > maxSpread) {
+        this.lastDecision =
+          `Waiting: ${symbol} ${String(side).toUpperCase()} ask ${priceCents}¢ vs bid ${Math.round(heldBid)}¢ ` +
+          `(gap ${spread}¢) — won't buy into a wide spread.`;
+        return null;
+      }
+    }
+
+    const entryHeldProb = side === 'yes' ? Number(window.probabilityUp) : Number(window.probabilityDown);
+    if (
+      modelEngineTurningAgainst({
+        window,
+        direction,
+        side,
+        minConf,
+        entryHeldProb,
+        config: this.config,
+      })
+    ) {
+      this.lastDecision =
+        `Waiting: ${symbol} model lean already turning on ${String(side).toUpperCase()} — no chase entry.`;
+      return null;
+    }
+
     // Confirm gate observes every quote (records under-50 prints even if lean is soft).
     const confirmGate = this._checkModelConfirmGate({
       ticker: market.ticker,
@@ -7396,9 +7454,11 @@ module.exports = {
   modelMomentumPullbackCents,
   modelDumpPullbackCents,
   modelFastRedCents,
+  modelMaxEntrySpreadCents,
   MODEL_DUMP_PULLBACK_CENTS_DEFAULT,
   MODEL_FAST_RED_CENTS_DEFAULT,
   MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT,
+  MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT,
   MODEL_PROB_DRIFT_PTS_DEFAULT,
   modelLowPriceMaxCents,
   modelLowPriceStakeQuarters,

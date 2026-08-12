@@ -1397,7 +1397,10 @@ const SLIDER_UNITS = {
     return '½ stake';
   },
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
+  'bot-model-sitout': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-model-late-extend-conf': (v) => `${Math.round(v)}%`,
+  'bot-stake-edge': (v) => `$${Math.round(v)}`,
+  'bot-maxpos-edge': (v) => `${Math.round(v)}`,
   'bot-settle-min': (v) => `${Math.round(v)}¢`,
   'bot-settle-max': (v) => `${Math.round(v)}¢`,
   'bot-settle-stoploss': (v) => `−${Math.round(v)}¢`,
@@ -1410,6 +1413,45 @@ const SLIDER_UNITS = {
   'bot-maxpos': (v) => `${Math.round(v)}`,
   'bot-paper-balance': (v) => `$${Math.round(v)}`,
 };
+
+function syncTradingSlidersFromConfig(c) {
+  const stake = c.stakeDollars != null ? c.stakeDollars : 5;
+  const maxPos = c.maxOpenPositions != null ? c.maxOpenPositions : 3;
+  const secondGreen = c.secondOpenRequiresGreen === 'off' ? 'off' : 'on';
+  for (const id of ['bot-stake', 'bot-stake-edge']) {
+    const el = document.getElementById(id);
+    if (el) el.value = stake;
+  }
+  for (const id of ['bot-maxpos', 'bot-maxpos-edge']) {
+    const el = document.getElementById(id);
+    if (el) el.value = maxPos;
+  }
+  for (const id of ['bot-second-green', 'bot-second-green-edge']) {
+    const el = document.getElementById(id);
+    if (el) el.value = secondGreen;
+  }
+}
+
+function readTradingSlidersFromForm() {
+  const mode = document.getElementById('bot-strategy-mode')?.value || 'model';
+  const stakeEl =
+    mode === 'model'
+      ? document.getElementById('bot-stake')
+      : document.getElementById('bot-stake-edge') || document.getElementById('bot-stake');
+  const maxEl =
+    mode === 'model'
+      ? document.getElementById('bot-maxpos')
+      : document.getElementById('bot-maxpos-edge') || document.getElementById('bot-maxpos');
+  const greenEl =
+    mode === 'model'
+      ? document.getElementById('bot-second-green')
+      : document.getElementById('bot-second-green-edge') || document.getElementById('bot-second-green');
+  return {
+    stakeDollars: parseFloat(stakeEl?.value || '5'),
+    maxOpenPositions: parseFloat(maxEl?.value || '3'),
+    secondOpenRequiresGreen: greenEl?.value || 'on',
+  };
+}
 
 function strategyModeLabel(mode) {
   const m = String(mode || '').toLowerCase();
@@ -1429,9 +1471,11 @@ function setBotStrategyTab(mode) {
   const edgePanel = document.getElementById('bot-settings-edge');
   const settlePanel = document.getElementById('bot-settings-settle');
   const modelPanel = document.getElementById('bot-settings-model');
+  const sharedTrading = document.getElementById('bot-settings-shared-trading');
   if (edgePanel) edgePanel.hidden = strategy !== 'edge';
   if (settlePanel) settlePanel.hidden = strategy !== 'settle';
   if (modelPanel) modelPanel.hidden = strategy !== 'model';
+  if (sharedTrading) sharedTrading.hidden = strategy === 'model';
   syncSettleExitTableEnabled();
 }
 
@@ -1667,7 +1711,7 @@ function wireBotConfigAutoSave() {
     'bot-model-low-price',
     'bot-model-low-stake',
     'bot-model-bank-green',
-    'bot-model-late-extend-conf',
+    'bot-model-sitout',
     'bot-settle-min',
     'bot-settle-max',
     'bot-settle-stoploss',
@@ -1677,7 +1721,9 @@ function wireBotConfigAutoSave() {
     'bot-settle-late-floor',
     'bot-settle-stuck',
     'bot-stake',
+    'bot-stake-edge',
     'bot-maxpos',
+    'bot-maxpos-edge',
     'bot-paper-balance',
     'bot-skim-mode',
     'bot-skim-amount',
@@ -1692,6 +1738,7 @@ function wireBotConfigAutoSave() {
     'bot-settle-tiered',
     'bot-half-stake-near',
     'bot-second-green',
+    'bot-second-green-edge',
     'bot-trade-near',
     'bot-trade-doge',
     'bot-model-invert',
@@ -1738,7 +1785,7 @@ async function loadBotConfigIntoForm() {
       modelInvert.value = on ? 'on' : 'off';
     }
     const modelConf = document.getElementById('bot-model-confidence');
-    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 66;
+    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 44;
     const modelLiveFavor = document.getElementById('bot-model-live-favor');
     if (modelLiveFavor) {
       modelLiveFavor.value =
@@ -1747,7 +1794,7 @@ async function loadBotConfigIntoForm() {
     const modelConfirmCross = document.getElementById('bot-model-confirm-cross');
     if (modelConfirmCross) {
       modelConfirmCross.value =
-        c.modelConfirmCrossCents != null ? c.modelConfirmCrossCents : 50;
+        c.modelConfirmCrossCents != null ? c.modelConfirmCrossCents : 0;
     }
     const modelConfirmExt = document.getElementById('bot-model-confirm-ext');
     if (modelConfirmExt) {
@@ -1767,9 +1814,11 @@ async function loadBotConfigIntoForm() {
     }
     const modelBankGreen = document.getElementById('bot-model-bank-green');
     if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 7;
-    const modelLateExt = document.getElementById('bot-model-late-extend-conf');
-    if (modelLateExt) {
-      modelLateExt.value = c.modelLateExtendMinConfidence != null ? c.modelLateExtendMinConfidence : 78;
+    const modelSitout = document.getElementById('bot-model-sitout');
+    if (modelSitout) {
+      const mins =
+        c.modelPostExitCooldownMinutes != null ? Number(c.modelPostExitCooldownMinutes) : 0.5;
+      modelSitout.value = Math.round(Math.max(0, mins * 60));
     }
     const settleMin = document.getElementById('bot-settle-min');
     if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 80;
@@ -1835,17 +1884,7 @@ async function loadBotConfigIntoForm() {
         c.settleTieredExits === 'false';
       settleTiered.value = tieredOff ? 'off' : 'on';
     }
-    document.getElementById('bot-stake').value = c.stakeDollars;
-    document.getElementById('bot-maxpos').value = c.maxOpenPositions;
-    const secondGreen = document.getElementById('bot-second-green');
-    if (secondGreen) {
-      const off =
-        c.secondOpenRequiresGreen === false ||
-        c.secondOpenRequiresGreen === 0 ||
-        c.secondOpenRequiresGreen === 'off' ||
-        c.secondOpenRequiresGreen === 'false';
-      secondGreen.value = off ? 'off' : 'on';
-    }
+    syncTradingSlidersFromConfig(c);
     document.getElementById('bot-paper-balance').value = c.paperStartingBalanceDollars;
     document.getElementById('bot-skim-mode').value = c.skimMode || 'insurance';
     const skimAmt = document.getElementById('bot-skim-amount');
@@ -1872,7 +1911,7 @@ async function loadBotConfigIntoForm() {
       'bot-model-low-price',
       'bot-model-low-stake',
       'bot-model-bank-green',
-      'bot-model-late-extend-conf',
+      'bot-model-sitout',
       'bot-settle-min',
       'bot-settle-max',
       'bot-settle-stoploss',
@@ -1882,7 +1921,9 @@ async function loadBotConfigIntoForm() {
       'bot-settle-late-floor',
       'bot-settle-stuck',
       'bot-stake',
+      'bot-stake-edge',
       'bot-maxpos',
+      'bot-maxpos-edge',
       'bot-paper-balance',
     ].forEach(updateSliderDisplay);
     updateSkimSliderDisplay();
@@ -2007,6 +2048,8 @@ async function saveBotConfig(opts = {}) {
   }
   const skimMode = document.getElementById('bot-skim-mode').value;
   const skimAmount = parseFloat(document.getElementById('bot-skim-amount').value);
+  const trading = readTradingSlidersFromForm();
+  const modelSitoutSec = parseFloat(document.getElementById('bot-model-sitout')?.value || '30');
   const payload = {
     symbol: document.getElementById('bot-symbol').value,
     strategyMode: document.getElementById('bot-strategy-mode')?.value || 'model',
@@ -2017,9 +2060,9 @@ async function saveBotConfig(opts = {}) {
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     modelInvertSide: document.getElementById('bot-model-invert')?.value || 'off',
-    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '66'),
+    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '44'),
     modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '3'),
-    modelConfirmCrossCents: parseFloat(document.getElementById('bot-model-confirm-cross')?.value || '50'),
+    modelConfirmCrossCents: parseFloat(document.getElementById('bot-model-confirm-cross')?.value || '0'),
     modelConfirmMaxExtensionCents: parseFloat(
       document.getElementById('bot-model-confirm-ext')?.value || '15'
     ),
@@ -2032,9 +2075,8 @@ async function saveBotConfig(opts = {}) {
     })(),
     modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
     modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
-    modelLateExtendMinConfidence: parseFloat(
-      document.getElementById('bot-model-late-extend-conf')?.value || '78'
-    ),
+    modelPostExitCooldownMinutes:
+      Number.isFinite(modelSitoutSec) && modelSitoutSec > 0 ? modelSitoutSec / 60 : 0,
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '80'),
     settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '94'),
     settleStopLossCents: Math.max(
@@ -2052,9 +2094,7 @@ async function saveBotConfig(opts = {}) {
     tradeNear: document.getElementById('bot-trade-near')?.value || 'off',
     tradeDoge: document.getElementById('bot-trade-doge')?.value || 'off',
     settleTieredExits: document.getElementById('bot-settle-tiered')?.value || 'on',
-    stakeDollars: parseFloat(document.getElementById('bot-stake').value),
-    maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
-    secondOpenRequiresGreen: document.getElementById('bot-second-green')?.value || 'on',
+    ...trading,
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),
     skimMode,
     ...(skimMode === 'insurance'

@@ -259,7 +259,7 @@
         </div>
         <input type="hidden" id="bot-strategy-mode" value="model" />
 
-        <div class="bot-field-grid">
+        <div class="bot-field-grid bot-settings-global">
           <label>Asset to trade
             <select id="bot-symbol">
               <option value="AUTO">Auto (scan all markets, trade the best)</option>
@@ -272,21 +272,7 @@
               <option value="HYPE">HYPE</option>
               <option value="DOGE">DOGE</option>
             </select>
-            <span class="field-hint">AUTO scans enabled coins (BTC/ETH/SOL/XRP/BNB/HYPE by default). NEAR and DOGE stay off until you turn them on below. ZEC is dashboard-only (no Kalshi 15m).</span>
-          </label>
-          <label>Trade NEAR
-            <select id="bot-trade-near">
-              <option value="off">Off (default)</option>
-              <option value="on">On</option>
-            </select>
-            <span class="field-hint">Off = skip NEAR for new entries (still manage any open NEAR). Flip On anytime to add it back to AUTO / single-symbol.</span>
-          </label>
-          <label>Trade DOGE
-            <select id="bot-trade-doge">
-              <option value="off">Off (default)</option>
-              <option value="on">On</option>
-            </select>
-            <span class="field-hint">Off = skip DOGE for new entries. Flip On anytime to trade it again.</span>
+            <span class="field-hint">AUTO scans enabled coins (BTC/ETH/SOL/XRP/BNB/HYPE by default).</span>
           </label>
         </div>
 
@@ -341,86 +327,114 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> plan: lean → buy → follow from ~+3¢ → bank on a 1¢ stall or at 96¢. Preemptive model exit: live prob tie/flip, signalScore weakening, entry prob drift, or locked lean turning — bank BE/green or cut any red before the bid dumps. Bid −5¢ / −4¢ red as backup. ~30s sit-out then confirm-gate rebuy. Fade sits against the lock.</p>
+          <p class="settings-hint"><strong>MODEL</strong> — all knobs for this strategy live here. Lean → buy → bank early when the model turns (live prob, signalScore, drift) or bid gaps. Confirm cross default <strong>off</strong>; min conf default <strong>44%</strong>.</p>
 
-          <label><strong>MODEL</strong> fade (opposite side)
+          <h4 class="bot-panel-subhead">Sizing &amp; coins</h4>
+          <label>Stake per trade
+            <div class="slider-row">
+              <input id="bot-stake" type="range" min="1" max="500" step="1" />
+              <span class="slider-value" id="bot-stake-value">—</span>
+            </div>
+          </label>
+          <label>Max open positions
+            <div class="slider-row">
+              <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
+              <span class="slider-value" id="bot-maxpos-value">—</span>
+            </div>
+            <span class="field-hint">Default 3 parallel coins. Still one open per coin.</span>
+          </label>
+          <label>Second open only if holding green
+            <select id="bot-second-green">
+              <option value="on">On (default)</option>
+              <option value="off">Off — fill up to max anytime</option>
+            </select>
+          </label>
+          <label>Trade NEAR
+            <select id="bot-trade-near">
+              <option value="off">Off (default)</option>
+              <option value="on">On</option>
+            </select>
+          </label>
+          <label>Trade DOGE
+            <select id="bot-trade-doge">
+              <option value="off">Off (default)</option>
+              <option value="on">On</option>
+            </select>
+          </label>
+
+          <h4 class="bot-panel-subhead">Entry</h4>
+          <label>MODEL fade (opposite side)
             <select id="bot-model-invert">
               <option value="off">Off — follow the lean (default)</option>
               <option value="on">On — fade: UP→NO, DOWN→YES</option>
             </select>
-            <span class="field-hint">On = still require a clear lean, then buy the other contract. TP is <strong>−N¢ on the lean/current side</strong> (UP 70→63), then we sell the faded hold. Confirm / min entry apply to the faded ask.</span>
           </label>
-
-          <label><strong>MODEL</strong> min confidence
+          <label>MODEL min confidence
             <div class="slider-row">
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />
               <span class="slider-value" id="bot-model-confidence-value">—</span>
             </div>
-            <span class="field-hint">Engine must be at least this sure before opening. Default 66%.</span>
+            <span class="field-hint">Default <strong>44%</strong>.</span>
           </label>
-
-          <label><strong>MODEL</strong> live favor (pts)
+          <label>MODEL live favor (pts)
             <div class="slider-row">
               <input id="bot-model-live-favor" type="range" min="0" max="15" step="1" />
               <span class="slider-value" id="bot-model-live-favor-value">—</span>
             </div>
-            <span class="field-hint">Live UP vs DOWN must beat the other side by this many points before entry. Default <strong>3</strong> (was 8). <strong>0</strong> = any lead (51/49 ok).</span>
+            <span class="field-hint">Live UP vs DOWN must lead by this many pts to enter. Default <strong>3</strong>. <strong>0</strong> = any lead.</span>
           </label>
-
-          <label><strong>MODEL</strong> confirm cross (¢)
+          <label>MODEL confirm cross (¢)
             <div class="slider-row">
               <input id="bot-model-confirm-cross" type="range" min="0" max="65" step="1" />
               <span class="slider-value" id="bot-model-confirm-cross-value">—</span>
             </div>
-            <span class="field-hint">Rule level only — stays <strong>off per coin</strong> until that coin finishes a MODEL buy+sell opened this run, then: ask <strong>below</strong> this → cross → continue. Each exit resets. Default <strong>50¢</strong>. <strong>0 = never use gate</strong>.</span>
+            <span class="field-hint">Default <strong>off (0)</strong>. When on: per-coin gate after first MODEL round-trip this run.</span>
           </label>
-
-          <label><strong>MODEL</strong> max run after cross (¢)
+          <label>MODEL max run after cross (¢)
             <div class="slider-row">
               <input id="bot-model-confirm-ext" type="range" min="5" max="30" step="1" />
               <span class="slider-value" id="bot-model-confirm-ext-value">—</span>
             </div>
-            <span class="field-hint">If ask already ran this far past the cross, skip — move happened, don't buy the top. Default +15¢.</span>
           </label>
-
-          <label><strong>MODEL</strong> min entry (¢)
+          <label>MODEL min entry (¢)
             <div class="slider-row">
               <input id="bot-model-min-entry" type="range" min="40" max="85" step="1" />
               <span class="slider-value" id="bot-model-min-entry-value">—</span>
             </div>
-            <span class="field-hint">Never buy cheaper than this. Default <strong>60¢</strong> — blocks longshot tickets.</span>
           </label>
-
-          <label><strong>MODEL</strong> max entry (¢)
+          <label>MODEL max entry (¢)
             <div class="slider-row">
               <input id="bot-model-max-entry" type="range" min="70" max="98" step="1" />
               <span class="slider-value" id="bot-model-max-entry-value">—</span>
             </div>
-            <span class="field-hint">Never buy richer than this. Default 93¢.</span>
           </label>
-
-          <label><strong>MODEL</strong> reduced-stake under (¢)
+          <label>MODEL reduced-stake under (¢)
             <div class="slider-row">
               <input id="bot-model-low-price" type="range" min="50" max="90" step="1" />
               <span class="slider-value" id="bot-model-low-price-value">—</span>
             </div>
-            <span class="field-hint">Asks cheaper than this use the reduced stake size below (not full stake). Default 70¢.</span>
           </label>
-
-          <label><strong>MODEL</strong> reduced stake size
+          <label>MODEL reduced stake size
             <div class="slider-row">
               <input id="bot-model-low-stake" type="range" min="1" max="3" step="1" />
               <span class="slider-value" id="bot-model-low-stake-value">—</span>
             </div>
-            <span class="field-hint">Fraction of normal stake when ask is under the threshold above: ¼, ½, or ¾. Default ½.</span>
           </label>
 
-          <label><strong>MODEL</strong> bank / TP green (¢)
+          <h4 class="bot-panel-subhead">Exit &amp; recycle</h4>
+          <label>MODEL bank / TP green (¢)
             <div class="slider-row">
               <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
-            <span class="field-hint">Follow from about +3¢ (even if this slider is 7). TP when the bid dips <strong>1¢ off the peak</strong> or sits ~4s. Never sells red as TP.</span>
+            <span class="field-hint">Trail from ~+3¢; bank on 1¢ stall or at 96¢. Model lean cut is separate and preemptive.</span>
+          </label>
+          <label>MODEL post-exit sit-out (sec)
+            <div class="slider-row">
+              <input id="bot-model-sitout" type="range" min="0" max="120" step="5" />
+              <span class="slider-value" id="bot-model-sitout-value">—</span>
+            </div>
+            <span class="field-hint">After BE/TP/lean exit on a coin, wait before rebuy. Default 30s.</span>
           </label>
         </div>
 
@@ -526,36 +540,35 @@
           </label>
         </div>
 
-        <div class="bot-field-grid">
+        <div id="bot-settings-shared-trading" class="bot-field-grid">
           <label>Stake per trade
             <div class="slider-row">
-              <input id="bot-stake" type="range" min="1" max="500" step="1" />
-              <span class="slider-value" id="bot-stake-value">—</span>
+              <input id="bot-stake-edge" type="range" min="1" max="500" step="1" />
+              <span class="slider-value" id="bot-stake-edge-value">—</span>
             </div>
-            <span class="field-hint">Dollar amount risked per trade — the bot converts this to a contract count automatically.</span>
+            <span class="field-hint">Dollar amount risked per trade.</span>
           </label>
-
           <label>Max open positions
             <div class="slider-row">
-              <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
-              <span class="slider-value" id="bot-maxpos-value">—</span>
+              <input id="bot-maxpos-edge" type="range" min="1" max="10" step="1" />
+              <span class="slider-value" id="bot-maxpos-edge-value">—</span>
             </div>
-            <span class="field-hint">How many trades can be open at once. Default <strong>3</strong> so MODEL can ride several correlating coins together. Still one open per coin. Raise to 4–5 if you want more parallelism.</span>
           </label>
           <label>Second open only if holding green
-            <select id="bot-second-green">
+            <select id="bot-second-green-edge">
               <option value="on">On (default)</option>
               <option value="off">Off — fill up to max anytime</option>
             </select>
-            <span class="field-hint">On: first trade alone is fine; another open only after you already have a green hold (or a settle hold that tagged 90¢). Off: can stack up to max immediately.</span>
           </label>
+        </div>
 
+        <div id="bot-settings-wallet" class="bot-field-grid">
           <label>Starting Bankroll
             <div class="slider-row">
               <input id="bot-paper-balance" type="range" min="10" max="10000" step="10" />
               <span class="slider-value" id="bot-paper-balance-value">—</span>
             </div>
-            <span class="field-hint">Your trading bankroll. Available Cash = bankroll + closed P&amp;L − Wallet − Insurance − Open Positions. New trades can only use Available Cash.</span>
+            <span class="field-hint">Your trading bankroll. Available Cash = bankroll + closed P&amp;L − Wallet − Insurance − Open Positions.</span>
           </label>
 
           <label>Profit skim mode

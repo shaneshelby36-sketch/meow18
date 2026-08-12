@@ -5731,6 +5731,38 @@ async function testModelStrategy() {
     check(/below 60/i.test(bot.lastDecision || ''), 'decision cites 60¢ min');
   }
 
+  // Wide spread: synthetic 100−yesAsk must not mask a real NO bid gap (62 ask / 49 bid).
+  {
+    const closeMs = Date.now() + 12 * 60 * 1000;
+    const bot = makeBot(
+      mockClient({
+        ticker: 'KXBTC15M-GAP',
+        status: 'open',
+        floor_strike: 100000,
+        close_time: new Date(closeMs).toISOString(),
+        yes_bid: 37,
+        yes_ask: 38,
+        // no_bid omitted — old code used 100−38=62 and looked tight
+        no_ask: 62,
+      }),
+      { strategyMode: 'model', modelMinConfidence: 50, modelMaxEntrySpreadCents: 4 }
+    );
+    const preds = {
+      BTC: {
+        ready: true,
+        price: 100010,
+        windows: {
+          w5: { ...win(38, 62), tracking: { predictedDirection: 'DOWN' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    };
+    const gap = await bot._evaluateSymbolForModel('BTC', preds);
+    checkEq(gap, null, 'blocks model entry when side bid missing (no blind ask fill)');
+    check(/no live bid|wide spread/i.test(bot.lastDecision || ''), 'decision cites bid/spread');
+  }
+
   // +7¢+ green → TP immediately (no momentum ride / stall wait)
   {
     const now = Date.now();
