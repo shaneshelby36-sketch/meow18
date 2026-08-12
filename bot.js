@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 52;
+const SETTINGS_DEFAULTS_VERSION = 53;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -358,8 +358,12 @@ const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 2;
 const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 3;
 /** Don't early-exit a Model hold until it's been open at least this long. */
 const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
-/** After Model BE/TP/lean-flip, sit out that coin this long (short — scalp recycle at 50¢). */
+/** After Model BE/TP, sit out that coin this long before rebuy. */
 const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 30_000;
+/** After MODEL lean/dip stop (red), longer sit-out — stops knife-catch churn. */
+const MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT = 120_000;
+/** First N ms after open: only hard lean-turning exits (ignore soft + ask/bid haircut). */
+const MODEL_OPEN_GRACE_MS_DEFAULT = 8_000;
 /** Lean-exit / momentum TP floor — no micro-banks under this. */
 const MODEL_MIN_TP_CENTS_DEFAULT = 7;
 /** Arm momentum run once this many ¢ green; then hold until stall. */
@@ -435,6 +439,23 @@ function modelPostExitCooldownMs(config = {}) {
   if (Number.isFinite(mins) && mins <= 0) return 0;
   if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 60 * 1000);
   return MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT;
+}
+
+function modelPostLeanStopCooldownMs(config = {}) {
+  const mins = Number(config.modelPostLeanStopCooldownMinutes);
+  if (Number.isFinite(mins) && mins <= 0) return 0;
+  if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 60 * 1000);
+  const n = Number(config.modelPostLeanStopCooldownMs);
+  if (Number.isFinite(n) && n >= 0) return Math.round(n);
+  return MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT;
+}
+
+function modelOpenGraceMs(config = {}) {
+  const n = Number(config.modelOpenGraceMs);
+  if (Number.isFinite(n) && n >= 0) return Math.round(n);
+  const sec = Number(config.modelOpenGraceSeconds);
+  if (Number.isFinite(sec) && sec >= 0) return Math.round(sec * 1000);
+  return MODEL_OPEN_GRACE_MS_DEFAULT;
 }
 
 function modelMinTpCents(config = {}) {
@@ -864,12 +885,22 @@ function modelPriceAllowed(priceCents, window, config = {}) {
 }
 
 /**
- * After a Model BE/TP/lean-flip on this coin, block new model entries until cooldown elapses.
+ * After a Model BE/TP/lean-stop on this coin, block new model entries until cooldown elapses.
+ * Lean/dip stops use a longer sit-out so we don't knife-catch the same loser every ~30s.
  */
-function checkModelPostExitCooldown({ trades, symbol, cooldownMs, now = Date.now() } = {}) {
+function checkModelPostExitCooldown({
+  trades,
+  symbol,
+  cooldownMs,
+  leanStopCooldownMs,
+  now = Date.now(),
+} = {}) {
   const sym = String(symbol || '').toUpperCase();
-  const cd = Number(cooldownMs);
-  if (!sym || !Number.isFinite(cd) || cd <= 0) return { ok: true };
+  const cdTp = Number(cooldownMs);
+  const cdLean = Number.isFinite(Number(leanStopCooldownMs))
+    ? Number(leanStopCooldownMs)
+    : MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT;
+  if (!sym) return { ok: true };
   let best = null;
   let bestAt = -Infinity;
   for (const t of trades || []) {
@@ -895,12 +926,23 @@ function checkModelPostExitCooldown({ trades, symbol, cooldownMs, now = Date.now
     }
   }
   if (!best || !Number.isFinite(bestAt)) return { ok: true };
+  const reason = String(best.exitReason || '');
+  const isLeanStop =
+    reason === 'model_lean_stop' ||
+    reason === 'model_lean_flip' ||
+    reason === 'model_dip_stop';
+  const cd = isLeanStop
+    ? Number.isFinite(cdLean) && cdLean > 0
+      ? cdLean
+      : cdTp
+    : cdTp;
+  if (!Number.isFinite(cd) || cd <= 0) return { ok: true };
   const elapsed = Number(now) - bestAt;
   if (elapsed < cd) {
     const remainSec = Math.max(1, Math.ceil((cd - elapsed) / 1000));
     return {
       ok: false,
-      reason: `Waiting: ${sym} model sit-out after ${best.exitReason} (~${remainSec}s left) — avoids chop reopen.`,
+      reason: `Waiting: ${sym} model sit-out after ${reason} (~${remainSec}s left) — avoids chop reopen.`,
     };
   }
   return { ok: true };
@@ -1550,6 +1592,8 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelHardAdverseCents',
   'modelMinHoldSeconds',
   'modelPostExitCooldownMinutes',
+  'modelPostLeanStopCooldownMinutes',
+  'modelOpenGraceMs',
   'modelMaxEntrySpreadCents',
   'modelMinMinutesToOpen',
   'stakeDollars',
@@ -2399,6 +2443,8 @@ class TradingBot {
       modelHardAdverseCents: MODEL_HARD_ADVERSE_CENTS_DEFAULT,
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
+      modelPostLeanStopCooldownMinutes: MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT / 60000,
+      modelOpenGraceMs: MODEL_OPEN_GRACE_MS_DEFAULT,
       modelMaxEntrySpreadCents: MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT,
       modelMinMinutesToOpen: MODEL_MIN_MINUTES_TO_OPEN_DEFAULT,
       // After stop-loss: require this many ¢ of bid bounce before re-entry (0 = off).
@@ -4701,17 +4747,37 @@ class TradingBot {
         picked.window.confidence < minConf;
       // Fade holds are *supposed* to sit against the lock — don't BE-scratch
       // just because the signal still points the original way.
-      // Follow: exit as soon as the model is no longer clearly with us (BE if flat).
-      const leanExit = faded
-        ? !!weakConf
-        : !!(engineTurning || (picked && picked.window && !engineClearlyWithUs));
-
+      // Follow: hard lean-turning always exits; soft "not clearly with us" only after open grace
+      // (ask→bid haircut looks red for the first seconds — don't knife that).
       const openedAt = Number(trade.openedAt);
       const heldMs = Number.isFinite(openedAt) ? now - openedAt : Infinity;
+      const openGraceMs = modelOpenGraceMs(this.config);
+      const inOpenGrace = openGraceMs > 0 && heldMs < openGraceMs;
+      const leanExit = faded
+        ? !!weakConf
+        : !!(
+            engineTurning ||
+            (!inOpenGrace && picked && picked.window && !engineClearlyWithUs)
+          );
+
       const minHold = modelMinHoldMs(this.config);
       const heldLongEnough = minHold <= 0 || heldMs >= minHold;
       const bankHoldMs = minHold > 0 ? Math.min(minHold, 30_000) : 0;
       const heldForBank = bankHoldMs <= 0 || heldMs >= bankHoldMs;
+
+      // Entry is at ask; mark is bid. Only count red beyond the entry spread haircut.
+      const entryBidStamp = Number(trade.modelEntryBidCents);
+      const entrySpreadStamp = Number(trade.modelEntrySpreadCents);
+      const entrySpread = Number.isFinite(entrySpreadStamp)
+        ? Math.max(0, Math.round(entrySpreadStamp))
+        : Number.isFinite(entry) && Number.isFinite(entryBidStamp)
+          ? Math.max(0, Math.round(entry - entryBidStamp))
+          : 0;
+      const trueAdverse =
+        underwater && Number.isFinite(adverseCents)
+          ? Math.max(0, adverseCents - entrySpread)
+          : 0;
+      const econUnderwater = trueAdverse > 0;
 
       const peak = Number(trade.peakHeldBidCents);
       const peakAt = Number(trade.peakHeldBidAt);
@@ -4779,16 +4845,17 @@ class TradingBot {
       }
 
       // Model-native preemptive exit: lean soft/turning before the bid dumps.
-      // Flat → BE immediately; red → lean-stop. Don't wait for the dump.
+      // Flat / only ask→bid haircut → BE; real red beyond spread → lean-stop.
       if (!faded && bidOk && leanExit) {
-        if (underwater) {
+        if (econUnderwater) {
           await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
             liveSellPriceCents: heldSideBidCents,
           });
           return;
         }
-        if (exactlyFlat || flatOrGreen) {
-          if (exactlyFlat || greenCents <= 0) {
+        if (exactlyFlat || flatOrGreen || underwater) {
+          // Underwater only by entry spread haircut → treat as BE scratch if lean soft.
+          if (exactlyFlat || greenCents <= 0 || underwater) {
             const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
             await this._closePosition(trade, beFill, 'breakeven', {
               liveSellPriceCents: heldSideBidCents,
@@ -4802,11 +4869,11 @@ class TradingBot {
         }
       }
 
-      // Bid-led dump cut (backup when model probs lag Kalshi).
+      // Bid-led dump cut (backup when model probs lag Kalshi). Peak is entry bid, not ask.
       const dumpPullback = modelDumpPullbackCents(this.config);
       if (!faded && bidOk && dumpPullback > 0 && pullback >= dumpPullback) {
-        if (flatOrGreen) {
-          if (exactlyFlat || greenCents <= 0) {
+        if (flatOrGreen || !econUnderwater) {
+          if (exactlyFlat || greenCents <= 0 || (underwater && !econUnderwater)) {
             const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
             await this._closePosition(trade, beFill, 'breakeven', {
               liveSellPriceCents: heldSideBidCents,
@@ -4829,8 +4896,8 @@ class TradingBot {
         !faded &&
         bidOk &&
         fastRed > 0 &&
-        underwater &&
-        adverseCents >= fastRed &&
+        econUnderwater &&
+        trueAdverse >= fastRed &&
         heldMs >= MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT
       ) {
         await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
@@ -4839,11 +4906,11 @@ class TradingBot {
         return;
       }
 
-      // Model still firm but ticket red — short bounce window only.
+      // Model still firm but ticket red beyond spread — short bounce window only.
       if (
         !faded &&
         bidOk &&
-        underwater &&
+        econUnderwater &&
         engineClearlyWithUs &&
         heldMs >= MODEL_RED_GIVEUP_MS_DEFAULT
       ) {
@@ -5289,6 +5356,8 @@ class TradingBot {
     modelSignalEntryCents = null,
     modelEntryHeldProb = null,
     modelEntryNetDominance = null,
+    modelEntryBidCents = null,
+    modelEntrySpreadCents = null,
   }) {
     // A paper trade must obey the same price rules as a live order. Without
     // this guard an empty Kalshi quote could be stored as `null` and then
@@ -5471,7 +5540,14 @@ class TradingBot {
       engineConfidence,
       status: 'open',
       ...(isSettle || isModel
-        ? { peakHeldBidCents: Math.round(priceCents), peakHeldBidAt: Date.now() }
+        ? {
+            peakHeldBidCents: Math.round(
+              isModel && Number.isFinite(Number(modelEntryBidCents))
+                ? Number(modelEntryBidCents)
+                : priceCents
+            ),
+            peakHeldBidAt: Date.now(),
+          }
         : {}),
       ...(isModel
         ? {
@@ -5487,6 +5563,12 @@ class TradingBot {
               : {}),
             ...(Number.isFinite(Number(modelEntryNetDominance))
               ? { modelEntryNetDominance: +Number(modelEntryNetDominance).toFixed(2) }
+              : {}),
+            ...(Number.isFinite(Number(modelEntryBidCents))
+              ? { modelEntryBidCents: Math.round(Number(modelEntryBidCents)) }
+              : {}),
+            ...(Number.isFinite(Number(modelEntrySpreadCents))
+              ? { modelEntrySpreadCents: Math.round(Number(modelEntrySpreadCents)) }
               : {}),
             ...(modelQuarter ? { modelUncertain: true } : {}),
           }
@@ -6626,6 +6708,7 @@ class TradingBot {
       trades: this.ledger.trades,
       symbol,
       cooldownMs: modelPostExitCooldownMs(this.config),
+      leanStopCooldownMs: modelPostLeanStopCooldownMs(this.config),
       now: Date.now(),
     });
     if (!cooldown.ok) {
@@ -6812,6 +6895,7 @@ class TradingBot {
       direction,
       side,
       priceCents,
+      entryBidCents: Number.isFinite(heldBid) ? Math.round(heldBid) : null,
       closeTime,
       rankScore: leanStrength * (window.confidence / 100),
       uncertain,
@@ -6844,6 +6928,12 @@ class TradingBot {
   }
 
   _modelOppToOpenArgs(opportunity) {
+    const entryBid = Number(opportunity.entryBidCents);
+    const price = Number(opportunity.priceCents);
+    const spread =
+      Number.isFinite(entryBid) && Number.isFinite(price)
+        ? Math.max(0, Math.round(price - entryBid))
+        : null;
     return {
       symbol: opportunity.symbol,
       ticker: opportunity.market.ticker,
@@ -6867,6 +6957,8 @@ class TradingBot {
         opportunity.window.signalScore && Number.isFinite(Number(opportunity.window.signalScore.netDominance))
           ? opportunity.window.signalScore.netDominance
           : null,
+      modelEntryBidCents: Number.isFinite(entryBid) ? entryBid : null,
+      modelEntrySpreadCents: spread,
       uncertain: opportunity.uncertain,
       modelInverted: opportunity.invert === true,
       modelSignalSide: opportunity.signalSide || null,
@@ -7553,6 +7645,8 @@ module.exports = {
   checkModelPostExitCooldown,
   modelMinHoldMs,
   modelPostExitCooldownMs,
+  modelPostLeanStopCooldownMs,
+  modelOpenGraceMs,
   modelMinTpCents,
   modelBankGreenCents,
   modelTrailArmCents,
@@ -7569,6 +7663,8 @@ module.exports = {
   MODEL_FAST_RED_CENTS_DEFAULT,
   MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT,
   MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT,
+  MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT,
+  MODEL_OPEN_GRACE_MS_DEFAULT,
   MODEL_PROB_DRIFT_PTS_DEFAULT,
   modelLowPriceMaxCents,
   modelLowPriceStakeQuarters,

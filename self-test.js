@@ -6912,6 +6912,79 @@ async function testModelStrategy() {
       }).ok,
       'post-exit cooldown clears after ~30s'
     );
+    check(
+      !checkModelPostExitCooldown({
+        trades: [
+          {
+            strategy: 'model',
+            symbol: 'XRP',
+            status: 'closed',
+            exitReason: 'model_lean_stop',
+            closedAt: now - 40_000,
+          },
+        ],
+        symbol: 'XRP',
+        cooldownMs: 30_000,
+        leanStopCooldownMs: 120_000,
+        now,
+      }).ok,
+      'lean-stop sit-out still active at 40s (2m knife-catch block)'
+    );
+    check(
+      checkModelPostExitCooldown({
+        trades: [
+          {
+            strategy: 'model',
+            symbol: 'XRP',
+            status: 'closed',
+            exitReason: 'model_lean_stop',
+            closedAt: now - 125_000,
+          },
+        ],
+        symbol: 'XRP',
+        cooldownMs: 30_000,
+        leanStopCooldownMs: 120_000,
+        now,
+      }).ok,
+      'lean-stop sit-out clears after 2m'
+    );
+  }
+
+  // Ask→bid haircut alone must not instant lean-stop (paper entry=ask, mark=bid)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 64,
+        no_bid: 36,
+      }),
+      { strategyMode: 'model', modelMinHoldSeconds: 0, modelOpenGraceMs: 8_000 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 66,
+      modelEntryBidCents: 64,
+      modelEntrySpreadCents: 2,
+      peakHeldBidCents: 64,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 500,
+      modelEntryHeldProb: 70,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: {
+          w5: { ...win(70, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    });
+    checkEq(trade.status, 'open', 'ask→bid haircut in open grace does not scratch');
   }
 
   // Flat/green + confidence collapse → model exit (green → TP, flat → BE)
