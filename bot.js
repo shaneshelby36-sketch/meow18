@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 47;
+const SETTINGS_DEFAULTS_VERSION = 48;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -376,6 +376,8 @@ const MODEL_SOFT_BANK_MS_DEFAULT = 0;
 const MODEL_DUMP_PULLBACK_CENTS_DEFAULT = 5;
 /** Underwater this many ¢ → stop now (bid leading lean; don't wait for give-up). */
 const MODEL_FAST_RED_CENTS_DEFAULT = 4;
+/** Min drop in held-side live prob (pts) from entry before model exit fires. */
+const MODEL_PROB_DRIFT_PTS_DEFAULT = 3;
 /** Min hold before fast-red (avoids spread noise right on fill). */
 const MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT = 1_000;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
@@ -610,6 +612,94 @@ function modelLiveLeanStillFavors(window, side, keepMargin = MODEL_SOFT_LEAN_MAR
   if (side === 'yes') return up >= down + margin;
   if (side === 'no') return down >= up + margin;
   return false;
+}
+
+/** Live prob tie or lean away from held side (exit margin = 0). */
+function modelLiveProbNotWithUs(window, side) {
+  if (!window) return false;
+  const up = Number(window.probabilityUp);
+  const down = Number(window.probabilityDown);
+  if (!Number.isFinite(up) || !Number.isFinite(down)) return false;
+  if (side === 'yes') return up <= down;
+  if (side === 'no') return down <= up;
+  return false;
+}
+
+/** Accumulated signalScore turning against the held side (weakening / dominance flip). */
+function modelSignalTurningAgainst(window, side) {
+  const ss = window && window.signalScore;
+  if (!ss) return false;
+  const nd = Number(ss.netDominance);
+  const trend = ss.trend;
+  if (!Number.isFinite(nd)) return false;
+  if (side === 'yes') {
+    if (nd <= 0) return true;
+    if (trend === 'weakening' && nd < 1) return true;
+  } else if (side === 'no') {
+    if (nd >= 0) return true;
+    if (trend === 'weakening' && nd > -1) return true;
+  }
+  return false;
+}
+
+function modelProbDriftPts(config = {}) {
+  const n = Number(config.modelProbDriftPts);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_PROB_DRIFT_PTS_DEFAULT;
+}
+
+/** Held-side live prob fell this many pts since entry — model fading before the bid. */
+function modelProbDriftAgainst(window, side, entryHeldProb, driftPts = MODEL_PROB_DRIFT_PTS_DEFAULT) {
+  const entry = Number(entryHeldProb);
+  if (!window || !Number.isFinite(entry)) return false;
+  const up = Number(window.probabilityUp);
+  const down = Number(window.probabilityDown);
+  const cur = side === 'yes' ? up : side === 'no' ? down : NaN;
+  const drift = Number.isFinite(Number(driftPts)) ? Math.max(0, Number(driftPts)) : MODEL_PROB_DRIFT_PTS_DEFAULT;
+  if (!Number.isFinite(cur) || drift <= 0) return false;
+  return cur <= entry - drift;
+}
+
+/**
+ * Model-native "lean turning" — fires before Kalshi bid dumps.
+ * Uses live probs, locked direction, signalScore trend/dominance, conf, entry drift.
+ */
+function modelEngineTurningAgainst({
+  window,
+  direction,
+  side,
+  minConf,
+  entryHeldProb,
+  config = {},
+} = {}) {
+  if (!window || !side) return false;
+  if (direction && modelDirectionAgainstHeld(direction, side)) return true;
+  if (modelLiveLeanAgainstHeld(window, side, modelLiveLeanMarginPct(config))) return true;
+  if (modelLiveProbNotWithUs(window, side)) return true;
+  if (modelSignalTurningAgainst(window, side)) return true;
+  if (modelProbDriftAgainst(window, side, entryHeldProb, modelProbDriftPts(config))) return true;
+  const conf = Number(window.confidence);
+  if (Number.isFinite(minConf) && Number.isFinite(conf) && conf < minConf) return true;
+  return false;
+}
+
+/** Model still clearly supports the hold — only then allow a short red bounce window. */
+function modelEngineClearlyWithUs({ window, direction, side, entryHeldProb, config = {} } = {}) {
+  if (!window || !side) return false;
+  if (direction && modelDirectionAgainstHeld(direction, side)) return false;
+  if (modelLiveLeanAgainstHeld(window, side, modelLiveLeanMarginPct(config))) return false;
+  if (modelLiveProbNotWithUs(window, side)) return false;
+  if (modelSignalTurningAgainst(window, side)) return false;
+  if (modelProbDriftAgainst(window, side, entryHeldProb, modelProbDriftPts(config))) return false;
+  if (
+    !modelLiveLeanStillFavors(window, side, modelLiveLeanMarginPct(config))
+  ) {
+    return false;
+  }
+  const ss = window.signalScore;
+  if (ss && ss.trend === 'weakening') return false;
+  return true;
 }
 
 /**
@@ -4462,6 +4552,31 @@ class TradingBot {
       const minConf = Number.isFinite(Number(this.config.modelMinConfidence))
         ? Number(this.config.modelMinConfidence)
         : MODEL_MIN_CONFIDENCE_DEFAULT;
+      const entryHeldProbRaw = Number(trade.modelEntryHeldProb);
+      const entryHeldProb = Number.isFinite(entryHeldProbRaw)
+        ? entryHeldProbRaw
+        : Number(trade.engineProbability);
+      const engineTurning =
+        picked &&
+        picked.window &&
+        modelEngineTurningAgainst({
+          window: picked.window,
+          direction: picked.direction,
+          side: trade.side,
+          minConf,
+          entryHeldProb,
+          config: this.config,
+        });
+      const engineClearlyWithUs =
+        picked &&
+        picked.window &&
+        modelEngineClearlyWithUs({
+          window: picked.window,
+          direction: picked.direction,
+          side: trade.side,
+          entryHeldProb,
+          config: this.config,
+        });
       const weakConf =
         picked &&
         picked.window &&
@@ -4471,7 +4586,7 @@ class TradingBot {
       // just because the signal still points the original way.
       const leanExit = faded
         ? !!weakConf
-        : !!(againstLocked || liveAgainst || weakConf);
+        : !!engineTurning;
 
       const openedAt = Number(trade.openedAt);
       const heldMs = Number.isFinite(openedAt) ? now - openedAt : Infinity;
@@ -4545,7 +4660,30 @@ class TradingBot {
         return;
       }
 
-      // Bid-led dump cut: Kalshi often slides before engine probs flip (68→18 while lean still UP).
+      // Model-native preemptive exit: lean turning before the bid dumps.
+      if (!faded && bidOk && engineTurning) {
+        if (underwater) {
+          await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
+            liveSellPriceCents: heldSideBidCents,
+          });
+          return;
+        }
+        if (exactlyFlat || flatOrGreen) {
+          if (exactlyFlat || greenCents <= 0) {
+            const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
+            await this._closePosition(trade, beFill, 'breakeven', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+          } else {
+            await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+          }
+          return;
+        }
+      }
+
+      // Bid-led dump cut (backup when model probs lag Kalshi).
       const dumpPullback = modelDumpPullbackCents(this.config);
       if (!faded && bidOk && dumpPullback > 0 && pullback >= dumpPullback) {
         if (flatOrGreen) {
@@ -4575,6 +4713,20 @@ class TradingBot {
         underwater &&
         adverseCents >= fastRed &&
         heldMs >= MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT
+      ) {
+        await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+
+      // Model still firm but ticket red — short bounce window only.
+      if (
+        !faded &&
+        bidOk &&
+        underwater &&
+        engineClearlyWithUs &&
+        heldMs >= MODEL_RED_GIVEUP_MS_DEFAULT
       ) {
         await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
           liveSellPriceCents: heldSideBidCents,
@@ -4635,45 +4787,6 @@ class TradingBot {
         }
       }
 
-      // Preemptive lean exit: cut as soon as the engine isn't clearly with us.
-      // Against → stop red / bank flat-green. Soft → same, don't wait for 84→68.
-      // Skip fade tickets (they are supposed to sit against the lock).
-      if (!faded && bidOk) {
-        const engineAgainst = !!(liveAgainst || againstLocked);
-        const engineWithUs = !!liveFavors;
-        const leanTurning = engineAgainst || !engineWithUs;
-        if (leanTurning) {
-          if (underwater) {
-            await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
-              liveSellPriceCents: heldSideBidCents,
-            });
-            return;
-          }
-          // Flat or green: bank now before the dump (preemptive).
-          // Against fires immediately; soft waits a tiny beat so 1-tick noise doesn't scratch.
-          const softReady = engineAgainst || heldMs >= MODEL_SOFT_BANK_MS_DEFAULT;
-          if (softReady && (exactlyFlat || flatOrGreen)) {
-            if (exactlyFlat || greenCents <= 0) {
-              const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
-              await this._closePosition(trade, beFill, 'breakeven', {
-                liveSellPriceCents: heldSideBidCents,
-              });
-            } else {
-              await this._closePosition(trade, heldSideBidCents, 'take_profit', {
-                liveSellPriceCents: heldSideBidCents,
-              });
-            }
-            return;
-          }
-        } else if (underwater && heldMs >= MODEL_RED_GIVEUP_MS_DEFAULT) {
-          // Lean still with us, but still red ~8s — bounce didn't happen.
-          await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
-            liveSellPriceCents: heldSideBidCents,
-          });
-          return;
-        }
-      }
-
       // Follow the bid from a small green (+2–3¢). Bank when it stalls even
       // a little (1¢ off peak, or ~4s flat). Never TP if the ticket is red.
       const armCents = modelTrailArmCents(this.config);
@@ -4728,14 +4841,16 @@ class TradingBot {
       let why;
       if (!bidOk) why = 'no usable bid yet';
       else if (faded) why = 'fade hold — engine-against does not stop this ticket';
-      else if (underwater && liveFavors)
-        why = `engine still with us (${leanTxt}) — stop if still red after 8s`;
-      else if (underwater && !liveAgainst && adverseCents >= modelFastRedCents(this.config))
-        why = `red −${adverseCents}¢ from peak slide — fast stop`;
+      else if (engineTurning && underwater)
+        why = `model lean turning (${leanTxt}) — cut before deeper loss`;
+      else if (engineTurning && flatOrGreen)
+        why = `model lean turning (${leanTxt}) — banking before dump`;
+      else if (underwater && engineClearlyWithUs)
+        why = `model still firm (${leanTxt}) — stop if still red after 8s`;
       else if (underwater && pullback >= modelDumpPullbackCents(this.config))
-        why = `bid −${pullback}¢ off peak — banking before deeper dump`;
+        why = `bid −${pullback}¢ off peak — backup cut`;
       else if (!armed && flatOrGreen && !liveFavors)
-        why = `lean soft — banking soon (${leanTxt})`;
+        why = `lean soft — model exit armed (${leanTxt})`;
       else if (!armed && flatOrGreen) why = `green but under trail arm (need +${armCents}¢)`;
       else why = `holding (${leanTxt})`;
       const holdMsg = `Holding ${trade.symbol} ${String(trade.side || '').toUpperCase()} ${pxTxt} — ${why}.`;
@@ -5053,6 +5168,8 @@ class TradingBot {
     modelInverted = false,
     modelSignalSide = null,
     modelSignalEntryCents = null,
+    modelEntryHeldProb = null,
+    modelEntryNetDominance = null,
   }) {
     // A paper trade must obey the same price rules as a live order. Without
     // this guard an empty Kalshi quote could be stored as `null` and then
@@ -5245,6 +5362,12 @@ class TradingBot {
             ...(modelSignalSide ? { modelSignalSide } : {}),
             ...(Number.isFinite(Number(modelSignalEntryCents))
               ? { modelSignalEntryCents: Math.round(Number(modelSignalEntryCents)) }
+              : {}),
+            ...(Number.isFinite(Number(modelEntryHeldProb))
+              ? { modelEntryHeldProb: +Number(modelEntryHeldProb).toFixed(1) }
+              : {}),
+            ...(Number.isFinite(Number(modelEntryNetDominance))
+              ? { modelEntryNetDominance: +Number(modelEntryNetDominance).toFixed(2) }
               : {}),
             ...(modelQuarter ? { modelUncertain: true } : {}),
           }
@@ -6569,6 +6692,14 @@ class TradingBot {
       strategy: 'model',
       modelWindowKey: opportunity.windowKey,
       modelDirection: opportunity.direction,
+      modelEntryHeldProb:
+        opportunity.side === 'yes'
+          ? opportunity.window.probabilityUp
+          : opportunity.window.probabilityDown,
+      modelEntryNetDominance:
+        opportunity.window.signalScore && Number.isFinite(Number(opportunity.window.signalScore.netDominance))
+          ? opportunity.window.signalScore.netDominance
+          : null,
       uncertain: opportunity.uncertain,
       modelInverted: opportunity.invert === true,
       modelSignalSide: opportunity.signalSide || null,
@@ -7244,6 +7375,12 @@ module.exports = {
   modelDirectionAgainstHeld,
   modelLiveLeanAgainstHeld,
   modelLiveLeanStillFavors,
+  modelLiveProbNotWithUs,
+  modelSignalTurningAgainst,
+  modelProbDriftAgainst,
+  modelProbDriftPts,
+  modelEngineTurningAgainst,
+  modelEngineClearlyWithUs,
   modelPriceAllowed,
   checkModelPostExitCooldown,
   modelMinHoldMs,
@@ -7262,6 +7399,7 @@ module.exports = {
   MODEL_DUMP_PULLBACK_CENTS_DEFAULT,
   MODEL_FAST_RED_CENTS_DEFAULT,
   MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT,
+  MODEL_PROB_DRIFT_PTS_DEFAULT,
   modelLowPriceMaxCents,
   modelLowPriceStakeQuarters,
   modelLowPriceStakeFraction,
