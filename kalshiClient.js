@@ -252,55 +252,63 @@ class KalshiClient {
   // ---------- public market data (no auth needed) ----------
 
   async getOpenMarkets(seriesTicker, limit = 20) {
-    const data = await this._request('GET', '/markets', {
-      query: { series_ticker: seriesTicker, status: 'open', limit },
-      auth: false,
-    });
-    const open = (data.markets || []).map(normalizeMarketPrices);
-    if (open.length) return open;
-
-    // Rollover gap: status=open can briefly return []. Fall back to anything
-    // still closing in the future and let the caller filter liveliness.
-    const nowSec = Math.floor(Date.now() / 1000);
-    const fallback = await this._request('GET', '/markets', {
-      query: {
-        series_ticker: seriesTicker,
-        min_close_ts: nowSec,
-        limit,
-      },
-      auth: false,
-    });
-    return (fallback.markets || [])
-      .map(normalizeMarketPrices)
-      .filter((m) => {
+    const fetchList = async (query) => {
+      try {
+        const data = await this._request('GET', '/markets', {
+          query: { series_ticker: seriesTicker, limit, ...query },
+          auth: false,
+        });
+        return (data.markets || []).map(normalizeMarketPrices);
+      } catch {
+        return [];
+      }
+    };
+    const usable = (list) =>
+      (Array.isArray(list) ? list : []).filter((m) => {
         const s = String(m.status || '').toLowerCase();
         return !s || s === 'open' || s === 'active' || s === 'initialized' || s === 'unopened';
       });
+
+    let open = usable(await fetchList({ status: 'open' }));
+    if (open.length) return open;
+
+    // 15m rollover: status=open is often empty for a few seconds.
+    open = usable(await fetchList({ status: 'unopened' }));
+    if (open.length) return open;
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    open = usable(await fetchList({ min_close_ts: nowSec }));
+    if (open.length) return open;
+
+    return usable(await fetchList({}));
   }
 
   /**
    * Current tradeable 15m market for a series (soonest close still live).
    */
-  async getLiveOpenMarket(seriesTicker, { minMsLeft = 5000, limit = 20 } = {}) {
+  async getLiveOpenMarket(seriesTicker, { minMsLeft = 1500, limit = 20 } = {}) {
     const markets = await this.getOpenMarkets(seriesTicker, limit);
-    const nowMs = Date.now();
-    const live = (Array.isArray(markets) ? markets : [])
-      .map((m) => {
-        const closeRaw = m && (m.close_time != null ? m.close_time : m.expected_expiration_time);
-        let closeMs = NaN;
-        if (closeRaw != null && closeRaw !== '') {
-          if (typeof closeRaw === 'number' && Number.isFinite(closeRaw)) {
-            closeMs = closeRaw < 1e12 ? closeRaw * 1000 : closeRaw;
-          } else {
-            closeMs = new Date(closeRaw).getTime();
+    const pick = (floorMs) => {
+      const nowMs = Date.now();
+      const live = (Array.isArray(markets) ? markets : [])
+        .map((m) => {
+          const closeRaw = m && (m.close_time != null ? m.close_time : m.expected_expiration_time);
+          let closeMs = NaN;
+          if (closeRaw != null && closeRaw !== '') {
+            if (typeof closeRaw === 'number' && Number.isFinite(closeRaw)) {
+              closeMs = closeRaw < 1e12 ? closeRaw * 1000 : closeRaw;
+            } else {
+              closeMs = new Date(closeRaw).getTime();
+            }
           }
-        }
-        return { m, closeMs };
-      })
-      .filter(({ closeMs }) => Number.isFinite(closeMs) && closeMs > nowMs + minMsLeft);
-    if (!live.length) return null;
-    live.sort((a, b) => a.closeMs - b.closeMs);
-    return live[0].m;
+          return { m, closeMs };
+        })
+        .filter(({ closeMs }) => Number.isFinite(closeMs) && closeMs > nowMs + floorMs);
+      if (!live.length) return null;
+      live.sort((a, b) => a.closeMs - b.closeMs);
+      return live[0].m;
+    };
+    return pick(minMsLeft) || pick(0);
   }
 
   async getMarket(ticker) {

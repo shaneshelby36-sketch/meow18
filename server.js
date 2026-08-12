@@ -404,8 +404,11 @@ async function main() {
       bot.forceSettleOverdue(latestPrediction).catch((err) => {
         console.error('[bot] settle-watchdog error:', err.message);
       });
+      bot.manageOpenPositions(latestPrediction).catch((err) => {
+        console.error('[bot] manage-watchdog error:', err.message);
+      });
     }, 2000);
-    console.log('[startup] settle watchdog every 2s (independent of prediction loop)');
+    console.log('[startup] settle + manage watchdog every 2s (independent of prediction loop)');
   }
 
   const app = express();

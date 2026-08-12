@@ -4067,18 +4067,34 @@ class TradingBot {
   /**
    * Current tradeable Kalshi 15m market for a series (soonest still-live close).
    */
-  async _fetchLiveMarket(seriesTicker, minMsLeft = 5000) {
+  async _fetchLiveMarket(seriesTicker, minMsLeft = 1500) {
     if (!seriesTicker || !this.client) return null;
+    if (!this._lastLiveMarket) this._lastLiveMarket = Object.create(null);
+    let found = null;
     if (typeof this.client.getLiveOpenMarket === 'function') {
       try {
-        const live = await this.client.getLiveOpenMarket(seriesTicker, { minMsLeft, limit: 20 });
-        if (live) return live;
+        found = await this.client.getLiveOpenMarket(seriesTicker, { minMsLeft, limit: 20 });
       } catch (_) {
-        // fall through to list + pick
+        found = null;
       }
     }
-    const markets = await this.client.getOpenMarkets(seriesTicker, 20);
-    return pickLiveOpenMarket(markets, Date.now(), minMsLeft);
+    if (!found) {
+      const markets = await this.client.getOpenMarkets(seriesTicker, 20);
+      found =
+        pickLiveOpenMarket(markets, Date.now(), minMsLeft) ||
+        pickLiveOpenMarket(markets, Date.now(), 0);
+    }
+    if (found) {
+      this._lastLiveMarket[seriesTicker] = found;
+      return found;
+    }
+    const cached = this._lastLiveMarket[seriesTicker];
+    if (cached) {
+      const closeRaw = cached.close_time != null ? cached.close_time : cached.expected_expiration_time;
+      const closeMs = closeRaw ? new Date(closeRaw).getTime() : NaN;
+      if (Number.isFinite(closeMs) && closeMs > Date.now() + 500) return cached;
+    }
+    return null;
   }
 
   /**
@@ -4368,8 +4384,7 @@ class TradingBot {
       return;
     }
 
-    // Model: no price stops. Bank real green (≥7¢) with momentum run — hold while
-    // live lean still favors and bid keeps making highs; TP as soon as it stalls.
+    // Model: no price stops. Bank as soon as ≥7¢ green (no stall / min-hold wait).
     // Lean exits only bank ≥7¢ green or flat BE — no micro TPs.
     // Underwater lean against → hold (no red lean-flip).
     // Final 5m: high possibility may extend; low possibility exits immediately.
@@ -4540,17 +4555,9 @@ class TradingBot {
         }
       }
 
-      // +7¢+ green: ride while momentum + lean agree; TP the moment it stalls.
-      // Fade: that green is −N¢ on the lean/current side, then we sell the faded hold.
-      if (bidOk && isDecentGreen && heldForBank) {
-        if (momentumRun) {
-          this.lastDecision = faded
-            ? `Holding ${trade.symbol} fade — ${String(signalSide || '').toUpperCase()} ` +
-              `${Number.isFinite(signalEntry) ? Math.round(signalEntry) : '?'}→${signalOk ? Math.round(signalBid) : '?'}¢ ` +
-              `(${fadeSignalDrop}¢) still running.`
-            : `Holding ${trade.symbol} model winner +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — momentum still with us.`;
-          return;
-        }
+      // Bank as soon as ≥ bank-green (default +7¢ / fade −7¢ on lean side).
+      // Don't wait on stall or min-hold — scalp was missing the window.
+      if (bidOk && isDecentGreen) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
         });
@@ -5920,7 +5927,7 @@ class TradingBot {
       return null;
     }
     if (!market) {
-      this.lastDecision = `Waiting: no open Kalshi market found for ${symbol} (rollover gap or API empty — retrying next cycle).`;
+      this.lastDecision = `Waiting: ${symbol} 15m window rolling over.`;
       return null;
     }
     if (this._hasOpenOnTicker(market.ticker)) {
@@ -6244,7 +6251,7 @@ class TradingBot {
       return null;
     }
     if (!market) {
-      this.lastDecision = `Waiting: no open Kalshi market found for ${symbol} (rollover gap or API empty — retrying next cycle).`;
+      this.lastDecision = `Waiting: ${symbol} 15m window rolling over.`;
       return null;
     }
     if (this._hasOpenOnTicker(market.ticker)) {
@@ -6485,7 +6492,7 @@ class TradingBot {
       return null;
     }
     if (!market) {
-      say(`Waiting: no open Kalshi market found for ${symbol} (rollover gap or API empty — retrying next cycle).`);
+      say(`Waiting: ${symbol} 15m window rolling over.`);
       return null;
     }
     if (this._hasOpenOnTicker(market.ticker)) {

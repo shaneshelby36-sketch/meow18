@@ -341,7 +341,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> plan: see lean correlate → buy → bank quick TP → if price returns under 50¢, re-cross and repeat. Runs <strong>2–3+ coins at once</strong> (max positions). Confirm gate is off per coin until that coin’s first MODEL buy+sell this run, then (YES &amp; NO): under 50 → cross → continue → enter; each exit resets. ~30s sit-out after exit. Live favor default 3pts (slider). TP +7¢ then stall. No late forced exit. Optional fade: bid the opposite Kalshi side of the lean.</p>
+          <p class="settings-hint"><strong>MODEL</strong> plan: see lean correlate → buy → bank quick TP → if price returns under 50¢, re-cross and repeat. Runs <strong>2–3+ coins at once</strong> (max positions). Confirm gate is off per coin until that coin’s first MODEL buy+sell this run, then (YES &amp; NO): under 50 → cross → continue → enter; each exit resets. ~30s sit-out after exit. Live favor default 3pts (slider). TP as soon as +7¢ (no stall wait). No late forced exit. Optional fade: bid the opposite Kalshi side of the lean.</p>
 
           <label><strong>MODEL</strong> fade (opposite side)
             <select id="bot-model-invert">
@@ -420,7 +420,7 @@
               <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
-            <span class="field-hint">Arm TP once this many ¢. Follow = +N on the held side. Fade = −N on the lean/current side (same crypto side), then sell the faded ticket. Default 7¢.</span>
+            <span class="field-hint">Bank as soon as this many ¢ prints (no stall wait). Follow = +N on the held side. Fade = −N on the lean/current side. Default 7¢.</span>
           </label>
         </div>
 

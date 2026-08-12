@@ -5665,7 +5665,7 @@ async function testModelStrategy() {
     check(/below 60/i.test(bot.lastDecision || ''), 'decision cites 60¢ min');
   }
 
-  // +7¢+ green with lean + new peak → hold (momentum run)
+  // +7¢+ green → TP immediately (no momentum ride / stall wait)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -5688,7 +5688,7 @@ async function testModelStrategy() {
       side: 'yes',
       entryPriceCents: 55,
       windowCloseTime: now + 12 * 60 * 1000,
-      openedAt: now - 35_000,
+      openedAt: now - 5_000,
       peakHeldBidCents: 64,
       peakHeldBidAt: now - 1_000,
     });
@@ -5704,7 +5704,8 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, stillUp);
-    checkEq(trade.status, 'open', '+7¢ at peak with lean holds (momentum run)');
+    checkEq(trade.exitReason, 'take_profit', '+7¢ banks immediately even at a new peak');
+    checkEq(trade.exitPriceCents, 64, 'immediate TP at live bid');
   }
 
   // +7¢+ green but 1¢ off peak → TP (momentum stalled)
