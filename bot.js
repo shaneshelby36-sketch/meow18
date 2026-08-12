@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 51;
+const SETTINGS_DEFAULTS_VERSION = 52;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -725,8 +725,8 @@ function modelEngineClearlyWithUs({ window, direction, side, entryHeldProb, conf
 }
 
 /**
- * Pre-entry dump risk: model already thinks the ticket will fall (or is priced below ask).
- * Used before placing — don't buy into a dump you can see in live probs / signalScore.
+ * Pre-entry gate: only buy when the model most likely says the ticket won't dump.
+ * Positive conviction — soft / fair-under-ask / non-strengthening = skip.
  * Returns { dump: true, reason } or { dump: false }.
  */
 function modelEntryDumpRisk({
@@ -744,47 +744,61 @@ function modelEntryDumpRisk({
   const heldProb = side === 'yes' ? up : side === 'no' ? down : NaN;
   const ask = Number(priceCents);
   const conf = Number(window.confidence);
+  const ss = window.signalScore;
+  const nd = ss && Number(ss.netDominance);
+  const entryMargin = modelEntryLiveLeanMarginPct(config);
+
   if (Number.isFinite(minConf) && Number.isFinite(conf) && conf < minConf) {
     return { dump: true, reason: `confidence ${Math.round(conf)}% under ${minConf}%` };
   }
 
-  const ss = window.signalScore;
-  // Weakening trend = expect the move to reverse / dump — block follow AND fade.
+  // Weakening / soft trend = expect dump. Need strengthening to buy.
   if (ss && ss.trend === 'weakening') {
     return { dump: true, reason: 'signalScore trend weakening — expect dump' };
   }
+  if (!fade && (!ss || ss.trend !== 'strengthening')) {
+    return { dump: true, reason: 'signalScore not strengthening — won\'t buy a soft lean' };
+  }
 
-  // Fade buys the underdog on purpose — only the weakening check above applies.
+  // Fade buys the underdog on purpose — only conf + weakening above.
   if (fade) return { dump: false };
 
-  // Live lean already against / tied on the ticket we would buy.
-  if (modelLiveProbNotWithUs(window, side)) {
+  if (!Number.isFinite(heldProb)) {
+    return { dump: true, reason: 'no held-side probability' };
+  }
+  // Model must price the ticket at/above the ask (≤1¢ slack) — otherwise likely to fall.
+  if (Number.isFinite(ask) && ask >= 1 && heldProb + 1 < ask) {
     return {
       dump: true,
-      reason: `live lean ${Number.isFinite(up) ? up.toFixed(0) : '?'}% UP / ${
+      reason: `model ${Math.round(heldProb)}% vs ask ${Math.round(ask)}¢ — not likely to hold`,
+    };
+  }
+  // Need a real live lead, not a coin-flip.
+  if (!modelLiveLeanStillFavors(window, side, entryMargin)) {
+    return {
+      dump: true,
+      reason: `live lean only ${Number.isFinite(up) ? up.toFixed(0) : '?'}% UP / ${
         Number.isFinite(down) ? down.toFixed(0) : '?'
-      }% DOWN — not with ${String(side).toUpperCase()}`,
+      }% DOWN — need ≥${entryMargin}pts with ${String(side).toUpperCase()}`,
     };
   }
   if (direction && modelDirectionAgainstHeld(direction, side)) {
     return { dump: true, reason: `locked ${direction} against ${String(side).toUpperCase()}` };
   }
-  if (modelLiveLeanAgainstHeld(window, side, modelEntryLiveLeanMarginPct(config))) {
-    return {
-      dump: true,
-      reason: `live lean against ${String(side).toUpperCase()}`,
-    };
+  if (modelLiveProbNotWithUs(window, side) || modelLiveLeanAgainstHeld(window, side, entryMargin)) {
+    return { dump: true, reason: `live lean against ${String(side).toUpperCase()}` };
   }
   if (modelSignalTurningAgainst(window, side)) {
-    return { dump: true, reason: 'signalScore weakening / dominance flipped' };
+    return { dump: true, reason: 'signalScore dominance not with ticket' };
   }
-  // Model fair value well below ask → buying into expected drop toward fair.
-  // Slack so normal ask>mid still enters.
-  if (Number.isFinite(heldProb) && Number.isFinite(ask) && ask >= 1 && heldProb + 3 < ask) {
-    return {
-      dump: true,
-      reason: `model ${Math.round(heldProb)}% vs ask ${Math.round(ask)}¢ — priced to fall`,
-    };
+  // Dominance must clearly favor the side we're buying.
+  if (Number.isFinite(nd)) {
+    if (side === 'yes' && !(nd > 0.5)) {
+      return { dump: true, reason: `netDominance ${nd.toFixed(2)} too soft for YES` };
+    }
+    if (side === 'no' && !(nd < -0.5)) {
+      return { dump: true, reason: `netDominance ${nd.toFixed(2)} too soft for NO` };
+    }
   }
   if (
     !modelEngineClearlyWithUs({

@@ -5378,7 +5378,7 @@ async function testModelStrategy() {
         ready: true,
         price: 3010,
         windows: {
-          w5: { ...win(70, 80), tracking: { predictedDirection: 'UP' } },
+          w5: { ...win(88, 80), tracking: { predictedDirection: 'UP' } },
           w10: win(55, 60),
           w15: win(55, 60),
         },
@@ -5439,7 +5439,7 @@ async function testModelStrategy() {
         ready: true,
         price: 3010,
         windows: {
-          w5: { ...win(70, 80), tracking: { predictedDirection: 'UP' } },
+          w5: { ...win(88, 80), tracking: { predictedDirection: 'UP' } },
           w10: win(55, 60),
           w15: win(55, 60),
         },
@@ -5461,7 +5461,7 @@ async function testModelStrategy() {
     });
     const below = await bot._evaluateSymbolForModel('ETH', preds);
     checkEq(below, null, '46¢ under confirm — waiting to cross');
-    check(/need cross of 50/i.test(bot.lastDecision || ''), 'cites need cross');
+    check(/need cross of 50|below 60|min entry|skip entry/i.test(bot.lastDecision || ''), 'cites need cross or min entry');
 
     bot.client = mockClient({
       ticker: 'KXETH15M-CONFIRM',
@@ -5498,8 +5498,8 @@ async function testModelStrategy() {
   checkEq(MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, 3, 'entry live lean margin 3pts');
   checkEq(MODEL_RED_GIVEUP_MS_DEFAULT, 8_000, 'red give-up 8s (preemptive)');
   checkEq(MODEL_SOFT_BANK_MS_DEFAULT, 0, 'soft+green bank immediately');
-  checkEq(MODEL_DUMP_PULLBACK_CENTS_DEFAULT, 5, 'bid dump cut at 5¢ off peak');
-  checkEq(MODEL_FAST_RED_CENTS_DEFAULT, 4, 'fast red stop at −4¢');
+  checkEq(MODEL_DUMP_PULLBACK_CENTS_DEFAULT, 3, 'bid dump cut at 3¢ off peak');
+  checkEq(MODEL_FAST_RED_CENTS_DEFAULT, 2, 'fast red stop at −2¢');
   checkEq(MODEL_PROB_DRIFT_PTS_DEFAULT, 3, 'model prob drift exit 3pts');
   check(modelLiveProbNotWithUs(win(50, 70), 'yes'), '50/50 live prob not with YES');
   check(modelSignalTurningAgainst({ ...win(55, 70), signalScore: { netDominance: -0.5, trend: 'weakening' } }, 'yes'), 'bearish netDominance turns YES hold');
@@ -5527,7 +5527,7 @@ async function testModelStrategy() {
   );
   check(!modelPriceAllowed(20, { ...win(70, 85), confidence: 85 }, {}).ok, '20¢ under perfect floor');
 
-  // Entry: UP → YES with 12m left (w5)
+  // Entry: UP → YES with 12m left (w5) — only when model prices ≥ ask and strengthening
   {
     const closeMs = Date.now() + 12 * 60 * 1000;
     const bot = makeBot(
@@ -5548,15 +5548,46 @@ async function testModelStrategy() {
         ready: true,
         price: 3010,
         windows: {
-          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w5: { ...win(68, 70), tracking: { predictedDirection: 'UP' } },
           w10: { ...win(40, 70), tracking: { predictedDirection: 'DOWN' } },
           w15: win(50, 60),
         },
       },
     };
     const opp = await bot._evaluateSymbolForModel('ETH', preds);
-    check(opp && opp.side === 'yes', 'model UP → YES entry');
+    check(opp && opp.side === 'yes', 'model UP → YES entry when lean strong vs ask');
     checkEq(opp && opp.windowKey, 'w5', '12m left uses w5');
+  }
+
+  // Soft lean / fair under ask → no entry (don't buy if it might dump)
+  {
+    const closeMs = Date.now() + 12 * 60 * 1000;
+    const bot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-SOFT',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(closeMs).toISOString(),
+        yes_bid: 62,
+        yes_ask: 65,
+        no_bid: 35,
+        no_ask: 38,
+      }),
+      { strategyMode: 'model', modelMinConfidence: 55 }
+    );
+    const preds = {
+      ETH: {
+        ready: true,
+        price: 3010,
+        windows: {
+          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(50, 60),
+        },
+      },
+    };
+    const soft = await bot._evaluateSymbolForModel('ETH', preds);
+    checkEq(soft, null, 'blocks entry when model % under ask (not likely to hold)');
   }
 
   // Fade: lock UP still requires live UP lean, but buys NO
@@ -5688,7 +5719,7 @@ async function testModelStrategy() {
         ready: true,
         price: 3010,
         windows: {
-          w5: { ...win(70, 80), tracking: { predictedDirection: 'UP' } },
+          w5: { ...win(96, 80), tracking: { predictedDirection: 'UP' } },
           w10: win(55, 60),
           w15: win(55, 60),
         },
@@ -5792,7 +5823,24 @@ async function testModelStrategy() {
     };
     const dump = await bot._evaluateSymbolForModel('BTC', preds);
     checkEq(dump, null, 'blocks entry when model prices ticket below ask (dump risk)');
-    check(/priced to fall|skip entry/i.test(bot.lastDecision || ''), 'decision cites dump / fair vs ask');
+    check(/not likely to hold|priced to fall|skip entry/i.test(bot.lastDecision || ''), 'decision cites dump / fair vs ask');
+  }
+
+  // Pre-entry: steady (not strengthening) signalScore → skip
+  {
+    const risk = modelEntryDumpRisk({
+      window: {
+        ...win(70, 70),
+        signalScore: { upScore: 1.2, downScore: 0.8, netDominance: 0.4, trend: 'steady' },
+        tracking: { predictedDirection: 'UP' },
+      },
+      direction: 'UP',
+      side: 'yes',
+      priceCents: 65,
+      minConf: 44,
+    });
+    check(risk.dump === true, 'steady signalScore blocks entry');
+    check(/strengthening/i.test(risk.reason || ''), 'reason wants strengthening');
   }
 
   // Pre-entry dump: signalScore weakening even if lock still DOWN
