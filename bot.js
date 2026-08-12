@@ -648,6 +648,7 @@ function checkModelPostExitCooldown({ trades, symbol, cooldownMs, now = Date.now
     const reason = String(t.exitReason || '');
     if (
       reason !== 'model_lean_flip' &&
+      reason !== 'model_lean_stop' &&
       reason !== 'model_dip_stop' &&
       reason !== 'breakeven' &&
       reason !== 'take_profit' &&
@@ -3739,6 +3740,7 @@ class TradingBot {
         (reason === 'breakeven' ||
           reason === 'take_profit' ||
           reason === 'model_lean_flip' ||
+          reason === 'model_lean_stop' ||
           reason === 'model_dip_stop' ||
           reason === 'near_certain')
       ) {
@@ -4575,6 +4577,48 @@ class TradingBot {
         }
       }
 
+      // Engine flipped against the hold and TP isn't happening: cut now.
+      // Red → stop. Flat/green → bank what we can before the dip.
+      // Skip fade tickets (they are supposed to sit against the lock).
+      if (!faded && bidOk) {
+        const engineAgainst = !!(liveAgainst || againstLocked);
+        const engineWithUs = !!liveFavors;
+        if (engineAgainst) {
+          if (underwater) {
+            await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+            return;
+          }
+          if (exactlyFlat) {
+            const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
+            await this._closePosition(trade, beFill, 'breakeven', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+            return;
+          }
+          if (flatOrGreen) {
+            await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+            return;
+          }
+        } else if (!engineWithUs && flatOrGreen && heldMs >= 8_000) {
+          // Lean gone soft — TP unlikely soon; bank BE/green rather than wait for a dip.
+          if (exactlyFlat || greenCents <= 0) {
+            const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
+            await this._closePosition(trade, beFill, 'breakeven', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+          } else {
+            await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+          }
+          return;
+        }
+      }
+
       // Follow the bid from a small green (+2–3¢). Bank when it stalls even
       // a little (1¢ off peak, or ~4s flat). Never TP if the ticket is red.
       const armCents = modelTrailArmCents(this.config);
@@ -4594,8 +4638,7 @@ class TradingBot {
         return;
       }
 
-      // Lean against / weak conf: only bank real green (≥7¢) or scratch flat BE.
-      // Sub-+7 green holds — don't donate fees on micro TPs.
+      // Weak-conf lean-exit leftover: only if still green/flat and not already cut above.
       if (bidOk && leanExit && heldLongEnough && isBankableGreen) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
@@ -4609,7 +4652,6 @@ class TradingBot {
         });
         return;
       }
-      // Underwater: no lean-flip — hold toward settle / late-exit window.
       return;
     }
 

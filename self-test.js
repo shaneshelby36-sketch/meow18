@@ -6031,7 +6031,7 @@ async function testModelStrategy() {
     check(/confidence/i.test(bot.lastDecision || ''), 'decision cites confidence');
   }
 
-  // Underwater + locked lean against → hold (no red lean-flip; ride toward settle)
+  // Underwater + locked lean against → stop ASAP (TP not happening)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -6049,8 +6049,8 @@ async function testModelStrategy() {
       entryPriceCents: 55,
       windowCloseTime: now + 12 * 60 * 1000,
     });
-    checkEq(bot._stopLevelCents(trade), null, 'model has no hard stop');
-    checkEq(bot._takeProfitLevelCents(trade), null, 'model has no take-profit');
+    checkEq(bot._stopLevelCents(trade), null, 'model has no hard ¢ stop');
+    checkEq(bot._takeProfitLevelCents(trade), null, 'model has no fixed take-profit');
     const against = {
       ETH: {
         ready: true,
@@ -6063,10 +6063,11 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, against);
-    checkEq(trade.status, 'open', 'underwater lean against does not flip — holds to settle');
+    checkEq(trade.exitReason, 'model_lean_stop', 'underwater + lean against stops ASAP');
+    checkEq(trade.exitPriceCents, 50, 'lean-stop fills at live bid');
   }
 
-  // Underwater + live lean against (lock still with us) → hold, not cut
+  // Underwater + live lean against (lock still with us) → stop ASAP
   {
     const now = Date.now();
     const bot = makeBot(
@@ -6096,7 +6097,6 @@ async function testModelStrategy() {
         ready: true,
         price: 3000,
         windows: {
-          // Lock still UP (would have ridden to settle before); live probs flipped DOWN.
           w5: { ...win(35, 70), tracking: { predictedDirection: 'UP' } },
           w10: win(40, 70),
           w15: win(45, 60),
@@ -6104,7 +6104,77 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, liveFlip);
-    checkEq(trade.status, 'open', 'red + live lean against holds (lock still UP)');
+    checkEq(trade.exitReason, 'model_lean_stop', 'red + live lean against stops ASAP');
+  }
+
+  // Green + engine against → bank immediately (don't wait for stall / +7)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 57,
+        no_bid: 43,
+      }),
+      { strategyMode: 'model', modelMinHoldSeconds: 0 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 10_000,
+      peakHeldBidCents: 57,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(35, 70), tracking: { predictedDirection: 'DOWN' } },
+          w10: win(40, 70),
+          w15: win(45, 60),
+        },
+      },
+    });
+    checkEq(trade.exitReason, 'take_profit', 'engine against + small green banks now');
+    checkEq(trade.exitPriceCents, 57, 'banks the green bid');
+  }
+
+  // Fade hold is supposed to sit against the lock — no lean-stop
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 40,
+        no_bid: 50,
+      }),
+      { strategyMode: 'model', modelMinHoldSeconds: 0 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'no',
+      entryPriceCents: 65,
+      windowCloseTime: now + 12 * 60 * 1000,
+      modelInverted: true,
+      modelSignalSide: 'yes',
+      modelSignalEntryCents: 38,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    });
+    checkEq(trade.status, 'open', 'fade does not lean-stop while lock is still UP');
   }
 
   // Underwater + weak confidence (lock + live still with us) → hold, not cut
