@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelEngineClearlyWithUs, modelPriceAllowed, checkModelPostExitCooldown, modelSignalDropCents, modelAdverseExitFillCents, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelEngineClearlyWithUs, modelPriceAllowed, checkModelPostExitCooldown, modelSignalDropCents, modelAdverseExitFillCents, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -4400,25 +4400,25 @@ async function testBotTradingFlow() {
   check(Object.keys(SERIES_BY_SYMBOL).includes('DOGE'), 'DOGE series kept for exit management');
   check(Object.keys(SERIES_BY_SYMBOL).includes('HYPE'), 'HYPE series kept for exit management');
   check(Object.keys(SERIES_BY_SYMBOL).includes('NEAR'), 'NEAR series kept for exit management');
+  check(isKalshiTradeEnabled('BTC'), 'BTC tradeable by default');
+  check(isKalshiTradeEnabled('BNB'), 'BNB tradeable by default');
+  check(isKalshiTradeEnabled('SOL'), 'SOL tradeable by default');
+  check(!isKalshiTradeEnabled('ETH'), 'ETH opted out by default');
   check(!isKalshiTradeEnabled('DOGE'), 'DOGE opted out by default');
   check(!isKalshiTradeEnabled('NEAR'), 'NEAR opted out by default');
-  check(isKalshiTradeEnabled('HYPE'), 'HYPE tradeable by default');
-  check(isKalshiTradeEnabled('BTC'), 'BTC still tradeable');
-  check(!tradeableKalshiSymbols().includes('DOGE'), 'AUTO tradeable set excludes DOGE by default');
-  check(!tradeableKalshiSymbols().includes('NEAR'), 'AUTO tradeable set excludes NEAR by default');
-  check(tradeableKalshiSymbols().includes('HYPE'), 'AUTO tradeable set includes HYPE');
-  check(tradeableKalshiSymbols().includes('ETH'), 'AUTO tradeable set includes ETH');
-  check(tradeableKalshiSymbols().includes('BNB'), 'AUTO tradeable set includes BNB');
+  check(!isKalshiTradeEnabled('HYPE'), 'HYPE opted out by default');
+  check(!tradeableKalshiSymbols().includes('ETH'), 'AUTO excludes ETH by default');
+  check(tradeableKalshiSymbols().includes('BNB'), 'AUTO includes BNB');
   check(
-    isKalshiTradeEnabled('NEAR', { tradeNear: 'on' }),
-    'NEAR tradeable when tradeNear on'
+    isKalshiTradeEnabled('ETH', { autoTradeSymbols: 'BTC,ETH,SOL' }),
+    'ETH tradeable when listed in autoTradeSymbols'
   );
   check(
-    isKalshiTradeEnabled('DOGE', { tradeDoge: 'on' }),
-    'DOGE tradeable when tradeDoge on'
+    isKalshiTradeEnabled('DOGE', { autoTradeSymbols: 'BTC,DOGE' }),
+    'DOGE tradeable when listed in autoTradeSymbols'
   );
   check(
-    tradeableKalshiSymbols({ tradeNear: 'on' }).includes('NEAR'),
+    tradeableKalshiSymbols({ autoTradeSymbols: 'BTC,NEAR' }).includes('NEAR'),
     'AUTO includes NEAR when enabled'
   );
   checkEq(SERIES_BY_SYMBOL.NEAR, 'KXNEAR15M', 'NEAR Kalshi series');
@@ -5491,11 +5491,11 @@ async function testModelStrategy() {
   }
   checkEq(MODEL_MAX_ADVERSE_CENTS_DEFAULT, 0, 'soft dip off by default');
   checkEq(MODEL_HARD_ADVERSE_CENTS_DEFAULT, 8, 'hard max-loss cliff 8¢');
-  checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 7, 'bank / momentum arm at ≥7¢ green');
-  checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 7, 'min TP 7¢ — no micro banks');
+  checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 10, 'bank / momentum arm at ≥10¢ green');
+  checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 10, 'min TP 10¢ — no micro banks');
   checkEq(MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, 0, 'model late entry cutoff off');
   checkEq(MODEL_LIVE_LEAN_MARGIN_DEFAULT, 2, 'live lean margin 2pts (preemptive)');
-  checkEq(MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, 3, 'entry live lean margin 3pts');
+  checkEq(MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, 4, 'entry live lean margin 4pts');
   checkEq(MODEL_RED_GIVEUP_MS_DEFAULT, 8_000, 'red give-up 8s (preemptive)');
   checkEq(MODEL_SOFT_BANK_MS_DEFAULT, 0, 'soft+green bank immediately');
   checkEq(MODEL_DUMP_PULLBACK_CENTS_DEFAULT, 3, 'bid dump cut at 3¢ off peak');

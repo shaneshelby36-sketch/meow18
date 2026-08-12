@@ -262,7 +262,7 @@
         <div class="bot-field-grid bot-settings-global">
           <label>Asset to trade
             <select id="bot-symbol">
-              <option value="AUTO">Auto (scan all markets, trade the best)</option>
+              <option value="AUTO">Auto (scan enabled coins below)</option>
               <option value="BTC">BTC</option>
               <option value="XRP">XRP</option>
               <option value="ETH">ETH</option>
@@ -272,8 +272,22 @@
               <option value="HYPE">HYPE</option>
               <option value="DOGE">DOGE</option>
             </select>
-            <span class="field-hint">AUTO scans enabled coins (BTC/ETH/SOL/XRP/BNB/HYPE by default).</span>
+            <span class="field-hint">AUTO only trades the coins you check below. Single-coin mode also requires that coin to be checked.</span>
           </label>
+          <div class="auto-coin-picker" id="bot-auto-coins-wrap">
+            <div class="auto-coin-picker-title">AUTO coins</div>
+            <div class="auto-coin-picker-grid" id="bot-auto-coins">
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="BTC" /> BTC</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="BNB" /> BNB</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="SOL" /> SOL</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="ETH" /> ETH</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="XRP" /> XRP</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="HYPE" /> HYPE</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="DOGE" /> DOGE</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="NEAR" /> NEAR</label>
+            </div>
+            <span class="field-hint">Default <strong>BTC · BNB · SOL</strong>. Uncheck everything else to cut noise losses.</span>
+          </div>
           <label>Stake per trade
             <div class="slider-row">
               <input id="bot-stake" type="range" min="1" max="500" step="1" />
@@ -292,18 +306,6 @@
             <select id="bot-second-green">
               <option value="on">On (default)</option>
               <option value="off">Off — fill up to max anytime</option>
-            </select>
-          </label>
-          <label>Trade NEAR
-            <select id="bot-trade-near">
-              <option value="off">Off (default)</option>
-              <option value="on">On</option>
-            </select>
-          </label>
-          <label>Trade DOGE
-            <select id="bot-trade-doge">
-              <option value="off">Off (default)</option>
-              <option value="on">On</option>
             </select>
           </label>
         </div>
@@ -381,7 +383,7 @@
               <input id="bot-model-live-favor" type="range" min="0" max="15" step="1" />
               <span class="slider-value" id="bot-model-live-favor-value">—</span>
             </div>
-            <span class="field-hint">Live UP vs DOWN must lead by this many pts to enter. Default <strong>3</strong>. <strong>0</strong> = any lead.</span>
+            <span class="field-hint">Live UP vs DOWN must lead by this many pts to enter. Default <strong>4</strong>. <strong>0</strong> = any lead.</span>
           </label>
           <label>MODEL confirm cross (¢)
             <div class="slider-row">
@@ -427,7 +429,7 @@
               <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
-            <span class="field-hint">Trail from ~+3¢; bank on 1¢ stall or at 96¢. If model turns, sells immediately (BE or lean-stop) — doesn't wait for a dump.</span>
+            <span class="field-hint">Trail from ~+3¢; bank on 1¢ stall or at this green (default <strong>+10¢</strong>). If model turns, sells immediately (BE or lean-stop).</span>
           </label>
           <label>MODEL post-exit sit-out (sec)
             <div class="slider-row">

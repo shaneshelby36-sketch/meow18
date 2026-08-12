@@ -868,6 +868,8 @@ function renderBotDashboard(data) {
   toggle.dataset.running = String(!data.isRunning);
   const overlayToggle = document.getElementById('bot-running-toggle');
   if (overlayToggle) overlayToggle.textContent = toggle.textContent;
+  bindTradeLogUi();
+  bindActivityLogUi();
 }
 
 async function setBotRunning(running) {
@@ -1125,27 +1127,15 @@ function bindActivityLogUi() {
   const list = document.getElementById('bot-activity-log-list');
   const copyBtn = document.getElementById('bot-activity-copy');
   if (!copyBtn || !list) return;
-  copyBtn.onclick = () => {
+  copyBtn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
     const text = Array.from(list.querySelectorAll('.bot-log-row'))
       .map((row) => row.innerText.replace(/\s+/g, ' ').trim())
       .filter(Boolean)
       .join('\n');
     if (!text) return;
-    const done = () => {
-      copyBtn.textContent = 'Copied';
-      setTimeout(() => {
-        copyBtn.textContent = 'Copy';
-      }, 1200);
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(done).catch(() => {
-        fallbackCopyText(text);
-        done();
-      });
-    } else {
-      fallbackCopyText(text);
-      done();
-    }
+    copyTextToClipboard(text, copyBtn);
   };
 }
 
@@ -1153,7 +1143,9 @@ function bindTradeLogUi() {
   const list = document.getElementById('bot-trade-log-list');
   const copyBtn = document.getElementById('bot-trade-copy');
   if (!copyBtn || !list) return;
-  copyBtn.onclick = () => {
+  copyBtn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
     const text = Array.from(list.querySelectorAll('.bot-log-row'))
       .map((row) => {
         const fromAttr = row.getAttribute('data-copy-line');
@@ -1163,22 +1155,27 @@ function bindTradeLogUi() {
       .filter(Boolean)
       .join('\n');
     if (!text) return;
-    const done = () => {
-      copyBtn.textContent = 'Copied';
-      setTimeout(() => {
-        copyBtn.textContent = 'Copy';
-      }, 1200);
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(done).catch(() => {
-        fallbackCopyText(text);
-        done();
-      });
-    } else {
+    copyTextToClipboard(text, copyBtn);
+  };
+}
+
+function copyTextToClipboard(text, copyBtn) {
+  const done = () => {
+    if (!copyBtn) return;
+    copyBtn.textContent = 'Copied';
+    setTimeout(() => {
+      copyBtn.textContent = 'Copy';
+    }, 1200);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => {
       fallbackCopyText(text);
       done();
-    }
-  };
+    });
+  } else {
+    fallbackCopyText(text);
+    done();
+  }
 }
 
 function fallbackCopyText(text) {
@@ -1428,6 +1425,37 @@ function readTradingSlidersFromForm() {
     maxOpenPositions: parseFloat(document.getElementById('bot-maxpos')?.value || '3'),
     secondOpenRequiresGreen: document.getElementById('bot-second-green')?.value || 'on',
   };
+}
+
+function readAutoTradeSymbolsFromForm() {
+  const boxes = document.querySelectorAll('#bot-auto-coins input[data-coin]');
+  if (!boxes.length) return 'BTC,BNB,SOL';
+  const picked = Array.from(boxes)
+    .filter((el) => el.checked)
+    .map((el) => String(el.dataset.coin || '').toUpperCase())
+    .filter(Boolean);
+  return picked.length ? picked.join(',') : 'BTC,BNB,SOL';
+}
+
+function syncAutoTradeSymbolsToForm(c) {
+  const wrap = document.getElementById('bot-auto-coins');
+  if (!wrap) return;
+  let enabled = [];
+  const raw = c && c.autoTradeSymbols;
+  if (Array.isArray(raw)) enabled = raw.map((s) => String(s).toUpperCase());
+  else if (typeof raw === 'string' && raw.trim()) {
+    enabled = raw.split(/[,|\s]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+  } else {
+    // Legacy: everything on except DOGE/NEAR unless toggled
+    enabled = ['BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'HYPE'];
+    if (c && (c.tradeDoge === 'on' || c.tradeDoge === true)) enabled.push('DOGE');
+    if (c && (c.tradeNear === 'on' || c.tradeNear === true)) enabled.push('NEAR');
+  }
+  if (!enabled.length) enabled = ['BTC', 'BNB', 'SOL'];
+  const set = new Set(enabled);
+  wrap.querySelectorAll('input[data-coin]').forEach((el) => {
+    el.checked = set.has(String(el.dataset.coin || '').toUpperCase());
+  });
 }
 
 function strategyModeLabel(mode) {
@@ -1711,14 +1739,16 @@ function wireBotConfigAutoSave() {
     'bot-settle-tiered',
     'bot-half-stake-near',
     'bot-second-green',
-    'bot-trade-near',
-    'bot-trade-doge',
     'bot-model-invert',
     'bot-symbol',
     'bot-strategy-mode',
   ]) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('change', scheduleAutoSaveBotConfig);
+  }
+  const autoCoins = document.getElementById('bot-auto-coins');
+  if (autoCoins) {
+    autoCoins.addEventListener('change', scheduleAutoSaveBotConfig);
   }
   const settleTieredEl = document.getElementById('bot-settle-tiered');
   if (settleTieredEl) settleTieredEl.addEventListener('change', syncSettleExitTableEnabled);
@@ -1761,7 +1791,7 @@ async function loadBotConfigIntoForm() {
     const modelLiveFavor = document.getElementById('bot-model-live-favor');
     if (modelLiveFavor) {
       modelLiveFavor.value =
-        c.modelEntryLiveLeanMarginPct != null ? c.modelEntryLiveLeanMarginPct : 3;
+        c.modelEntryLiveLeanMarginPct != null ? c.modelEntryLiveLeanMarginPct : 4;
     }
     const modelConfirmCross = document.getElementById('bot-model-confirm-cross');
     if (modelConfirmCross) {
@@ -1785,7 +1815,7 @@ async function loadBotConfigIntoForm() {
       modelLowStake.value = q === 1 || q === 2 || q === 3 ? q : 2;
     }
     const modelBankGreen = document.getElementById('bot-model-bank-green');
-    if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 7;
+    if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 10;
     const modelSitout = document.getElementById('bot-model-sitout');
     if (modelSitout) {
       const mins =
@@ -1829,24 +1859,7 @@ async function loadBotConfigIntoForm() {
         c.halfStakeNear === 'false';
       halfStakeNear.value = nearOff ? 'off' : 'on';
     }
-    const tradeNear = document.getElementById('bot-trade-near');
-    if (tradeNear) {
-      const on =
-        c.tradeNear === true ||
-        c.tradeNear === 1 ||
-        c.tradeNear === 'on' ||
-        c.tradeNear === 'true';
-      tradeNear.value = on ? 'on' : 'off';
-    }
-    const tradeDoge = document.getElementById('bot-trade-doge');
-    if (tradeDoge) {
-      const on =
-        c.tradeDoge === true ||
-        c.tradeDoge === 1 ||
-        c.tradeDoge === 'on' ||
-        c.tradeDoge === 'true';
-      tradeDoge.value = on ? 'on' : 'off';
-    }
+    syncAutoTradeSymbolsToForm(c);
     const settleTiered = document.getElementById('bot-settle-tiered');
     if (settleTiered) {
       const tieredOff =
@@ -2031,7 +2044,7 @@ async function saveBotConfig(opts = {}) {
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     modelInvertSide: document.getElementById('bot-model-invert')?.value || 'off',
     modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '44'),
-    modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '3'),
+    modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '4'),
     modelConfirmCrossCents: parseFloat(document.getElementById('bot-model-confirm-cross')?.value || '0'),
     modelConfirmMaxExtensionCents: parseFloat(
       document.getElementById('bot-model-confirm-ext')?.value || '15'
@@ -2043,8 +2056,8 @@ async function saveBotConfig(opts = {}) {
       const q = Math.round(parseFloat(document.getElementById('bot-model-low-stake')?.value || '2'));
       return q === 1 || q === 2 || q === 3 ? q : 2;
     })(),
-    modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
-    modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
+    modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '10'),
+    modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '10'),
     modelPostExitCooldownMinutes:
       Number.isFinite(modelSitoutSec) && modelSitoutSec > 0 ? modelSitoutSec / 60 : 0,
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '80'),
@@ -2061,8 +2074,7 @@ async function saveBotConfig(opts = {}) {
     settleLateEntryMinCents: parseFloat(document.getElementById('bot-settle-late-floor')?.value || '70'),
     settleStuckHoldMinutes: parseFloat(document.getElementById('bot-settle-stuck')?.value || '3'),
     halfStakeNear: document.getElementById('bot-half-stake-near')?.value || 'on',
-    tradeNear: document.getElementById('bot-trade-near')?.value || 'off',
-    tradeDoge: document.getElementById('bot-trade-doge')?.value || 'off',
+    autoTradeSymbols: readAutoTradeSymbolsFromForm(),
     settleTieredExits: document.getElementById('bot-settle-tiered')?.value || 'on',
     ...trading,
     paperStartingBalanceDollars: parseFloat(document.getElementById('bot-paper-balance').value),

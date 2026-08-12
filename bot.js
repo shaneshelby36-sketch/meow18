@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 54;
+const SETTINGS_DEFAULTS_VERSION = 55;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -95,12 +95,16 @@ function pickLiveOpenMarket(markets, nowMs = Date.now(), minMsLeft = 5000) {
   return live[0].m;
 }
 
-// Opt-in coins: mapped for exits/management, but new entries stay off until
-// tradeDoge / tradeNear is flipped On in settings (can re-enable anytime).
+// Opt-in coins historically: DOGE / NEAR. Now every coin is gated by autoTradeSymbols.
 const OPTIONAL_TRADE_SYMBOLS = new Set(['DOGE', 'NEAR']);
 
-/** Default opt-outs when config knobs are unset (export for tests). */
-const DISABLED_TRADE_SYMBOLS = new Set(['DOGE', 'NEAR']);
+/** Default AUTO universe — BTC / BNB / SOL only (edit in settings). */
+const DEFAULT_AUTO_TRADE_SYMBOLS = ['BTC', 'BNB', 'SOL'];
+
+/** Default opt-outs when config knobs are unset (export for tests / legacy). */
+const DISABLED_TRADE_SYMBOLS = new Set(
+  Object.keys(SERIES_BY_SYMBOL).filter((s) => !DEFAULT_AUTO_TRADE_SYMBOLS.includes(s))
+);
 
 function isOnOffEnabled(value, defaultOn = false) {
   if (value == null || value === '') return defaultOn;
@@ -122,17 +126,42 @@ function parseOnOffField(v, defaultOn = false) {
   return null;
 }
 
+/** Normalize autoTradeSymbols from array / CSV / legacy tradeNear+tradeDoge. */
+function resolveAutoTradeSymbols(config = null) {
+  const raw = config && config.autoTradeSymbols;
+  let list = null;
+  if (Array.isArray(raw)) {
+    list = raw.map((s) => String(s || '').toUpperCase()).filter((s) => SERIES_BY_SYMBOL[s]);
+  } else if (typeof raw === 'string' && raw.trim()) {
+    list = raw
+      .split(/[,|\s]+/)
+      .map((s) => s.trim().toUpperCase())
+      .filter((s) => SERIES_BY_SYMBOL[s]);
+  }
+  if (list && list.length) {
+    // Deduplicate, stable SERIES order
+    const set = new Set(list);
+    return Object.keys(SERIES_BY_SYMBOL).filter((s) => set.has(s));
+  }
+  // Legacy: all mapped coins except DOGE/NEAR unless toggled on
+  if (config && (config.tradeDoge != null || config.tradeNear != null) && raw == null) {
+    return Object.keys(SERIES_BY_SYMBOL).filter((s) => {
+      if (s === 'DOGE') return isOnOffEnabled(config.tradeDoge, false);
+      if (s === 'NEAR') return isOnOffEnabled(config.tradeNear, false);
+      return true;
+    });
+  }
+  return DEFAULT_AUTO_TRADE_SYMBOLS.slice();
+}
+
 function isKalshiTradeEnabled(symbol, config = null) {
   const sym = String(symbol || '').toUpperCase();
   if (!SERIES_BY_SYMBOL[sym]) return false;
-  if (!OPTIONAL_TRADE_SYMBOLS.has(sym)) return true;
-  if (sym === 'DOGE') return isOnOffEnabled(config && config.tradeDoge, false);
-  if (sym === 'NEAR') return isOnOffEnabled(config && config.tradeNear, false);
-  return false;
+  return resolveAutoTradeSymbols(config).includes(sym);
 }
 
 function tradeableKalshiSymbols(config = null) {
-  return Object.keys(SERIES_BY_SYMBOL).filter((s) => isKalshiTradeEnabled(s, config));
+  return resolveAutoTradeSymbols(config);
 }
 
 // Rough Kalshi 15m crypto liquidity preference (higher = usually tighter books).
@@ -355,7 +384,7 @@ function modelSignalDropCents(signalEntryCents, signalBidCents) {
 /** Live lean against held side — low so stops fire early (preemptive). */
 const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 2;
 /** Entry: live lean must favor the locked side by at least this many pts (0 = any lead). */
-const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 3;
+const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 4;
 /** Don't early-exit a Model hold until it's been open at least this long. */
 const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
 /** After Model BE/TP, sit out that coin this long before rebuy. */
@@ -365,9 +394,9 @@ const MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT = 120_000;
 /** First N ms after open: only hard lean-turning exits (ignore soft + ask/bid haircut). */
 const MODEL_OPEN_GRACE_MS_DEFAULT = 8_000;
 /** Lean-exit / momentum TP floor — no micro-banks under this. */
-const MODEL_MIN_TP_CENTS_DEFAULT = 7;
+const MODEL_MIN_TP_CENTS_DEFAULT = 10;
 /** Arm momentum run once this many ¢ green; then hold until stall. */
-const MODEL_BANK_GREEN_CENTS_DEFAULT = 7;
+const MODEL_BANK_GREEN_CENTS_DEFAULT = 10;
 /** Start trailing / allow stall-TP once at least this many ¢ green (don't wait for +7). */
 const MODEL_TRAIL_ARM_CENTS_DEFAULT = 3;
 /** Held bid at/above this → bank immediately (don't sit 96→100). */
@@ -2259,6 +2288,10 @@ const EDITABLE_STRING_FIELDS = {
   secondOpenRequiresGreen: (v) => parseOnOffField(v, true),
   tradeDoge: (v) => parseOnOffField(v, false),
   tradeNear: (v) => parseOnOffField(v, false),
+  autoTradeSymbols: (v) => {
+    const list = resolveAutoTradeSymbols({ autoTradeSymbols: v });
+    return list.length ? list.join(',') : DEFAULT_AUTO_TRADE_SYMBOLS.join(',');
+  },
   modelInvertSide: (v) => parseOnOffField(v, false),
   skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
@@ -2552,7 +2585,9 @@ class TradingBot {
       // With ≥1 open: only allow another if an existing hold is green (bid ≥ entry).
       // Model ignores this — windows + confirm gate decide.
       secondOpenRequiresGreen: 'on',
-      // Opt-in coins (off by default). Flip On anytime to let AUTO / single-symbol trade them.
+      // AUTO universe — which coins may open (default BTC/BNB/SOL). Editable in settings.
+      autoTradeSymbols: DEFAULT_AUTO_TRADE_SYMBOLS.join(','),
+      // Legacy opt-in flags (kept in sync from autoTradeSymbols when saved).
       tradeDoge: 'off',
       tradeNear: 'off',
       skimMode: 'insurance', // 'insurance' | 'percent' | 'fixed' | 'off'
@@ -2714,6 +2749,13 @@ class TradingBot {
     }
     if (applied.settleStopLossCents != null) {
       applied.settleStopLossCents = this.config.settleStopLossCents;
+    }
+    if (applied.autoTradeSymbols != null) {
+      const enabled = resolveAutoTradeSymbols(this.config);
+      this.config.tradeDoge = enabled.includes('DOGE') ? 'on' : 'off';
+      this.config.tradeNear = enabled.includes('NEAR') ? 'on' : 'off';
+      applied.tradeDoge = this.config.tradeDoge;
+      applied.tradeNear = this.config.tradeNear;
     }
     if (this.config.symbol !== 'AUTO' && !isKalshiTradeEnabled(this.config.symbol, this.config)) {
       this.config.symbol = 'AUTO';
@@ -7697,6 +7739,8 @@ module.exports = {
   pickLiveOpenMarket,
   DISABLED_TRADE_SYMBOLS,
   OPTIONAL_TRADE_SYMBOLS,
+  DEFAULT_AUTO_TRADE_SYMBOLS,
+  resolveAutoTradeSymbols,
   isKalshiTradeEnabled,
   tradeableKalshiSymbols,
   liquidityPriority,
