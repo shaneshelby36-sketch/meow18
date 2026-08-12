@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 45;
+const SETTINGS_DEFAULTS_VERSION = 46;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -352,8 +352,8 @@ function modelSignalDropCents(signalEntryCents, signalBidCents) {
   return Math.max(0, Math.round(entry - bid));
 }
 
-/** Live lean must clear this many points vs the held side (avoids 50.1/49.9 chop). */
-const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 5;
+/** Live lean against held side — low so stops fire early (preemptive). */
+const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 2;
 /** Entry: live lean must favor the locked side by at least this many pts (0 = any lead). */
 const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 3;
 /** Don't early-exit a Model hold until it's been open at least this long. */
@@ -368,6 +368,10 @@ const MODEL_BANK_GREEN_CENTS_DEFAULT = 7;
 const MODEL_TRAIL_ARM_CENTS_DEFAULT = 3;
 /** Held bid at/above this → bank immediately (don't sit 96→100). */
 const MODEL_RICH_BANK_CENTS_DEFAULT = 96;
+/** Still red after this long, even if lean is with us → TP isn't happening, stop. */
+const MODEL_RED_GIVEUP_MS_DEFAULT = 15_000;
+/** Soft lean + still green: bank after this (preemptive — don't wait for the dump). */
+const MODEL_SOFT_BANK_MS_DEFAULT = 2_000;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /** Final barrier (minutes left). 0 = off (no forced late exits). */
@@ -855,7 +859,7 @@ const MODEL_MIN_CONFIDENCE_DEFAULT = 66;
 /** Trail off peak — unused by simplified Model exits (kept for config compat). */
 const MODEL_TRAIL_CENTS_DEFAULT = 0;
 /** Soft lean margin — unused by simplified Model exits (kept for config compat). */
-const MODEL_SOFT_LEAN_MARGIN_DEFAULT = 3;
+const MODEL_SOFT_LEAN_MARGIN_DEFAULT = 4;
 /** Soft dip (−N¢ + lean fade). 0 = off — price stops were hurting more than helping. */
 const MODEL_MAX_ADVERSE_CENTS_DEFAULT = 0;
 /** Hard cliff (−N¢). 0 = off — bounce stop-outs were the main bleed; follow lean only. */
@@ -3734,21 +3738,9 @@ class TradingBot {
         if (!this._stoppedSymbolsThisCycle) this._stoppedSymbolsThisCycle = new Set();
         this._stoppedSymbolsThisCycle.add(String(trade.symbol).toUpperCase());
       }
-      // Model: after BE / TP / lean-flip, don't knife-catch the same coin this cycle
-      // (live saw open→BE@1¢→reopen same second).
-      if (
-        isModelTrade(trade) &&
-        trade.symbol &&
-        (reason === 'breakeven' ||
-          reason === 'take_profit' ||
-          reason === 'model_lean_flip' ||
-          reason === 'model_lean_stop' ||
-          reason === 'model_dip_stop' ||
-          reason === 'near_certain')
-      ) {
-        if (!this._stoppedSymbolsThisCycle) this._stoppedSymbolsThisCycle = new Set();
-        this._stoppedSymbolsThisCycle.add(String(trade.symbol).toUpperCase());
-      }
+      // Model BE/TP/lean exits do NOT lock the coin for the whole 15m cycle —
+      // preemptive bank → ~30s sit-out → confirm-gate rebuy is the scalp loop.
+      // Same-second reopen is handled by checkModelPostExitCooldown.
       const entryFees = Math.max(0, Math.round(Number(trade.entryFeesCents) || 0));
       const exitFees = Math.max(0, Math.round(Number(trade.exitFeesCents) || 0));
       trade.feesCents = entryFees + exitFees;
@@ -4586,44 +4578,41 @@ class TradingBot {
         }
       }
 
-      // Engine flipped against the hold and TP isn't happening: cut now.
-      // Red → stop. Flat/green → bank what we can before the dip.
+      // Preemptive lean exit: cut as soon as the engine isn't clearly with us.
+      // Against → stop red / bank flat-green. Soft → same, don't wait for 84→68.
       // Skip fade tickets (they are supposed to sit against the lock).
       if (!faded && bidOk) {
         const engineAgainst = !!(liveAgainst || againstLocked);
         const engineWithUs = !!liveFavors;
-        if (engineAgainst) {
+        const leanTurning = engineAgainst || !engineWithUs;
+        if (leanTurning) {
           if (underwater) {
             await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
               liveSellPriceCents: heldSideBidCents,
             });
             return;
           }
-          if (exactlyFlat) {
-            const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
-            await this._closePosition(trade, beFill, 'breakeven', {
-              liveSellPriceCents: heldSideBidCents,
-            });
+          // Flat or green: bank now before the dump (preemptive).
+          // Against fires immediately; soft waits a tiny beat so 1-tick noise doesn't scratch.
+          const softReady = engineAgainst || heldMs >= MODEL_SOFT_BANK_MS_DEFAULT;
+          if (softReady && (exactlyFlat || flatOrGreen)) {
+            if (exactlyFlat || greenCents <= 0) {
+              const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
+              await this._closePosition(trade, beFill, 'breakeven', {
+                liveSellPriceCents: heldSideBidCents,
+              });
+            } else {
+              await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+                liveSellPriceCents: heldSideBidCents,
+              });
+            }
             return;
           }
-          if (flatOrGreen) {
-            await this._closePosition(trade, heldSideBidCents, 'take_profit', {
-              liveSellPriceCents: heldSideBidCents,
-            });
-            return;
-          }
-        } else if (!engineWithUs && flatOrGreen && heldMs >= 8_000) {
-          // Lean gone soft — TP unlikely soon; bank BE/green rather than wait for a dip.
-          if (exactlyFlat || greenCents <= 0) {
-            const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
-            await this._closePosition(trade, beFill, 'breakeven', {
-              liveSellPriceCents: heldSideBidCents,
-            });
-          } else {
-            await this._closePosition(trade, heldSideBidCents, 'take_profit', {
-              liveSellPriceCents: heldSideBidCents,
-            });
-          }
+        } else if (underwater && heldMs >= MODEL_RED_GIVEUP_MS_DEFAULT) {
+          // Lean still with us, but still red ~15s — bounce didn't happen.
+          await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
+            liveSellPriceCents: heldSideBidCents,
+          });
           return;
         }
       }
@@ -4682,8 +4671,12 @@ class TradingBot {
       let why;
       if (!bidOk) why = 'no usable bid yet';
       else if (faded) why = 'fade hold — engine-against does not stop this ticket';
-      else if (underwater && liveFavors) why = `engine still with us (${leanTxt}) — no stop, waiting recover/trail`;
-      else if (underwater && !liveAgainst) why = `red but lean not flipped enough to stop (${leanTxt}, need ~5pts against)`;
+      else if (underwater && liveFavors)
+        why = `engine still with us (${leanTxt}) — stop if still red after 15s`;
+      else if (underwater && !liveAgainst)
+        why = `red + lean soft (${leanTxt}) — should have stopped`;
+      else if (!armed && flatOrGreen && !liveFavors)
+        why = `lean soft — banking soon (${leanTxt})`;
       else if (!armed && flatOrGreen) why = `green but under trail arm (need +${armCents}¢)`;
       else why = `holding (${leanTxt})`;
       const holdMsg = `Holding ${trade.symbol} ${String(trade.side || '').toUpperCase()} ${pxTxt} — ${why}.`;
@@ -7223,6 +7216,8 @@ module.exports = {
   modelHardAdverseCents,
   MODEL_LIVE_LEAN_MARGIN_DEFAULT,
   MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT,
+  MODEL_RED_GIVEUP_MS_DEFAULT,
+  MODEL_SOFT_BANK_MS_DEFAULT,
   MODEL_MIN_HOLD_MS_DEFAULT,
   MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT,
   MODEL_MIN_TP_CENTS_DEFAULT,
