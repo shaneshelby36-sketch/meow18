@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 46;
+const SETTINGS_DEFAULTS_VERSION = 47;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -369,9 +369,15 @@ const MODEL_TRAIL_ARM_CENTS_DEFAULT = 3;
 /** Held bid at/above this → bank immediately (don't sit 96→100). */
 const MODEL_RICH_BANK_CENTS_DEFAULT = 96;
 /** Still red after this long, even if lean is with us → TP isn't happening, stop. */
-const MODEL_RED_GIVEUP_MS_DEFAULT = 15_000;
+const MODEL_RED_GIVEUP_MS_DEFAULT = 8_000;
 /** Soft lean + still green: bank after this (preemptive — don't wait for the dump). */
-const MODEL_SOFT_BANK_MS_DEFAULT = 2_000;
+const MODEL_SOFT_BANK_MS_DEFAULT = 0;
+/** Kalshi bid slide from peak — cut before engine probs catch up (predict the dump). */
+const MODEL_DUMP_PULLBACK_CENTS_DEFAULT = 5;
+/** Underwater this many ¢ → stop now (bid leading lean; don't wait for give-up). */
+const MODEL_FAST_RED_CENTS_DEFAULT = 4;
+/** Min hold before fast-red (avoids spread noise right on fill). */
+const MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT = 1_000;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /** Final barrier (minutes left). 0 = off (no forced late exits). */
@@ -492,6 +498,20 @@ function modelMomentumPullbackCents(config = {}) {
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return Math.round(n);
   return MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT;
+}
+
+function modelDumpPullbackCents(config = {}) {
+  const n = Number(config.modelDumpPullbackCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_DUMP_PULLBACK_CENTS_DEFAULT;
+}
+
+function modelFastRedCents(config = {}) {
+  const n = Number(config.modelFastRedCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_FAST_RED_CENTS_DEFAULT;
 }
 
 function modelLowPriceMaxCents(config = {}) {
@@ -858,8 +878,8 @@ const MODEL_PERFECT_LEAN_DEFAULT = 15;
 const MODEL_MIN_CONFIDENCE_DEFAULT = 66;
 /** Trail off peak — unused by simplified Model exits (kept for config compat). */
 const MODEL_TRAIL_CENTS_DEFAULT = 0;
-/** Soft lean margin — unused by simplified Model exits (kept for config compat). */
-const MODEL_SOFT_LEAN_MARGIN_DEFAULT = 4;
+/** Soft lean margin — treat 52/48 as turning (bank before the dump). */
+const MODEL_SOFT_LEAN_MARGIN_DEFAULT = 2;
 /** Soft dip (−N¢ + lean fade). 0 = off — price stops were hurting more than helping. */
 const MODEL_MAX_ADVERSE_CENTS_DEFAULT = 0;
 /** Hard cliff (−N¢). 0 = off — bounce stop-outs were the main bleed; follow lean only. */
@@ -4525,6 +4545,43 @@ class TradingBot {
         return;
       }
 
+      // Bid-led dump cut: Kalshi often slides before engine probs flip (68→18 while lean still UP).
+      const dumpPullback = modelDumpPullbackCents(this.config);
+      if (!faded && bidOk && dumpPullback > 0 && pullback >= dumpPullback) {
+        if (flatOrGreen) {
+          if (exactlyFlat || greenCents <= 0) {
+            const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
+            await this._closePosition(trade, beFill, 'breakeven', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+          } else {
+            await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+          }
+        } else {
+          await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
+            liveSellPriceCents: heldSideBidCents,
+          });
+        }
+        return;
+      }
+
+      const fastRed = modelFastRedCents(this.config);
+      if (
+        !faded &&
+        bidOk &&
+        fastRed > 0 &&
+        underwater &&
+        adverseCents >= fastRed &&
+        heldMs >= MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT
+      ) {
+        await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+
       // Late forced exits off by default (barrier + settle-close minutes = 0).
       // Keep the hooks so they can be re-enabled via config later.
       const lateBarrierMins = modelLateBarrierMinutes(this.config);
@@ -4609,7 +4666,7 @@ class TradingBot {
             return;
           }
         } else if (underwater && heldMs >= MODEL_RED_GIVEUP_MS_DEFAULT) {
-          // Lean still with us, but still red ~15s — bounce didn't happen.
+          // Lean still with us, but still red ~8s — bounce didn't happen.
           await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
             liveSellPriceCents: heldSideBidCents,
           });
@@ -4672,9 +4729,11 @@ class TradingBot {
       if (!bidOk) why = 'no usable bid yet';
       else if (faded) why = 'fade hold — engine-against does not stop this ticket';
       else if (underwater && liveFavors)
-        why = `engine still with us (${leanTxt}) — stop if still red after 15s`;
-      else if (underwater && !liveAgainst)
-        why = `red + lean soft (${leanTxt}) — should have stopped`;
+        why = `engine still with us (${leanTxt}) — stop if still red after 8s`;
+      else if (underwater && !liveAgainst && adverseCents >= modelFastRedCents(this.config))
+        why = `red −${adverseCents}¢ from peak slide — fast stop`;
+      else if (underwater && pullback >= modelDumpPullbackCents(this.config))
+        why = `bid −${pullback}¢ off peak — banking before deeper dump`;
       else if (!armed && flatOrGreen && !liveFavors)
         why = `lean soft — banking soon (${leanTxt})`;
       else if (!armed && flatOrGreen) why = `green but under trail arm (need +${armCents}¢)`;
@@ -7198,6 +7257,11 @@ module.exports = {
   modelLateExtendOk,
   modelMomentumStallMs,
   modelMomentumPullbackCents,
+  modelDumpPullbackCents,
+  modelFastRedCents,
+  MODEL_DUMP_PULLBACK_CENTS_DEFAULT,
+  MODEL_FAST_RED_CENTS_DEFAULT,
+  MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT,
   modelLowPriceMaxCents,
   modelLowPriceStakeQuarters,
   modelLowPriceStakeFraction,
