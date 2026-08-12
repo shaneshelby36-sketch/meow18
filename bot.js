@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 53;
+const SETTINGS_DEFAULTS_VERSION = 54;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -636,7 +636,47 @@ function modelHardAdverseCents(config = {}) {
   const n = Number(config.modelHardAdverseCents);
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return Math.round(n);
+  const maxLoss = modelMaxLossCents(config);
+  if (maxLoss > 0) return maxLoss;
   return MODEL_HARD_ADVERSE_CENTS_DEFAULT;
+}
+
+function modelMaxLossCents(config = {}) {
+  const n = Number(config.modelMaxLossCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_MAX_LOSS_CENTS_DEFAULT;
+}
+
+/** Paper: don't book a gap worse than max loss from entry. Live: real bid. */
+function modelAdverseExitFillCents(trade, liveBidCents, config = {}, mode = 'paper') {
+  const bid = Number(liveBidCents);
+  const entry = Number(trade && trade.entryPriceCents);
+  const maxLoss = modelMaxLossCents(config);
+  if (!Number.isFinite(bid)) return bid;
+  if (String(mode).toLowerCase() !== 'paper' || !(maxLoss > 0) || !Number.isFinite(entry)) {
+    return Math.round(bid);
+  }
+  return Math.max(Math.round(bid), Math.round(entry - maxLoss));
+}
+
+function modelRichAskCents(config = {}) {
+  const n = Number(config.modelRichAskCents);
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_RICH_ASK_CENTS_DEFAULT;
+}
+
+function modelRichMaxSpreadCents(config = {}) {
+  const n = Number(config.modelRichMaxSpreadCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_RICH_MAX_SPREAD_CENTS_DEFAULT;
+}
+
+function modelRichMinConfidence(config = {}) {
+  const n = Number(config.modelRichMinConfidence);
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_RICH_MIN_CONFIDENCE_DEFAULT;
 }
 
 function modelSoftLeanMarginPct(config = {}) {
@@ -1129,8 +1169,16 @@ const MODEL_TRAIL_CENTS_DEFAULT = 0;
 const MODEL_SOFT_LEAN_MARGIN_DEFAULT = 2;
 /** Soft dip (−N¢ + lean fade). 0 = off — price stops were hurting more than helping. */
 const MODEL_MAX_ADVERSE_CENTS_DEFAULT = 0;
-/** Hard cliff (−N¢). 0 = off — bounce stop-outs were the main bleed; follow lean only. */
-const MODEL_HARD_ADVERSE_CENTS_DEFAULT = 0;
+/** Hard cliff (−N¢ from entry). Caps gap dumps so 83→60 can't book full pain. */
+const MODEL_HARD_ADVERSE_CENTS_DEFAULT = 8;
+/** Alias / paper fill ceiling: never book more than this many ¢ loss from entry on adverse exits. */
+const MODEL_MAX_LOSS_CENTS_DEFAULT = 8;
+/** Asks at/above this → tighter spread + higher conf + half stake (rich tickets gap hard). */
+const MODEL_RICH_ASK_CENTS_DEFAULT = 78;
+/** Max ask−bid for rich asks (tighter than normal). */
+const MODEL_RICH_MAX_SPREAD_CENTS_DEFAULT = 2;
+/** Min confidence for rich asks (floors the global min). */
+const MODEL_RICH_MIN_CONFIDENCE_DEFAULT = 55;
 /** Edge: final-N-minute cash-out allows up to this much position PnL loss (¢). */
 const EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS = 75;
 const EDGE_PRE_CLOSE_MINUTES_DEFAULT = 5;
@@ -1590,6 +1638,10 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelTrailCents',
   'modelMaxAdverseCents',
   'modelHardAdverseCents',
+  'modelMaxLossCents',
+  'modelRichAskCents',
+  'modelRichMaxSpreadCents',
+  'modelRichMinConfidence',
   'modelMinHoldSeconds',
   'modelPostExitCooldownMinutes',
   'modelPostLeanStopCooldownMinutes',
@@ -2441,6 +2493,10 @@ class TradingBot {
       modelTrailCents: MODEL_TRAIL_CENTS_DEFAULT,
       modelMaxAdverseCents: MODEL_MAX_ADVERSE_CENTS_DEFAULT,
       modelHardAdverseCents: MODEL_HARD_ADVERSE_CENTS_DEFAULT,
+      modelMaxLossCents: MODEL_MAX_LOSS_CENTS_DEFAULT,
+      modelRichAskCents: MODEL_RICH_ASK_CENTS_DEFAULT,
+      modelRichMaxSpreadCents: MODEL_RICH_MAX_SPREAD_CENTS_DEFAULT,
+      modelRichMinConfidence: MODEL_RICH_MIN_CONFIDENCE_DEFAULT,
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
       modelPostLeanStopCooldownMinutes: MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT / 60000,
@@ -3073,6 +3129,7 @@ class TradingBot {
   /**
    * Stake for this entry.
    * Model: under modelLowPriceMaxCents → fraction of stake (¼ / ½ / ¾).
+   * Model: rich asks (≥78¢) → ½ stake (gap dumps hurt less in dollars).
    * Settle:
    * - Ask &lt; 80¢: ¼ normal (all coins)
    * - Else NEAR: ½ normal when halfStakeNear is on
@@ -3092,6 +3149,9 @@ class TradingBot {
       if (Number.isFinite(p) && p < modelLowPriceMaxCents(this.config)) {
         const frac = modelLowPriceStakeFraction(this.config);
         return Math.max(0.5, +(safeBase * frac).toFixed(2));
+      }
+      if (Number.isFinite(p) && p >= modelRichAskCents(this.config)) {
+        return Math.max(0.5, +(safeBase * 0.5).toFixed(2));
       }
       return safeBase;
     }
@@ -4778,6 +4838,9 @@ class TradingBot {
           ? Math.max(0, adverseCents - entrySpread)
           : 0;
       const econUnderwater = trueAdverse > 0;
+      const maxLoss = modelMaxLossCents(this.config);
+      const adverseFill = (bid) =>
+        modelAdverseExitFillCents(trade, bid, this.config, this.config.mode);
 
       const peak = Number(trade.peakHeldBidCents);
       const peakAt = Number(trade.peakHeldBidAt);
@@ -4836,9 +4899,13 @@ class TradingBot {
         return;
       }
 
-      const hardDip = underwater && hardAdverse > 0 && adverseCents >= hardAdverse;
-      if (hardDip) {
-        await this._closePosition(trade, heldSideBidCents, 'model_dip_stop', {
+      // Hard max-loss ceiling — gap dumps (83→60) stop here; paper books ≤ max loss.
+      const hitMaxLoss =
+        (maxLoss > 0 && underwater && adverseCents >= maxLoss) ||
+        (hardAdverse > 0 && econUnderwater && trueAdverse >= hardAdverse) ||
+        (hardAdverse > 0 && underwater && adverseCents >= hardAdverse);
+      if (hitMaxLoss) {
+        await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
           liveSellPriceCents: heldSideBidCents,
         });
         return;
@@ -4848,7 +4915,7 @@ class TradingBot {
       // Flat / only ask→bid haircut → BE; real red beyond spread → lean-stop.
       if (!faded && bidOk && leanExit) {
         if (econUnderwater) {
-          await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
+          await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
             liveSellPriceCents: heldSideBidCents,
           });
           return;
@@ -4884,7 +4951,7 @@ class TradingBot {
             });
           }
         } else {
-          await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
+          await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
             liveSellPriceCents: heldSideBidCents,
           });
         }
@@ -4900,7 +4967,7 @@ class TradingBot {
         trueAdverse >= fastRed &&
         heldMs >= MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT
       ) {
-        await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
+        await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
           liveSellPriceCents: heldSideBidCents,
         });
         return;
@@ -4914,7 +4981,7 @@ class TradingBot {
         engineClearlyWithUs &&
         heldMs >= MODEL_RED_GIVEUP_MS_DEFAULT
       ) {
-        await this._closePosition(trade, heldSideBidCents, 'model_lean_stop', {
+        await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
           liveSellPriceCents: heldSideBidCents,
         });
         return;
@@ -5367,9 +5434,12 @@ class TradingBot {
       return false;
     }
     const isModel = strategy === 'model';
-    // Model reduced stake = ask under low-price threshold only.
+    // Model reduced stake: cheap asks (low-price) or rich asks (≥78¢ half).
     let modelQuarter =
-      isModel && Number.isFinite(priceCents) && priceCents < modelLowPriceMaxCents(this.config);
+      isModel &&
+      Number.isFinite(priceCents) &&
+      (priceCents < modelLowPriceMaxCents(this.config) ||
+        priceCents >= modelRichAskCents(this.config));
     const symKey = String(symbol || '').toUpperCase();
     // Never reopen a coin that exited earlier in this same cycle (same-second knife-catch).
     if (this._stoppedSymbolsThisCycle && this._stoppedSymbolsThisCycle.has(symKey)) {
@@ -5848,7 +5918,9 @@ class TradingBot {
           ` (hold to settlement${lateNote}${sizeNote}).`;
       } else if (isModel) {
         const sizeNote = modelQuarter
-          ? ` · ${modelLowPriceStakeLabel(this.config)} stake`
+          ? priceCents >= modelRichAskCents(this.config)
+            ? ' · ½ stake'
+            : ` · ${modelLowPriceStakeLabel(this.config)}`
           : '';
         this.lastDecision =
           `Opened ${symbol} ${side.toUpperCase()} model position at ${trade.entryPriceCents}¢` +
@@ -6805,7 +6877,12 @@ class TradingBot {
 
     const noBid = modelActualSideBidCents(market, 'no');
     const heldBid = side === 'yes' ? modelActualSideBidCents(market, 'yes') : noBid;
-    const maxSpread = modelMaxEntrySpreadCents(this.config);
+    const maxSpreadBase = modelMaxEntrySpreadCents(this.config);
+    const richAsk = modelRichAskCents(this.config);
+    const isRichAsk = Number.isFinite(priceCents) && priceCents >= richAsk;
+    const maxSpread = isRichAsk
+      ? Math.min(maxSpreadBase > 0 ? maxSpreadBase : 99, modelRichMaxSpreadCents(this.config) || maxSpreadBase)
+      : maxSpreadBase;
     if (maxSpread > 0) {
       if (!Number.isFinite(heldBid) || heldBid < 1) {
         this.lastDecision =
@@ -6816,7 +6893,18 @@ class TradingBot {
       if (spread > maxSpread) {
         this.lastDecision =
           `Waiting: ${symbol} ${String(side).toUpperCase()} ask ${priceCents}¢ vs bid ${Math.round(heldBid)}¢ ` +
-          `(gap ${spread}¢) — won't buy into a wide spread.`;
+          `(gap ${spread}¢) — won't buy into a wide spread` +
+          (isRichAsk ? ' on a rich ask' : '') +
+          '.';
+        return null;
+      }
+    }
+    if (isRichAsk) {
+      const richConf = Math.max(minConf, modelRichMinConfidence(this.config));
+      if (!Number.isFinite(window.confidence) || window.confidence < richConf) {
+        this.lastDecision =
+          `Waiting: ${symbol} rich ask ${priceCents}¢ needs conf ≥${richConf}% ` +
+          `(have ${Number.isFinite(window.confidence) ? Math.round(window.confidence) : '?'}%).`;
         return null;
       }
     }
@@ -7682,6 +7770,9 @@ module.exports = {
   modelTrailCents,
   modelMaxAdverseCents,
   modelHardAdverseCents,
+  modelMaxLossCents,
+  modelAdverseExitFillCents,
+  modelRichAskCents,
   MODEL_LIVE_LEAN_MARGIN_DEFAULT,
   MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT,
   MODEL_RED_GIVEUP_MS_DEFAULT,
