@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 44;
+const SETTINGS_DEFAULTS_VERSION = 45;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -344,10 +344,18 @@ function flipKalshiSide(side) {
   return side;
 }
 
+/** How far the lean/current side has dropped from its entry ask (fade TP). */
+function modelSignalDropCents(signalEntryCents, signalBidCents) {
+  const entry = Number(signalEntryCents);
+  const bid = Number(signalBidCents);
+  if (!Number.isFinite(entry) || !Number.isFinite(bid)) return 0;
+  return Math.max(0, Math.round(entry - bid));
+}
+
 /** Live lean must clear this many points vs the held side (avoids 50.1/49.9 chop). */
 const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 5;
-/** Entry: live lean must favor the locked side by at least this many pts (stricter than exit). */
-const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 8;
+/** Entry: live lean must favor the locked side by at least this many pts (0 = any lead). */
+const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 3;
 /** Don't early-exit a Model hold until it's been open at least this long. */
 const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
 /** After Model BE/TP/lean-flip, sit out that coin this long (short — scalp recycle at 50¢). */
@@ -4023,17 +4031,23 @@ class TradingBot {
     return pastStored || pastMarket || this._isMarketSettledStatus(market) || tooOld;
   }
 
-  _heldSideBidCents(trade, market) {
+  _sideBidCents(market, side) {
     if (!market) return null;
-    if (trade.side === 'yes') {
+    if (side === 'yes') {
       if (Number.isFinite(market.yes_bid)) return market.yes_bid;
-      // Infer YES bid from NO ask when Kalshi omits one side.
       if (Number.isFinite(market.no_ask)) return Math.max(1, Math.min(99, 100 - market.no_ask));
       return null;
     }
-    if (Number.isFinite(market.no_bid)) return market.no_bid;
-    if (Number.isFinite(market.yes_ask)) return Math.max(1, Math.min(99, 100 - market.yes_ask));
+    if (side === 'no') {
+      if (Number.isFinite(market.no_bid)) return market.no_bid;
+      if (Number.isFinite(market.yes_ask)) return Math.max(1, Math.min(99, 100 - market.yes_ask));
+      return null;
+    }
     return null;
+  }
+
+  _heldSideBidCents(trade, market) {
+    return this._sideBidCents(market, trade && trade.side);
   }
 
   /** True when an open hold’s live bid is ≥ entry (flat/green). */
@@ -4373,8 +4387,8 @@ class TradingBot {
         bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents >= entry;
       const greenCents =
         flatOrGreen && Number.isFinite(entry) ? Math.round(heldSideBidCents - entry) : 0;
-      const isBankableGreen = flatOrGreen && greenCents >= Math.max(1, minTp || 0);
-      const isDecentGreen = flatOrGreen && bankGreen > 0 && greenCents >= bankGreen;
+      let isBankableGreen = flatOrGreen && greenCents >= Math.max(1, minTp || 0);
+      let isDecentGreen = flatOrGreen && bankGreen > 0 && greenCents >= bankGreen;
       const exactlyFlat =
         bidOk && Number.isFinite(entry) && Math.round(heldSideBidCents) === Math.round(entry);
       const underwater = bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents < entry;
@@ -4426,9 +4440,44 @@ class TradingBot {
       const momentumStalled =
         (stallPullback > 0 && pullback >= stallPullback) ||
         (stallMs > 0 && peakAgeMs >= stallMs);
-      // Keep running while price hasn't stalled. Fade rides the opposite
-      // contract on price, not on engine agreement with the held side.
-      const momentumRun = faded ? !momentumStalled : !!(liveFavors && !momentumStalled);
+      let momentumRun = faded ? !momentumStalled : !!(liveFavors && !momentumStalled);
+
+      // Fade TP is −N¢ on the lean/current side (YES if UP, NO if DOWN),
+      // not +N¢ on the faded ticket. Sell is still the held contract.
+      const signalSide =
+        trade.modelSignalSide ||
+        (faded ? flipKalshiSide(trade.side) : trade.side);
+      const signalBid = this._sideBidCents(market, signalSide);
+      const signalOk =
+        signalBid != null &&
+        Number.isFinite(signalBid) &&
+        signalBid >= 1 &&
+        signalBid <= 99;
+      const signalEntry = Number(trade.modelSignalEntryCents);
+      let fadeSignalDrop = 0;
+      if (faded && signalOk && Number.isFinite(signalEntry) && signalEntry >= 1) {
+        const prevTrough = Number(trade.troughSignalBidCents);
+        const baseTrough = Number.isFinite(prevTrough) ? prevTrough : Math.min(signalEntry, signalBid);
+        const nextTrough = Math.min(baseTrough, signalBid);
+        if (!Number.isFinite(prevTrough) || nextTrough < prevTrough) {
+          trade.troughSignalBidCents = nextTrough;
+          trade.troughSignalBidAt = now;
+          this._persist();
+        } else if (!Number.isFinite(Number(trade.troughSignalBidAt))) {
+          trade.troughSignalBidAt = now;
+        }
+        fadeSignalDrop = modelSignalDropCents(signalEntry, signalBid);
+        isBankableGreen = fadeSignalDrop >= Math.max(1, minTp || 0);
+        isDecentGreen = bankGreen > 0 && fadeSignalDrop >= bankGreen;
+        const trough = Number(trade.troughSignalBidCents);
+        const troughAt = Number(trade.troughSignalBidAt);
+        const bounce = Number.isFinite(trough) ? Math.max(0, Math.round(signalBid - trough)) : 0;
+        const troughAgeMs = Number.isFinite(troughAt) ? now - troughAt : Infinity;
+        const signalStalled =
+          (stallPullback > 0 && bounce >= stallPullback) ||
+          (stallMs > 0 && troughAgeMs >= stallMs);
+        momentumRun = !signalStalled;
+      }
 
       const hardDip = underwater && hardAdverse > 0 && adverseCents >= hardAdverse;
       if (hardDip) {
@@ -4492,10 +4541,14 @@ class TradingBot {
       }
 
       // +7¢+ green: ride while momentum + lean agree; TP the moment it stalls.
+      // Fade: that green is −N¢ on the lean/current side, then we sell the faded hold.
       if (bidOk && isDecentGreen && heldForBank) {
         if (momentumRun) {
-          this.lastDecision =
-            `Holding ${trade.symbol} model winner +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — momentum still with us.`;
+          this.lastDecision = faded
+            ? `Holding ${trade.symbol} fade — ${String(signalSide || '').toUpperCase()} ` +
+              `${Number.isFinite(signalEntry) ? Math.round(signalEntry) : '?'}→${signalOk ? Math.round(signalBid) : '?'}¢ ` +
+              `(${fadeSignalDrop}¢) still running.`
+            : `Holding ${trade.symbol} model winner +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — momentum still with us.`;
           return;
         }
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
@@ -4830,6 +4883,8 @@ class TradingBot {
     modelDirection = null,
     uncertain = false,
     modelInverted = false,
+    modelSignalSide = null,
+    modelSignalEntryCents = null,
   }) {
     // A paper trade must obey the same price rules as a live order. Without
     // this guard an empty Kalshi quote could be stored as `null` and then
@@ -5019,6 +5074,10 @@ class TradingBot {
             modelWindowKey: modelWindowKey || null,
             modelDirection: modelDirection || null,
             ...(modelInverted || isModelInvertSide(this.config) ? { modelInverted: true } : {}),
+            ...(modelSignalSide ? { modelSignalSide } : {}),
+            ...(Number.isFinite(Number(modelSignalEntryCents))
+              ? { modelSignalEntryCents: Math.round(Number(modelSignalEntryCents)) }
+              : {}),
             ...(modelQuarter ? { modelUncertain: true } : {}),
           }
         : {}),
@@ -6300,6 +6359,7 @@ class TradingBot {
       uncertain,
       invert,
       signalSide,
+      signalPriceCents: signalSide === 'yes' ? yesAsk : noAsk,
       confirmCrossAsk: confirmGate.crossAsk != null ? confirmGate.crossAsk : null,
     };
   }
@@ -6343,6 +6403,9 @@ class TradingBot {
       modelDirection: opportunity.direction,
       uncertain: opportunity.uncertain,
       modelInverted: opportunity.invert === true,
+      modelSignalSide: opportunity.signalSide || null,
+      modelSignalEntryCents:
+        opportunity.signalPriceCents != null ? opportunity.signalPriceCents : null,
     };
   }
 
@@ -7006,6 +7069,7 @@ module.exports = {
   isModelInvertSide,
   modelSignalSideFromDirection,
   flipKalshiSide,
+  modelSignalDropCents,
   pickModelWindowKey,
   pickModelWindow,
   modelWindowDirection,

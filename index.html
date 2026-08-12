@@ -341,14 +341,14 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> plan: see lean correlate → buy → bank quick TP → if price returns under 50¢, re-cross and repeat. Runs <strong>2–3+ coins at once</strong> (max positions). Confirm gate is off per coin until that coin’s first MODEL buy+sell this run, then (YES &amp; NO): under 50 → cross → continue → enter; each exit resets. ~30s sit-out after exit. Lock + live lean ≥8pts. TP +7¢ then stall. No late forced exit. Optional fade: bid the opposite Kalshi side of the lean.</p>
+          <p class="settings-hint"><strong>MODEL</strong> plan: see lean correlate → buy → bank quick TP → if price returns under 50¢, re-cross and repeat. Runs <strong>2–3+ coins at once</strong> (max positions). Confirm gate is off per coin until that coin’s first MODEL buy+sell this run, then (YES &amp; NO): under 50 → cross → continue → enter; each exit resets. ~30s sit-out after exit. Live favor default 3pts (slider). TP +7¢ then stall. No late forced exit. Optional fade: bid the opposite Kalshi side of the lean.</p>
 
           <label><strong>MODEL</strong> fade (opposite side)
             <select id="bot-model-invert">
               <option value="off">Off — follow the lean (default)</option>
               <option value="on">On — fade: UP→NO, DOWN→YES</option>
             </select>
-            <span class="field-hint">Same money rules: you profit if the <strong>side you bought</strong> goes up or settles 100. On = still require a clear lean, then buy the other contract. Confirm gate / min entry apply to that faded ask.</span>
+            <span class="field-hint">On = still require a clear lean, then buy the other contract. TP is <strong>−N¢ on the lean/current side</strong> (UP 70→63), then we sell the faded hold. Confirm / min entry apply to the faded ask.</span>
           </label>
 
           <label><strong>MODEL</strong> min confidence
@@ -357,6 +357,14 @@
               <span class="slider-value" id="bot-model-confidence-value">—</span>
             </div>
             <span class="field-hint">Engine must be at least this sure before opening. Default 66%.</span>
+          </label>
+
+          <label><strong>MODEL</strong> live favor (pts)
+            <div class="slider-row">
+              <input id="bot-model-live-favor" type="range" min="0" max="15" step="1" />
+              <span class="slider-value" id="bot-model-live-favor-value">—</span>
+            </div>
+            <span class="field-hint">Live UP vs DOWN must beat the other side by this many points before entry. Default <strong>3</strong> (was 8). <strong>0</strong> = any lead (51/49 ok).</span>
           </label>
 
           <label><strong>MODEL</strong> confirm cross (¢)
@@ -412,7 +420,7 @@
               <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
-            <span class="field-hint">Arm momentum TP once this many ¢ green. Default 7¢ — no micro banks.</span>
+            <span class="field-hint">Arm TP once this many ¢. Follow = +N on the held side. Fade = −N on the lean/current side (same crypto side), then sell the faded ticket. Default 7¢.</span>
           </label>
         </div>
 

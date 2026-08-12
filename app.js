@@ -1383,6 +1383,7 @@ const SLIDER_UNITS = {
   'bot-takeprofit': (v) => `+${Math.round(v)}¢`,
   'bot-minentries': (v) => `${Math.round(v)}¢`,
   'bot-model-confidence': (v) => `${Math.round(v)}%`,
+  'bot-model-live-favor': (v) => (Number(v) <= 0 ? 'any lead' : `≥${Math.round(v)} pts`),
   'bot-model-confirm-cross': (v) => (Number(v) <= 0 ? 'off' : `cross ${Math.round(v)}¢`),
   'bot-model-confirm-ext': (v) => `+${Math.round(v)}¢ max`,
   'bot-model-min-entry': (v) => `${Math.round(v)}¢`,
@@ -1541,6 +1542,7 @@ function wireSliderDisplays() {
     'bot-takeprofit',
     'bot-minentries',
     'bot-model-confidence',
+    'bot-model-live-favor',
     'bot-model-confirm-cross',
     'bot-model-confirm-ext',
     'bot-model-min-entry',
@@ -1656,6 +1658,7 @@ function wireBotConfigAutoSave() {
     'bot-takeprofit',
     'bot-minentries',
     'bot-model-confidence',
+    'bot-model-live-favor',
     'bot-model-confirm-cross',
     'bot-model-confirm-ext',
     'bot-model-min-entry',
@@ -1735,6 +1738,11 @@ async function loadBotConfigIntoForm() {
     }
     const modelConf = document.getElementById('bot-model-confidence');
     if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 66;
+    const modelLiveFavor = document.getElementById('bot-model-live-favor');
+    if (modelLiveFavor) {
+      modelLiveFavor.value =
+        c.modelEntryLiveLeanMarginPct != null ? c.modelEntryLiveLeanMarginPct : 3;
+    }
     const modelConfirmCross = document.getElementById('bot-model-confirm-cross');
     if (modelConfirmCross) {
       modelConfirmCross.value =
@@ -1855,6 +1863,7 @@ async function loadBotConfigIntoForm() {
       'bot-takeprofit',
       'bot-minentries',
       'bot-model-confidence',
+      'bot-model-live-favor',
       'bot-model-confirm-cross',
       'bot-model-confirm-ext',
       'bot-model-min-entry',
@@ -2008,6 +2017,7 @@ async function saveBotConfig(opts = {}) {
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     modelInvertSide: document.getElementById('bot-model-invert')?.value || 'off',
     modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '66'),
+    modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '3'),
     modelConfirmCrossCents: parseFloat(document.getElementById('bot-model-confirm-cross')?.value || '50'),
     modelConfirmMaxExtensionCents: parseFloat(
       document.getElementById('bot-model-confirm-ext')?.value || '15'
