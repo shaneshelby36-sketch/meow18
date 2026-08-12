@@ -366,6 +366,8 @@ const MODEL_MIN_TP_CENTS_DEFAULT = 7;
 const MODEL_BANK_GREEN_CENTS_DEFAULT = 7;
 /** Start trailing / allow stall-TP once at least this many ¢ green (don't wait for +7). */
 const MODEL_TRAIL_ARM_CENTS_DEFAULT = 3;
+/** Held bid at/above this → bank immediately (don't sit 96→100). */
+const MODEL_RICH_BANK_CENTS_DEFAULT = 96;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /** Final barrier (minutes left). 0 = off (no forced late exits). */
@@ -4516,6 +4518,13 @@ class TradingBot {
         momentumRun = !signalStalled;
       }
 
+      if (bidOk && heldSideBidCents >= MODEL_RICH_BANK_CENTS_DEFAULT) {
+        await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+
       const hardDip = underwater && hardAdverse > 0 && adverseCents >= hardAdverse;
       if (hardDip) {
         await this._closePosition(trade, heldSideBidCents, 'model_dip_stop', {
@@ -4633,8 +4642,10 @@ class TradingBot {
         return;
       }
       if (bidOk && armed && !priceStalled) {
-        this.lastDecision =
+        const holdMsg =
           `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — following, TP on a small stall.`;
+        trade.holdReason = holdMsg;
+        this.lastDecision = holdMsg;
         return;
       }
 
@@ -4652,6 +4663,32 @@ class TradingBot {
         });
         return;
       }
+
+      const up = picked && picked.window ? Number(picked.window.probabilityUp) : NaN;
+      const down = picked && picked.window ? Number(picked.window.probabilityDown) : NaN;
+      const leanTxt =
+        Number.isFinite(up) && Number.isFinite(down)
+          ? `${up.toFixed(0)}/${down.toFixed(0)} ${
+              liveAgainst ? 'AGAINST' : liveFavors ? 'with us' : 'soft'
+            }`
+          : 'lean n/a';
+      const pxTxt = bidOk
+        ? underwater
+          ? `${Math.round(entry)}→${Math.round(heldSideBidCents)} (−${adverseCents}¢)`
+          : exactlyFlat
+            ? `flat ${Math.round(entry)}¢`
+            : `+${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : Math.round(heldSideBidCents)}¢)`
+        : 'no bid';
+      let why;
+      if (!bidOk) why = 'no usable bid yet';
+      else if (faded) why = 'fade hold — engine-against does not stop this ticket';
+      else if (underwater && liveFavors) why = `engine still with us (${leanTxt}) — no stop, waiting recover/trail`;
+      else if (underwater && !liveAgainst) why = `red but lean not flipped enough to stop (${leanTxt}, need ~5pts against)`;
+      else if (!armed && flatOrGreen) why = `green but under trail arm (need +${armCents}¢)`;
+      else why = `holding (${leanTxt})`;
+      const holdMsg = `Holding ${trade.symbol} ${String(trade.side || '').toUpperCase()} ${pxTxt} — ${why}.`;
+      trade.holdReason = holdMsg;
+      this.lastDecision = holdMsg;
       return;
     }
 

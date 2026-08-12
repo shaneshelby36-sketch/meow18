@@ -838,6 +838,12 @@ body[data-view-mode="bot"] .asset-picker {
   font-family: var(--font-display);
   letter-spacing: 0.02em;
 }
+.bot-position-hold {
+  margin-top: 8px;
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
 .bot-position-meta {
   display: flex;
   flex-wrap: wrap;

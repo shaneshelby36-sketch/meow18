@@ -5788,6 +5788,40 @@ async function testModelStrategy() {
     checkEq(trade.exitPriceCents, 63, 'stall TP at live bid');
   }
 
+  // 96¢ held bid banks immediately
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 96,
+        no_bid: 4,
+      }),
+      { strategyMode: 'model', modelMinHoldSeconds: 0 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 70,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 20_000,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(70, 80), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    });
+    checkEq(trade.exitReason, 'take_profit', '96¢ held bid TPs immediately');
+    checkEq(trade.exitPriceCents, 96, 'rich TP at 96¢');
+  }
+
   // 52¢ entry: +3¢ then 1¢ off peak → TP (does not wait for +7)
   {
     const now = Date.now();

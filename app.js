@@ -940,6 +940,7 @@ function buildOpenPositionsHtml(openTrades) {
             <span>${formatCloseCountdown(Number(t.windowCloseTime))}</span>
             <span>Conf ${conf}</span>
           </div>
+          ${t.holdReason ? `<div class="bot-position-hold">${escapeHtml(String(t.holdReason))}</div>` : ''}
         </div>`;
     })
     .join('');
