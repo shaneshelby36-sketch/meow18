@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 55;
+const SETTINGS_DEFAULTS_VERSION = 56;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -401,13 +401,13 @@ const MODEL_BANK_GREEN_CENTS_DEFAULT = 10;
 const MODEL_TRAIL_ARM_CENTS_DEFAULT = 3;
 /** Held bid at/above this → bank immediately (don't sit 96→100). */
 const MODEL_RICH_BANK_CENTS_DEFAULT = 96;
-/** Still red after this long, even if lean is with us → TP isn't happening, stop. */
+/** Still red after this long, even if lean is with us → only stop if pace → ≤50. */
 const MODEL_RED_GIVEUP_MS_DEFAULT = 8_000;
 /** Soft lean + still green: bank after this (preemptive — don't wait for the dump). */
 const MODEL_SOFT_BANK_MS_DEFAULT = 0;
 /** Kalshi bid slide from peak — cut before engine probs catch up (predict the dump). */
 const MODEL_DUMP_PULLBACK_CENTS_DEFAULT = 3;
-/** Underwater this many ¢ → stop now (bid leading lean; don't wait for give-up). */
+/** Underwater this many ¢ → candidate for stop only if also on pace toward ≤50. */
 const MODEL_FAST_RED_CENTS_DEFAULT = 2;
 /** Min drop in held-side live prob (pts) from entry before model exit fires. */
 const MODEL_PROB_DRIFT_PTS_DEFAULT = 3;
@@ -415,6 +415,12 @@ const MODEL_PROB_DRIFT_PTS_DEFAULT = 3;
 const MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT = 0;
 /** Max ask−bid spread allowed at entry — blocks 62 ask / 49 bid gaps. */
 const MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT = 4;
+/** Red lean-stop barrier: stop if bid ≤ this or pace projects here. */
+const MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT = 50;
+/** Horizon used to project bid pace toward the barrier (ms). */
+const MODEL_LEAN_STOP_PACE_HORIZON_MS_DEFAULT = 90_000;
+/** Need at least this long of red sample before trusting pace. */
+const MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT = 2_000;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /** Final barrier (minutes left). 0 = off (no forced late exits). */
@@ -485,6 +491,67 @@ function modelOpenGraceMs(config = {}) {
   const sec = Number(config.modelOpenGraceSeconds);
   if (Number.isFinite(sec) && sec >= 0) return Math.round(sec * 1000);
   return MODEL_OPEN_GRACE_MS_DEFAULT;
+}
+
+function modelLeanStopBarrierCents(config = {}) {
+  const n = Number(config.modelLeanStopBarrierCents);
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT;
+}
+
+function modelLeanStopPaceHorizonMs(config = {}) {
+  const n = Number(config.modelLeanStopPaceHorizonMs);
+  if (Number.isFinite(n) && n >= 0) return Math.round(n);
+  const sec = Number(config.modelLeanStopPaceHorizonSeconds);
+  if (Number.isFinite(sec) && sec >= 0) return Math.round(sec * 1000);
+  return MODEL_LEAN_STOP_PACE_HORIZON_MS_DEFAULT;
+}
+
+/**
+ * After buy goes red: only lean-stop if bid is already ≤ barrier (default 50)
+ * or linear pace from entry bid projects ≤ barrier within the horizon.
+ * Soft red that isn't heading to 50 → hold.
+ */
+function modelOnPaceBelowBarrier({
+  fromBid,
+  currentBid,
+  elapsedMs,
+  barrierCents = MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT,
+  horizonMs = MODEL_LEAN_STOP_PACE_HORIZON_MS_DEFAULT,
+  minSampleMs = MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT,
+} = {}) {
+  const cur = Number(currentBid);
+  const from = Number(fromBid);
+  const elapsed = Number(elapsedMs);
+  const barrier = Number(barrierCents);
+  if (!Number.isFinite(cur)) return false;
+  if (Number.isFinite(barrier) && cur <= barrier) return true;
+  const minSample = Number.isFinite(Number(minSampleMs)) ? Math.max(0, Number(minSampleMs)) : 2000;
+  if (!Number.isFinite(from) || !Number.isFinite(elapsed) || elapsed < minSample) return false;
+  const drop = from - cur;
+  if (!(drop > 0)) return false;
+  const horizon =
+    Number.isFinite(Number(horizonMs)) && horizonMs > 0
+      ? Number(horizonMs)
+      : MODEL_LEAN_STOP_PACE_HORIZON_MS_DEFAULT;
+  const projected = cur - (drop / elapsed) * horizon;
+  return projected <= barrier;
+}
+
+function modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, config = {}) {
+  const barrier = modelLeanStopBarrierCents(config);
+  const cur = Number(heldSideBidCents);
+  if (Number.isFinite(cur) && cur <= barrier) return true;
+  const entryBid = Number(trade && trade.modelEntryBidCents);
+  const entry = Number(trade && trade.entryPriceCents);
+  const from = Number.isFinite(entryBid) ? entryBid : entry;
+  return modelOnPaceBelowBarrier({
+    fromBid: from,
+    currentBid: cur,
+    elapsedMs: heldMs,
+    barrierCents: barrier,
+    horizonMs: modelLeanStopPaceHorizonMs(config),
+  });
 }
 
 function modelMinTpCents(config = {}) {
@@ -4953,16 +5020,19 @@ class TradingBot {
         return;
       }
 
-      // Model-native preemptive exit: lean soft/turning before the bid dumps.
-      // Flat / only ask→bid haircut → BE; real red beyond spread → lean-stop.
+      // Model-native preemptive exit: lean soft/turning.
+      // Flat / spread haircut → BE. Real red → lean-stop only if pace → ≤50 (or already ≤50).
+      const redDumpThreat = modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, this.config);
       if (!faded && bidOk && leanExit) {
         if (econUnderwater) {
-          await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
-            liveSellPriceCents: heldSideBidCents,
-          });
-          return;
-        }
-        if (exactlyFlat || flatOrGreen || underwater) {
+          if (redDumpThreat) {
+            await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+            return;
+          }
+          // Soft red, not on pace to 50 — hold; don't scratch.
+        } else if (exactlyFlat || flatOrGreen || underwater) {
           // Underwater only by entry spread haircut → treat as BE scratch if lean soft.
           if (exactlyFlat || greenCents <= 0 || underwater) {
             const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
@@ -4992,12 +5062,14 @@ class TradingBot {
               liveSellPriceCents: heldSideBidCents,
             });
           }
-        } else {
+          return;
+        }
+        if (redDumpThreat) {
           await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
             liveSellPriceCents: heldSideBidCents,
           });
+          return;
         }
-        return;
       }
 
       const fastRed = modelFastRedCents(this.config);
@@ -5007,7 +5079,8 @@ class TradingBot {
         fastRed > 0 &&
         econUnderwater &&
         trueAdverse >= fastRed &&
-        heldMs >= MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT
+        heldMs >= MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT &&
+        redDumpThreat
       ) {
         await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
           liveSellPriceCents: heldSideBidCents,
@@ -5015,13 +5088,14 @@ class TradingBot {
         return;
       }
 
-      // Model still firm but ticket red beyond spread — short bounce window only.
+      // Model still firm but ticket red beyond spread — only give up if pace → ≤50.
       if (
         !faded &&
         bidOk &&
         econUnderwater &&
         engineClearlyWithUs &&
-        heldMs >= MODEL_RED_GIVEUP_MS_DEFAULT
+        heldMs >= MODEL_RED_GIVEUP_MS_DEFAULT &&
+        redDumpThreat
       ) {
         await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
           liveSellPriceCents: heldSideBidCents,
@@ -7779,6 +7853,9 @@ module.exports = {
   modelPostExitCooldownMs,
   modelPostLeanStopCooldownMs,
   modelOpenGraceMs,
+  modelOnPaceBelowBarrier,
+  modelShouldLeanStopRed,
+  modelLeanStopBarrierCents,
   modelMinTpCents,
   modelBankGreenCents,
   modelTrailArmCents,
@@ -7797,6 +7874,7 @@ module.exports = {
   MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT,
   MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT,
   MODEL_OPEN_GRACE_MS_DEFAULT,
+  MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT,
   MODEL_PROB_DRIFT_PTS_DEFAULT,
   modelLowPriceMaxCents,
   modelLowPriceStakeQuarters,
