@@ -286,7 +286,7 @@
               <label class="auto-coin-chip"><input type="checkbox" data-coin="DOGE" /> DOGE</label>
               <label class="auto-coin-chip"><input type="checkbox" data-coin="NEAR" /> NEAR</label>
             </div>
-            <span class="field-hint">Default <strong>BTC · BNB · SOL</strong>. Uncheck everything else to cut noise losses.</span>
+            <span class="field-hint">Recommended <strong>BTC · BNB · SOL</strong> (Core setup). Tap a setup card in the MODEL tab instead of guessing.</span>
           </div>
           <label>Stake per trade
             <div class="slider-row">
@@ -362,7 +362,13 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> only — buys when lean is strengthening and model % ≥ ask. Soft red holds unless pace heads to ≤50¢ (then lean-stop). Rich asks (≥78¢): tighter spread, conf ≥55%, ½ stake. Max loss <strong>8¢</strong>. Confirm cross <strong>off</strong>; min conf <strong>44%</strong>; live favor <strong>4</strong>; TP <strong>+10¢</strong>.</p>
+          <p class="settings-hint"><strong>MODEL</strong> — Core setup: BTC/BNB/SOL, conf <strong>58%</strong>, live favor <strong>4</strong>, TP <strong>+10¢</strong>, max <strong>2</strong> opens, max loss <strong>8¢</strong>. Soft red holds unless pace → ≤50¢.</p>
+
+          <div class="model-setups" id="bot-model-setups">
+            <h4 class="bot-panel-subhead">Paper setups</h4>
+            <p class="settings-hint">Tap one to apply coins + conf + TP + max slots. Score is a what-if on your saved trade log (same fills, filter coins/conf) — not a replay. Run one setup per session.</p>
+            <div id="bot-model-setups-list" class="model-setups-list"></div>
+          </div>
 
           <h4 class="bot-panel-subhead">Entry</h4>
           <label>MODEL fade (opposite side)
@@ -376,7 +382,7 @@
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />
               <span class="slider-value" id="bot-model-confidence-value">—</span>
             </div>
-            <span class="field-hint">Default <strong>44%</strong>.</span>
+            <span class="field-hint">Default <strong>58%</strong> (Core).</span>
           </label>
           <label>MODEL live favor (pts)
             <div class="slider-row">

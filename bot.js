@@ -20,7 +20,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 56;
+const SETTINGS_DEFAULTS_VERSION = 57;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -162,6 +162,169 @@ function isKalshiTradeEnabled(symbol, config = null) {
 
 function tradeableKalshiSymbols(config = null) {
   return resolveAutoTradeSymbols(config);
+}
+
+/**
+ * Named MODEL paper setups. Apply one from the dashboard instead of guessing knobs.
+ * Scoreboard is a what-if on saved fills (filter coins + min conf) — not a replay.
+ */
+const MODEL_SETUPS = [
+  {
+    id: 'core',
+    recommended: true,
+    label: 'Core BTC / BNB / SOL',
+    why: 'Best mix from recent PnL: keep the coins that actually bank, drop ETH/DOGE/XRP bleed. 2 slots so correlated dumps don’t stack.',
+    autoTradeSymbols: 'BTC,BNB,SOL',
+    modelMinConfidence: 58,
+    modelEntryLiveLeanMarginPct: 4,
+    modelBankGreenCents: 10,
+    modelMinTpCents: 10,
+    maxOpenPositions: 2,
+    modelConfirmCrossCents: 0,
+    modelMaxLossCents: 8,
+  },
+  {
+    id: 'btc-sol',
+    label: 'BTC + SOL only',
+    why: 'Fewest names, still enough hits. Use if BNB is chopping.',
+    autoTradeSymbols: 'BTC,SOL',
+    modelMinConfidence: 58,
+    modelEntryLiveLeanMarginPct: 4,
+    modelBankGreenCents: 10,
+    modelMinTpCents: 10,
+    maxOpenPositions: 2,
+    modelConfirmCrossCents: 0,
+    modelMaxLossCents: 8,
+  },
+  {
+    id: 'tight',
+    label: 'Tight (fewer, cleaner)',
+    why: 'Higher conf + one slot. Fewer trades, smaller chance of stacked red.',
+    autoTradeSymbols: 'BTC,BNB,SOL',
+    modelMinConfidence: 66,
+    modelEntryLiveLeanMarginPct: 5,
+    modelBankGreenCents: 10,
+    modelMinTpCents: 10,
+    maxOpenPositions: 1,
+    modelConfirmCrossCents: 0,
+    modelMaxLossCents: 8,
+  },
+  {
+    id: 'majors',
+    label: 'Majors + ETH',
+    why: 'More hits if Core feels too quiet. ETH was the overnight drain — only run this to compare.',
+    autoTradeSymbols: 'BTC,BNB,SOL,ETH',
+    modelMinConfidence: 62,
+    modelEntryLiveLeanMarginPct: 4,
+    modelBankGreenCents: 10,
+    modelMinTpCents: 10,
+    maxOpenPositions: 2,
+    modelConfirmCrossCents: 0,
+    modelMaxLossCents: 8,
+  },
+  {
+    id: 'hits',
+    label: 'More hits',
+    why: 'Lower conf, 3 slots. More scratches — only if Core is too quiet and you’re okay with more reds.',
+    autoTradeSymbols: 'BTC,BNB,SOL',
+    modelMinConfidence: 52,
+    modelEntryLiveLeanMarginPct: 3,
+    modelBankGreenCents: 8,
+    modelMinTpCents: 8,
+    maxOpenPositions: 3,
+    modelConfirmCrossCents: 0,
+    modelMaxLossCents: 8,
+  },
+];
+
+function summarizeClosedModelTrades(trades) {
+  let pnlCents = 0;
+  let wins = 0;
+  let losses = 0;
+  let be = 0;
+  let worstCents = 0;
+  let n = 0;
+  for (const t of trades || []) {
+    if (!t || String(t.status) !== 'closed') continue;
+    if (t.strategy && String(t.strategy).toLowerCase() !== 'model') continue;
+    const p = Number(t.pnlCents);
+    if (!Number.isFinite(p)) continue;
+    n += 1;
+    pnlCents += p;
+    if (p > 0) wins += 1;
+    else if (p < 0) {
+      losses += 1;
+      if (p < worstCents) worstCents = p;
+    } else be += 1;
+  }
+  return {
+    trades: n,
+    wins,
+    losses,
+    be,
+    pnlCents,
+    worstCents,
+    winRatePct: n ? +((wins / n) * 100).toFixed(1) : null,
+  };
+}
+
+function filterTradesForModelSetup(trades, setup = {}) {
+  const coins = new Set(
+    String(setup.autoTradeSymbols || '')
+      .split(/[,|\s]+/)
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean)
+  );
+  const minConf = Number(setup.modelMinConfidence);
+  return (trades || []).filter((t) => {
+    if (!t || String(t.status) !== 'closed') return false;
+    if (t.strategy && String(t.strategy).toLowerCase() !== 'model') return false;
+    const sym = String(t.symbol || '').toUpperCase();
+    if (coins.size && !coins.has(sym)) return false;
+    const conf = Number(t.engineConfidence);
+    if (Number.isFinite(minConf) && Number.isFinite(conf) && conf < minConf) return false;
+    return true;
+  });
+}
+
+function scoreModelSetupsAgainstLog(trades, setups = MODEL_SETUPS) {
+  const all = summarizeClosedModelTrades(trades);
+  return (setups || []).map((setup) => ({
+    ...setup,
+    score: summarizeClosedModelTrades(filterTradesForModelSetup(trades, setup)),
+  })).concat([
+    {
+      id: 'all-logged',
+      label: 'All logged MODEL trades',
+      why: 'Baseline — every coin that actually filled.',
+      autoTradeSymbols: Object.keys(SERIES_BY_SYMBOL).join(','),
+      recommended: false,
+      score: all,
+    },
+  ]);
+}
+
+function modelSetupById(id) {
+  const key = String(id || '').toLowerCase();
+  return MODEL_SETUPS.find((s) => s.id === key) || null;
+}
+
+function modelSetupConfigPatch(setup) {
+  if (!setup) return {};
+  return {
+    symbol: 'AUTO',
+    strategyMode: 'model',
+    autoTradeSymbols: setup.autoTradeSymbols,
+    modelMinConfidence: setup.modelMinConfidence,
+    modelEntryLiveLeanMarginPct: setup.modelEntryLiveLeanMarginPct,
+    modelBankGreenCents: setup.modelBankGreenCents,
+    modelMinTpCents: setup.modelMinTpCents,
+    maxOpenPositions: setup.maxOpenPositions,
+    modelConfirmCrossCents: setup.modelConfirmCrossCents,
+    modelMaxLossCents: setup.modelMaxLossCents,
+    modelHardAdverseCents: setup.modelMaxLossCents,
+    activeSetupId: setup.id,
+  };
 }
 
 // Rough Kalshi 15m crypto liquidity preference (higher = usually tighter books).
@@ -398,7 +561,7 @@ const MODEL_MIN_TP_CENTS_DEFAULT = 10;
 /** Arm momentum run once this many ¢ green; then hold until stall. */
 const MODEL_BANK_GREEN_CENTS_DEFAULT = 10;
 /** Start trailing / allow stall-TP once at least this many ¢ green (don't wait for +7). */
-const MODEL_TRAIL_ARM_CENTS_DEFAULT = 3;
+const MODEL_TRAIL_ARM_CENTS_DEFAULT = 5;
 /** Held bid at/above this → bank immediately (don't sit 96→100). */
 const MODEL_RICH_BANK_CENTS_DEFAULT = 96;
 /** Still red after this long, even if lean is with us → only stop if pace → ≤50. */
@@ -1258,7 +1421,7 @@ const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
 const MODEL_PERFECT_LEAN_DEFAULT = 15;
 /** Model confidence floor default. */
-const MODEL_MIN_CONFIDENCE_DEFAULT = 44;
+const MODEL_MIN_CONFIDENCE_DEFAULT = 58;
 /** Trail off peak — unused by simplified Model exits (kept for config compat). */
 const MODEL_TRAIL_CENTS_DEFAULT = 0;
 /** Soft lean margin — treat 52/48 as turning (bank before the dump). */
@@ -2359,6 +2522,11 @@ const EDITABLE_STRING_FIELDS = {
     const list = resolveAutoTradeSymbols({ autoTradeSymbols: v });
     return list.length ? list.join(',') : DEFAULT_AUTO_TRADE_SYMBOLS.join(',');
   },
+  activeSetupId: (v) => {
+    const s = String(v || '').toLowerCase();
+    if (!s) return null;
+    return MODEL_SETUPS.some((x) => x.id === s) ? s : null;
+  },
   modelInvertSide: (v) => parseOnOffField(v, false),
   skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
@@ -2648,12 +2816,13 @@ class TradingBot {
       // Settle NEAR only: risk half stake (thinner book / choppier). Other coins full size.
       halfStakeNear: 'on',
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
-      maxOpenPositions: 3, // MODEL scalp loop: several coins correlating at once
+      maxOpenPositions: 2, // Core: 2 coins — correlated dumps were stacking at 3
       // With ≥1 open: only allow another if an existing hold is green (bid ≥ entry).
       // Model ignores this — windows + confirm gate decide.
       secondOpenRequiresGreen: 'on',
       // AUTO universe — which coins may open (default BTC/BNB/SOL). Editable in settings.
       autoTradeSymbols: DEFAULT_AUTO_TRADE_SYMBOLS.join(','),
+      activeSetupId: 'core',
       // Legacy opt-in flags (kept in sync from autoTradeSymbols when saved).
       tradeDoge: 'off',
       tradeNear: 'off',
@@ -2835,6 +3004,31 @@ class TradingBot {
     }
     saveConfigOverrides(collectConfigOverrides(this.config));
     return { applied, config: this.config };
+  }
+
+  applyModelSetup(setupId) {
+    const setup = modelSetupById(setupId);
+    if (!setup) return { ok: false, message: `Unknown setup '${setupId}'.` };
+    const result = this.updateConfig(modelSetupConfigPatch(setup));
+    this.lastDecision = `Applied MODEL setup “${setup.label}” (${setup.autoTradeSymbols}, conf ${setup.modelMinConfidence}%, TP +${setup.modelBankGreenCents}¢, max ${setup.maxOpenPositions}).`;
+    this._logActivity(this.lastDecision, { kind: 'settings' });
+    this._persist();
+    return {
+      ok: true,
+      setup,
+      ...result,
+      message: this.lastDecision,
+      setups: this._modelSetupScoreboard(),
+    };
+  }
+
+  _modelSetupScoreboard() {
+    const log = loadTradeLog();
+    const active = String(this.config.activeSetupId || 'core');
+    return scoreModelSetupsAgainstLog(log).map((row) => ({
+      ...row,
+      active: row.id === active,
+    }));
   }
 
   /**
@@ -7780,6 +7974,7 @@ class TradingBot {
       tradeLog: permanentLog.slice(0, 50),
       tradeLogTotal: permanentLog.length,
       hourlyPnl,
+      modelSetups: this._modelSetupScoreboard(),
       settleWindowRec,
       stats: {
         totalAttempts: this.ledger.trades.length, // current period open + closed
@@ -7814,7 +8009,11 @@ module.exports = {
   DISABLED_TRADE_SYMBOLS,
   OPTIONAL_TRADE_SYMBOLS,
   DEFAULT_AUTO_TRADE_SYMBOLS,
+  MODEL_SETUPS,
   resolveAutoTradeSymbols,
+  scoreModelSetupsAgainstLog,
+  modelSetupById,
+  modelSetupConfigPatch,
   isKalshiTradeEnabled,
   tradeableKalshiSymbols,
   liquidityPriority,

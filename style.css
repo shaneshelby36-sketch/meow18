@@ -1101,6 +1101,51 @@ body[data-view-mode="bot"] .asset-picker {
 .auto-coin-chip input {
   margin: 0;
 }
+.model-setups {
+  grid-column: 1 / -1;
+}
+.model-setups-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+@media (min-width: 720px) {
+  .model-setups-list {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+.model-setup-card {
+  appearance: none;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  padding: 10px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+.model-setup-card.active {
+  border-color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.07);
+}
+.model-setup-card:hover {
+  border-color: var(--text-dim);
+}
+.model-setup-card .setup-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+}
+.model-setup-card .setup-why,
+.model-setup-card .setup-score {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+.model-setup-card .setup-score.pos { color: var(--up); }
+.model-setup-card .setup-score.neg { color: var(--down); }
 .bot-field-grid label, .backtest-controls label {
   display: flex;
   flex-direction: column;

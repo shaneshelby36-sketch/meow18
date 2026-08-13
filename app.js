@@ -785,6 +785,7 @@ async function refreshBotStatus() {
     restoreLogScroll('bot-trade-log-list', tradeScroll, 'top');
     bindActivityLogUi();
     bindTradeLogUi();
+    renderModelSetups(data.modelSetups);
     renderBotDashboard(data);
   } catch (err) {
     modeLine.textContent = 'Could not reach the engine to check bot status.';
@@ -870,6 +871,7 @@ function renderBotDashboard(data) {
   if (overlayToggle) overlayToggle.textContent = toggle.textContent;
   bindTradeLogUi();
   bindActivityLogUi();
+  renderModelSetups(data.modelSetups);
 }
 
 async function setBotRunning(running) {
@@ -1465,6 +1467,83 @@ function strategyModeLabel(mode) {
   return 'Edge';
 }
 
+function formatSetupScore(score) {
+  if (!score || !score.trades) return 'no matching fills yet';
+  const pnl = Number(score.pnlCents) || 0;
+  const dollars = `${pnl >= 0 ? '+' : '−'}$${(Math.abs(pnl) / 100).toFixed(2)}`;
+  const wr = score.winRatePct != null ? `${score.winRatePct}% WR` : '';
+  const worst = score.worstCents < 0 ? ` · worst −$${(Math.abs(score.worstCents) / 100).toFixed(2)}` : '';
+  return `${dollars} · ${score.trades} fills · ${wr}${worst}`.replace(/ · $/, '');
+}
+
+function renderModelSetups(setups) {
+  const list = document.getElementById('bot-model-setups-list');
+  if (!list) return;
+  const rows = Array.isArray(setups) ? setups.filter((s) => s.id !== 'all-logged' || (s.score && s.score.trades)) : [];
+  if (!rows.length) {
+    list.innerHTML = '<p class="settings-hint">Setups load with bot status.</p>';
+    return;
+  }
+  list.innerHTML = rows
+    .map((s) => {
+      const score = s.score || {};
+      const pnl = Number(score.pnlCents) || 0;
+      const tone = score.trades ? (pnl > 0 ? 'pos' : pnl < 0 ? 'neg' : '') : '';
+      const rec = s.recommended ? ' · recommended' : '';
+      const active = s.active ? ' active' : '';
+      const coins = escapeHtml(s.autoTradeSymbols || '');
+      return `<button type="button" class="model-setup-card${active}" data-setup-id="${escapeHtml(s.id)}">
+        <span class="setup-label"><span>${escapeHtml(s.label)}${s.active ? ' · on' : ''}</span><span>${coins}</span></span>
+        <span class="setup-why">${escapeHtml(s.why || '')}${rec}</span>
+        <span class="setup-score ${tone}">${escapeHtml(formatSetupScore(score))}</span>
+      </button>`;
+    })
+    .join('');
+  list.querySelectorAll('[data-setup-id]').forEach((btn) => {
+    btn.addEventListener('click', () => applyModelSetup(btn.dataset.setupId));
+  });
+}
+
+async function applyModelSetup(setupId) {
+  if (!setupId || setupId === 'all-logged') return;
+  if (isBotSettingsLocked()) {
+    const feedback = document.getElementById('bot-settings-feedback');
+    if (feedback) {
+      feedback.textContent = 'Unlock settings first, then tap a setup.';
+      feedback.style.color = 'var(--wait)';
+    }
+    return;
+  }
+  const { engineUrl } = loadSettings();
+  const feedback = document.getElementById('bot-settings-feedback');
+  try {
+    const res = await fetch(`${engineUrl}/api/bot/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ setupId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      if (feedback) {
+        feedback.textContent = data.message || `Could not apply setup (${res.status}).`;
+        feedback.style.color = 'var(--down)';
+      }
+      return;
+    }
+    if (feedback) {
+      feedback.textContent = data.message || 'Setup applied.';
+      feedback.style.color = 'var(--up)';
+    }
+    renderModelSetups(data.setups);
+    await loadBotConfigIntoForm();
+  } catch (err) {
+    if (feedback) {
+      feedback.textContent = err.message || 'Could not apply setup.';
+      feedback.style.color = 'var(--down)';
+    }
+  }
+}
+
 function setBotStrategyTab(mode) {
   const raw = String(mode || '').toLowerCase();
   const strategy = raw === 'settle' || raw === 'model' ? raw : 'edge';
@@ -1787,7 +1866,7 @@ async function loadBotConfigIntoForm() {
       modelInvert.value = on ? 'on' : 'off';
     }
     const modelConf = document.getElementById('bot-model-confidence');
-    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 44;
+    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 58;
     const modelLiveFavor = document.getElementById('bot-model-live-favor');
     if (modelLiveFavor) {
       modelLiveFavor.value =
@@ -2043,7 +2122,7 @@ async function saveBotConfig(opts = {}) {
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     modelInvertSide: document.getElementById('bot-model-invert')?.value || 'off',
-    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '44'),
+    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '58'),
     modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '4'),
     modelConfirmCrossCents: parseFloat(document.getElementById('bot-model-confirm-cross')?.value || '0'),
     modelConfirmMaxExtensionCents: parseFloat(

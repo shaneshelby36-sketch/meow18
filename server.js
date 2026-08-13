@@ -93,7 +93,7 @@ const bot = KALSHI_ENABLED
         takeProfitCents: parseInt(process.env.KALSHI_TAKE_PROFIT_CENTS || '15', 10),
         minEntryCents: parseInt(process.env.KALSHI_MIN_ENTRY_CENTS || '40', 10),
         minMinutesToOpen: parseFloat(process.env.KALSHI_MIN_MINUTES_TO_OPEN || '3'),
-        modelMinConfidence: parseFloat(process.env.KALSHI_MODEL_MIN_CONFIDENCE || '44'),
+        modelMinConfidence: parseFloat(process.env.KALSHI_MODEL_MIN_CONFIDENCE || '58'),
         stopRecoveryCents: parseInt(process.env.KALSHI_STOP_RECOVERY_CENTS || '6', 10),
         stopRecoveryMaxMinutes: parseFloat(process.env.KALSHI_STOP_RECOVERY_MAX_MINUTES || '15'),
         peerCascadeMaxMinutes: parseFloat(process.env.KALSHI_PEER_CASCADE_MAX_MINUTES || '3'),
@@ -532,6 +532,20 @@ app.get("/", (req, res) => {
       return;
     }
     const result = bot.updateConfig(req.body || {});
+    res.json({ ...result, settleExitTiers: settleExitTiersForDashboard() });
+  });
+
+  app.post('/api/bot/setup', (req, res) => {
+    if (!bot) {
+      res.status(404).json({ enabled: false, message: 'Bot is not enabled (set KALSHI_ENABLED=true).' });
+      return;
+    }
+    const id = req.body && req.body.setupId;
+    const result = bot.applyModelSetup(id);
+    if (!result.ok) {
+      res.status(400).json(result);
+      return;
+    }
     res.json({ ...result, settleExitTiers: settleExitTiersForDashboard() });
   });
 
