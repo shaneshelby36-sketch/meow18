@@ -427,7 +427,11 @@ function buildPredictions(data, kalshiTargets = {}, accumulatorManager = null) {
 
     const windows = {};
     for (const w of WINDOWS) {
-      const accumulator = accumulatorManager ? accumulatorManager.get(symbol, w.key) : null;
+      const sessionKey =
+        (kalshiTarget && kalshiTarget.ticker) ||
+        (kalshiTarget && kalshiTarget.closeTime) ||
+        null;
+      const accumulator = accumulatorManager ? accumulatorManager.get(symbol, w.key, sessionKey) : null;
       windows[w.key] = buildWindowPrediction(w, ind, otherInd, crossCorrelation, targetPrice, symbol, accumulator, now);
     }
 

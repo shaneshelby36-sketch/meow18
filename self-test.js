@@ -133,7 +133,7 @@ function mockClient(market, { failGet = false, openMarkets } = {}) {
 function makeBot(client, config = {}) {
   // Wipe persisted overrides so earlier updateConfig calls cannot leak into
   // later cases (same DATA_DIR for the whole suite).
-  for (const name of ['bot-config.json', 'bot-mode-state.json', 'bot-run-state.json']) {
+  for (const name of ['bot-config.json', 'bot-mode-state.json', 'bot-run-state.json', 'shadow-books.json']) {
     try {
       fs.unlinkSync(dataPath(name));
     } catch {
@@ -158,6 +158,7 @@ function makeBot(client, config = {}) {
       paperStartingBalanceDollars: 100,
       stakingStrategy: 'fixed',
       symbol: 'ETH',
+      autoTradeSymbols: 'BTC,ETH,SOL,XRP,DOGE,BNB,NEAR,HYPE',
       ...config,
     },
   });
@@ -165,7 +166,8 @@ function makeBot(client, config = {}) {
   Object.assign(bot.config, {
     mode: config.mode || 'paper',
     liveAuthorized: config.liveAuthorized === true,
-    strategyMode: config.strategyMode ?? bot.config.strategyMode,
+    // Suite defaults to Edge unless a case opts into settle/model.
+    strategyMode: config.strategyMode ?? 'edge',
     edgeThresholdPct: config.edgeThresholdPct ?? 8,
     minConfidence: config.minConfidence ?? 55,
     stopLossCents: config.stopLossCents ?? 23,
@@ -187,6 +189,10 @@ function makeBot(client, config = {}) {
     paperStartingBalanceDollars: config.paperStartingBalanceDollars ?? 100,
     stakingStrategy: config.stakingStrategy ?? 'fixed',
     symbol: config.symbol ?? 'ETH',
+    autoTradeSymbols: config.autoTradeSymbols ?? 'BTC,ETH,SOL,XRP,DOGE,BNB,NEAR,HYPE',
+    // Off unless a case opts in — 10-minute-old openTrade fixtures would otherwise BE-stop.
+    edgeBreakevenAfterMinutes:
+      config.edgeBreakevenAfterMinutes != null ? config.edgeBreakevenAfterMinutes : 0,
     // Suite opens multi-slot positions without greening the first hold unless a case opts in.
     secondOpenRequiresGreen: config.secondOpenRequiresGreen ?? 'off',
   });
@@ -384,6 +390,11 @@ function testSignalAccumulator() {
   const mgr = new SignalAccumulatorManager({ w5: 1000, w10: 2000 });
   check(mgr.get('BTC', 'w5') === mgr.get('BTC', 'w5'), 'manager reuses accumulator');
   check(mgr.get('BTC', 'w5') !== mgr.get('ETH', 'w5'), 'manager isolates symbols');
+  const sessionA = mgr.get('BTC', 'w5', 'TICK-1');
+  sessionA.update([2], 1_000_000);
+  const sessionB = mgr.get('BTC', 'w5', 'TICK-2');
+  check(sessionA !== sessionB, 'new Kalshi session gets a fresh accumulator');
+  checkEq(sessionB.upScore, 0, 'new session bars start at 0 (aligned to new strike)');
 }
 
 // ───────────────────────────── tracker ─────────────────────────────
@@ -433,6 +444,50 @@ function testTracker() {
     now: closeTime + 1000,
   });
   checkEq(next.w5.tracking.baselinePrice, 105, 'new cycle baseline');
+
+  // 24h roll keeps yesterday's probability beside today — does not wipe history.
+  {
+    const { ROTATION_PERIOD_MS } = require('./tracker');
+    const roll = new PredictionTracker();
+    roll.cycles = new Map();
+    roll.history = new Map();
+    const t0 = Date.now();
+    roll.periodStartTime = t0;
+    const yWin = {
+      w5: { probabilityUp: 70, probabilityDown: 30 },
+      w10: { probabilityUp: 60, probabilityDown: 40 },
+      w15: { probabilityUp: 55, probabilityDown: 45 },
+    };
+    const yClose = t0 + 15 * 60 * 1000;
+    roll.update('BTC', {
+      ticker: 'YDAY',
+      targetPrice: 100,
+      closeTime: yClose,
+      currentPrice: 100,
+      windows: yWin,
+      now: t0,
+    });
+    roll.update('BTC', {
+      ticker: 'YDAY',
+      targetPrice: 100,
+      closeTime: yClose,
+      currentPrice: 101,
+      windows: yWin,
+      now: t0 + 5 * 60 * 1000 + 1000,
+    });
+    check(roll.history.get('BTC').w5.length >= 1, 'yesterday sample stored');
+    const afterRoll = roll.update('BTC', {
+      ticker: 'TODAY',
+      targetPrice: 110,
+      closeTime: t0 + ROTATION_PERIOD_MS + 15 * 60 * 1000,
+      currentPrice: 110,
+      windows: yWin,
+      now: t0 + ROTATION_PERIOD_MS + 1000,
+    });
+    checkEq(afterRoll.w5.accuracy.sampleSize, 0, 'today track record starts empty after 24h');
+    check(afterRoll.w5.accuracy.previous && afterRoll.w5.accuracy.previous.sampleSize >= 1, 'yesterday probability kept beside today');
+    check(roll.history.get('BTC').w5.length >= 1, 'history not wiped on 24h roll');
+  }
 }
 
 // ───────────────────────────── prediction ─────────────────────────────
@@ -1390,7 +1445,7 @@ async function testBotExits() {
         yes_bid: 40,
         no_bid: 55,
       }),
-      { minConfidence: 80, stopLossCents: 40, takeProfitCents: 40 }
+      { minConfidence: 80, stopLossCents: 40, takeProfitCents: 40, edgePreCloseSmallLossCents: 0 }
     );
     const trade = openTrade(bot, {
       side: 'no',
@@ -1478,7 +1533,7 @@ async function testBotExits() {
         yes_bid: 20,
         no_bid: 80,
       }),
-      { stopLossCents: 40, takeProfitCents: 15, minConfidence: 55 }
+      { stopLossCents: 40, takeProfitCents: 15, minConfidence: 55, edgePreCloseSmallLossCents: 0 }
     );
     const trade = openTrade(bot, {
       side: 'no',
@@ -3242,13 +3297,13 @@ async function testBotTradingFlow() {
       5,
       '3rd + NEAR at 88 still half'
     );
-    halfBot.openTrades = [
-      { symbol: 'BTC', settleTouched90: true },
-      { symbol: 'ETH', settleTouched90: false },
+    halfBot.ledger.trades = [
+      { status: 'open', symbol: 'BTC', settleTouched90: true },
+      { status: 'open', symbol: 'ETH', settleTouched90: false },
     ];
     halfBot.config.maxOpenPositions = 2;
     checkEq(halfBot._effectiveMaxOpenPositions(), 3, 'touched 90 soft-caps to 3');
-    halfBot.openTrades = [{ symbol: 'BTC', settleTouched90: false }];
+    halfBot.ledger.trades = [{ status: 'open', symbol: 'BTC', settleTouched90: false }];
     checkEq(halfBot._effectiveMaxOpenPositions(), 2, 'without touched 90 stay at maxOpen');
   }
 
@@ -7265,6 +7320,152 @@ async function testModelStrategy() {
     };
     await bot._manageOpenTrade(trade, mid);
     checkEq(trade.exitReason, 'model_lean_stop', 'w10 locked DOWN stops underwater YES');
+  }
+
+  // Reentrant lock: shadow cycle holds the lock, then _openPosition takes it again.
+  {
+    const bot = makeBot(mockClient({ status: 'open' }), { strategyMode: 'model' });
+    let innerRan = false;
+    await bot._withTradeLock(async () => {
+      await bot._withTradeLock(async () => {
+        innerRan = true;
+      });
+    });
+    check(innerRan, 'trade lock is reentrant (shadow + openPosition)');
+  }
+
+  // Shadow books: Core trades live; Majors (+ETH) simulates on the same quotes.
+  {
+    const close = new Date(Date.now() + 12 * 60 * 1000).toISOString();
+    const mk = (symbol, yesAsk = 65, yesBid = 63) => ({
+      ticker: `KX${symbol}15M-SH`,
+      status: 'open',
+      floor_strike: 1000,
+      close_time: close,
+      yes_bid: yesBid,
+      yes_ask: yesAsk,
+      no_bid: 100 - yesAsk,
+      no_ask: 100 - yesBid,
+    });
+    const books = {
+      BTC: mk('BTC'),
+      ETH: mk('ETH'),
+      SOL: mk('SOL'),
+      BNB: mk('BNB'),
+      XRP: mk('XRP'),
+      DOGE: mk('DOGE'),
+      NEAR: mk('NEAR'),
+      HYPE: mk('HYPE'),
+    };
+    let createCalls = 0;
+    const client = {
+      hasCredentials: false,
+      async getOpenMarkets(series) {
+        const s = String(series || '').toUpperCase();
+        for (const [sym, m] of Object.entries(books)) {
+          if (s.includes(sym)) return [m];
+        }
+        return [];
+      },
+      async getMarket(ticker) {
+        return Object.values(books).find((m) => m.ticker === ticker) || null;
+      },
+      async createOrder() {
+        createCalls += 1;
+        throw new Error('createOrder must not be called for shadow or paper');
+      },
+      async getBalance() {
+        return { balance: 0, portfolio_value: 0 };
+      },
+    };
+    const strong = (price) => ({
+      ready: true,
+      price,
+      windows: {
+        w5: { ...win(78, 82), tracking: { predictedDirection: 'UP' } },
+        w10: win(72, 76),
+        w15: win(68, 72),
+      },
+    });
+    const preds = {
+      BTC: strong(60100),
+      ETH: strong(3010),
+      SOL: strong(150),
+      BNB: strong(600),
+    };
+    const bot = makeBot(client, {
+      strategyMode: 'model',
+      symbol: 'AUTO',
+      activeSetupId: 'core',
+      autoTradeSymbols: 'BTC,BNB,SOL',
+      modelMinConfidence: 58,
+      modelConfirmCrossCents: 0,
+      maxOpenPositions: 2,
+      modelMinHoldSeconds: 0,
+    });
+    const liveDecisionBefore = bot.lastDecision;
+    const cycle = bot.runCycle(preds);
+    const hung = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('runCycle hung (likely nested trade lock)')), 8000);
+    });
+    await Promise.race([cycle, hung]);
+    checkEq(createCalls, 0, 'shadow/paper never calls createOrder');
+    const liveSyms = bot.openTrades.map((t) => t.symbol).sort();
+    check(!liveSyms.includes('ETH'), 'live Core book does not open ETH');
+    check(liveSyms.includes('BTC'), 'live Core opens BTC');
+    checkEq(
+      bot.openTrades.every((t) => !t.shadow),
+      true,
+      'live fills are not tagged shadow'
+    );
+    const majors = bot._shadowBooks && bot._shadowBooks.majors;
+    const majorsOpen = ((majors && majors.ledger && majors.ledger.trades) || []).filter(
+      (t) => t && t.status === 'open'
+    );
+    const majorsSyms = majorsOpen.map((t) => t.symbol).sort();
+    check(majorsOpen.length >= 1, 'majors shadow opened at least one ticket');
+    check(majorsSyms.includes('ETH'), 'majors shadow (+ETH) opens ETH while Core is live');
+    check(
+      majorsOpen.every((t) => t.shadow === true && t.mode === 'paper'),
+      'shadow fills are paper + tagged'
+    );
+    const tight = bot._shadowBooks && bot._shadowBooks.tight;
+    const tightOpen = ((tight && tight.ledger && tight.ledger.trades) || []).filter(
+      (t) => t && t.status === 'open'
+    );
+    check(tightOpen.length <= 1, 'tight shadow respects maxOpen 1');
+    check(
+      !bot.openTrades.some((t) => t.symbol === 'ETH'),
+      'ETH did not leak into the live ledger'
+    );
+    let tradeLogHasShadow = false;
+    try {
+      const raw = JSON.parse(fs.readFileSync(dataPath('trade-log.json'), 'utf8'));
+      const rows = Array.isArray(raw) ? raw : raw.trades || [];
+      tradeLogHasShadow = rows.some((t) => t && t.shadow);
+    } catch {
+      tradeLogHasShadow = false;
+    }
+    checkEq(tradeLogHasShadow, false, 'shadow fills stay off the permanent trade log');
+    check(bot.lastDecision !== liveDecisionBefore, 'live lastDecision still updates');
+    check(!/shadow/i.test(String(bot.lastDecision || '')), 'live decision is not a shadow message');
+
+    const board = bot._modelSetupScoreboard();
+    const coreRow = board.find((r) => r.id === 'core');
+    const majorsRow = board.find((r) => r.id === 'majors');
+    check(coreRow && coreRow.active && coreRow.shadow == null, 'scoreboard marks Core live (no shadow line)');
+    check(majorsRow && !majorsRow.active && majorsRow.shadow, 'scoreboard exposes majors shadow stats');
+    checkEq(majorsRow.shadow.openCount, majorsOpen.length, 'scoreboard open count matches majors book');
+    check(
+      majorsRow.shadow.paperAvailableCents != null && majorsRow.shadow.paperAvailableCents >= 0,
+      'majors shadow reports available remaining'
+    );
+    const hitsRow = board.find((r) => r.id === 'hits');
+    const holdRow = board.find((r) => r.id === 'hold');
+    const cut6Row = board.find((r) => r.id === 'cut6');
+    check(hitsRow && hitsRow.shadow && hitsRow.shadow.paperAvailableCents != null, 'hits shadow reports remaining cash');
+    check(holdRow && holdRow.shadow && holdRow.shadow.paperAvailableCents != null, 'hold shadow reports remaining cash');
+    check(cut6Row && cut6Row.shadow && cut6Row.shadow.paperAvailableCents != null, 'cut6 shadow reports remaining cash');
   }
 }
 

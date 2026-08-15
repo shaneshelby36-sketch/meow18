@@ -6,14 +6,15 @@ const { dataPath, ensureDataDir, pruneArchiveFiles } = require('./paths');
 
 ensureDataDir();
 
-const MAX_HISTORY = 40;
+const MAX_HISTORY = 250; // ~2.5 days of 15m checkpoints per window
 const CHECKPOINTS = [
   { key: 'w5', minutes: 5 },
   { key: 'w10', minutes: 10 },
   { key: 'w15', minutes: 15 },
 ];
+const WINDOW_KEYS = CHECKPOINTS.map((c) => c.key);
 
-const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
+const ROTATION_PERIOD_MS = 24 * 60 * 60 * 1000; // 24 hours — keep yesterday beside today
 const PERIOD_STATE_PATH = dataPath('tracker-period-start.json');
 const ARCHIVE_DIR = dataPath('archive');
 const CALIBRATION_PATH = dataPath('calibration.json');
@@ -48,12 +49,13 @@ function saveCalibration(calibration) {
 function loadPeriodStart() {
   try {
     if (fs.existsSync(PERIOD_STATE_PATH)) {
-      return JSON.parse(fs.readFileSync(PERIOD_STATE_PATH, 'utf8')).periodStartTime;
+      const n = Number(JSON.parse(fs.readFileSync(PERIOD_STATE_PATH, 'utf8')).periodStartTime);
+      if (Number.isFinite(n) && n > 0) return n;
     }
   } catch {
-    // fall through to a fresh period
+    // fall through — infer from history so a missing file doesn't zero today
   }
-  return Date.now();
+  return null;
 }
 
 function savePeriodStart(periodStartTime) {
@@ -63,6 +65,28 @@ function savePeriodStart(periodStartTime) {
   } catch (err) {
     console.error('[tracker] failed to persist period start:', err.message);
   }
+}
+
+function emptyWindowBags() {
+  return { w5: [], w10: [], w15: [] };
+}
+
+function summarizeWindowRows(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const sampleSize = list.length;
+  const correctCount = list.filter((h) => h && h.correct).length;
+  return {
+    sampleSize,
+    correctCount,
+    accuracyPct: sampleSize ? +((correctCount / sampleSize) * 100).toFixed(1) : null,
+  };
+}
+
+function rowsInRange(rows, fromMs, toMs) {
+  return (Array.isArray(rows) ? rows : []).filter((h) => {
+    const t = Number(h && h.windowOpenTime);
+    return Number.isFinite(t) && t >= fromMs && t < toMs;
+  });
 }
 
 function loadHistory() {
@@ -108,11 +132,10 @@ function saveHistory(history) {
  * for the 10-15 min checkpoint is always identical to the real Kalshi
  * window's own close time.
  *
- * Every 12 hours, the accumulated accuracy HISTORY (not any in-progress
- * cycle) is archived to data/archive/tracker-<period>.json and reset, so
- * the accuracy/track-record numbers reflect a rolling recent period rather
- * than growing indefinitely — while the prior 12 hours stays available in
- * the archive file rather than being lost.
+ * Every 24 hours the track-record display rolls: today starts at 0 again
+ * and yesterday's probability stays beside it. History is archived, not
+ * wiped — a restart / missing period file must not randomly zero the
+ * counters. Rows older than two periods are pruned.
  * Also maintains probability-bucketed calibration stats (e.g. "when we
  * called 70-79% confidence, how often were we actually right?") — this
  * accumulates FOREVER, deliberately never reset or rotated, per the intent
@@ -125,7 +148,16 @@ class PredictionTracker {
   constructor() {
     this.cycles = new Map(); // symbol -> current cycle
     this.history = loadHistory(); // symbol -> { w5: [...], w10: [...], w15: [...] }, persisted to disk
-    this.periodStartTime = loadPeriodStart();
+    const loadedStart = loadPeriodStart();
+    const hasHistory = [...this.history.values()].some(
+      (w) => (w.w5 && w.w5.length) || (w.w10 && w.w10.length) || (w.w15 && w.w15.length)
+    );
+    this.periodStartTime = Number.isFinite(loadedStart)
+      ? loadedStart
+      : hasHistory
+        ? Date.now() - ROTATION_PERIOD_MS
+        : Date.now();
+    if (!Number.isFinite(loadedStart)) savePeriodStart(this.periodStartTime);
     this.calibration = loadCalibration(); // symbol -> window -> bucketLabel -> { trades, wins } — never rotated
   }
 
@@ -137,29 +169,65 @@ class PredictionTracker {
   }
 
   _maybeRotate(now) {
-    if (now - this.periodStartTime < ROTATION_PERIOD_MS) return;
+    let start = Number(this.periodStartTime) || now - ROTATION_PERIOD_MS;
+    if (now - start < ROTATION_PERIOD_MS) return;
 
-    try {
-      fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
-      const archive = {
-        periodStart: new Date(this.periodStartTime).toISOString(),
-        periodEnd: new Date(now).toISOString(),
-        history: Object.fromEntries(this.history.entries()),
-      };
-      const fileName = `tracker-${new Date(this.periodStartTime).toISOString().replace(/[:.]/g, '-')}.json`;
-      fs.writeFileSync(path.join(ARCHIVE_DIR, fileName), JSON.stringify(archive, null, 2));
-      console.log(`[tracker] archived the last 12h of accuracy history to data/archive/${fileName}`);
-      pruneArchiveFiles({ now });
-    } catch (err) {
-      console.error('[tracker] failed to archive history before rotation:', err.message);
+    while (now - start >= ROTATION_PERIOD_MS) {
+      const periodEnd = start + ROTATION_PERIOD_MS;
+      try {
+        fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+        const slice = {};
+        for (const [symbol, windows] of this.history.entries()) {
+          slice[symbol] = emptyWindowBags();
+          for (const key of WINDOW_KEYS) {
+            slice[symbol][key] = rowsInRange(windows[key], start, periodEnd);
+          }
+        }
+        const archive = {
+          periodStart: new Date(start).toISOString(),
+          periodEnd: new Date(periodEnd).toISOString(),
+          history: slice,
+        };
+        const fileName = `tracker-${new Date(start).toISOString().replace(/[:.]/g, '-')}.json`;
+        fs.writeFileSync(path.join(ARCHIVE_DIR, fileName), JSON.stringify(archive, null, 2));
+        console.log(`[tracker] archived 24h accuracy history to data/archive/${fileName}`);
+        pruneArchiveFiles({ now });
+      } catch (err) {
+        console.error('[tracker] failed to archive history before rotation:', err.message);
+      }
+      start = periodEnd;
     }
 
-    this.history = new Map(); // fresh accuracy stats for the new period
-    this.periodStartTime = now;
-    savePeriodStart(now);
+    this.periodStartTime = start;
+    savePeriodStart(start);
+    this._pruneOldHistory(start - ROTATION_PERIOD_MS);
     saveHistory(this.history);
-    // Deliberately NOT touching this.cycles here — an in-progress Kalshi
-    // window keeps tracking normally straight through a rotation boundary.
+    // In-progress Kalshi windows keep tracking through the 24h boundary.
+  }
+
+  _pruneOldHistory(cutoffMs) {
+    const cut = Number(cutoffMs);
+    if (!Number.isFinite(cut)) return;
+    for (const [symbol, windows] of this.history.entries()) {
+      for (const key of WINDOW_KEYS) {
+        const rows = Array.isArray(windows[key]) ? windows[key] : [];
+        windows[key] = rows.filter((h) => Number(h && h.windowOpenTime) >= cut);
+      }
+      this.history.set(symbol, windows);
+    }
+  }
+
+  _accuracyFor(histRows, periodStart) {
+    const todayEnd = periodStart + ROTATION_PERIOD_MS;
+    const today = summarizeWindowRows(rowsInRange(histRows, periodStart, todayEnd));
+    const previous = summarizeWindowRows(
+      rowsInRange(histRows, periodStart - ROTATION_PERIOD_MS, periodStart)
+    );
+    return {
+      ...today,
+      previous: previous.sampleSize > 0 ? previous : null,
+      periodHours: 24,
+    };
   }
 
   /**
@@ -245,8 +313,6 @@ class PredictionTracker {
       }
 
       const secondsRemaining = Math.max(0, Math.round((checkpointTime - now) / 1000));
-      const resolvedCount = hist[key].length;
-      const correctCount = hist[key].filter((h) => h.correct).length;
 
       result[key] = {
         tracking: {
@@ -257,11 +323,7 @@ class PredictionTracker {
           predictedDirection: cycle.predictedDirection[key],
         },
         lastResult: hist[key][0] || null,
-        accuracy: {
-          sampleSize: resolvedCount,
-          correctCount,
-          accuracyPct: resolvedCount ? +((correctCount / resolvedCount) * 100).toFixed(1) : null,
-        },
+        accuracy: this._accuracyFor(hist[key], this.periodStartTime),
         history: hist[key].slice(0, 10),
       };
     }
@@ -295,4 +357,4 @@ class PredictionTracker {
   }
 }
 
-module.exports = { PredictionTracker };
+module.exports = { PredictionTracker, ROTATION_PERIOD_MS };

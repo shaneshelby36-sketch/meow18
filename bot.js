@@ -11,6 +11,7 @@ pruneArchiveFiles();
 
 const LEDGER_PATH = dataPath('bot-ledger.json');
 const TRADE_LOG_PATH = dataPath('trade-log.json');
+const SHADOW_BOOKS_PATH = dataPath('shadow-books.json');
 const CONFIG_PATH = dataPath('bot-config.json');
 const CALIBRATION_PATH = dataPath('calibration.json');
 const MODE_STATE_PATH = dataPath('bot-mode-state.json');
@@ -166,7 +167,8 @@ function tradeableKalshiSymbols(config = null) {
 
 /**
  * Named MODEL paper setups. Apply one from the dashboard instead of guessing knobs.
- * Scoreboard is a what-if on saved fills (filter coins + min conf) — not a replay.
+ * The active setup is the live book; the others run as silent shadow paper books
+ * on the same quotes. Scoreboard also shows a what-if on saved fills (not a replay).
  */
 const MODEL_SETUPS = [
   {
@@ -199,7 +201,7 @@ const MODEL_SETUPS = [
   {
     id: 'tight',
     label: 'Tight (fewer, cleaner)',
-    why: 'Higher conf + one slot. Fewer trades, smaller chance of stacked red.',
+    why: 'Higher conf + one slot + faster dump cut. Fewer trades, smaller chance of stacked red.',
     autoTradeSymbols: 'BTC,BNB,SOL',
     modelMinConfidence: 66,
     modelEntryLiveLeanMarginPct: 5,
@@ -208,6 +210,9 @@ const MODEL_SETUPS = [
     maxOpenPositions: 1,
     modelConfirmCrossCents: 0,
     modelMaxLossCents: 8,
+    modelDumpPullbackCents: 2,
+    modelFastRedCents: 2,
+    modelMinEntryCents: 62,
   },
   {
     id: 'majors',
@@ -224,16 +229,48 @@ const MODEL_SETUPS = [
   },
   {
     id: 'hits',
-    label: 'More hits',
-    why: 'Lower conf, 3 slots. More scratches — only if Core is too quiet and you’re okay with more reds.',
+    label: 'More hits (~55% WR neighborhood)',
+    why: 'Conf 55 — closest to the two-day ~55% WR tape. 3 slots, slightly easier live favor. Compare remaining cash vs Core.',
     autoTradeSymbols: 'BTC,BNB,SOL',
-    modelMinConfidence: 52,
+    modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
     modelBankGreenCents: 8,
     modelMinTpCents: 8,
     maxOpenPositions: 3,
     modelConfirmCrossCents: 0,
     modelMaxLossCents: 8,
+    modelFastRedCents: 2,
+  },
+  {
+    id: 'cut6',
+    label: 'Cut losers at 6¢',
+    why: 'Same Core coins/conf, tighter max loss (6¢ vs 8¢) and dump cut. Tests whether scratches stay small enough for the skim to win.',
+    autoTradeSymbols: 'BTC,BNB,SOL',
+    modelMinConfidence: 58,
+    modelEntryLiveLeanMarginPct: 4,
+    modelBankGreenCents: 10,
+    modelMinTpCents: 10,
+    maxOpenPositions: 2,
+    modelConfirmCrossCents: 0,
+    modelMaxLossCents: 6,
+    modelDumpPullbackCents: 2,
+    modelFastRedCents: 2,
+    modelLeanStopBarrierCents: 50,
+  },
+  {
+    id: 'hold',
+    label: 'Hold small red (dump 5 / fast-red 5)',
+    why: 'Core coins/conf, but slower scratches. Tests if the ~55% WR run was from holding −2–4¢ instead of cutting.',
+    autoTradeSymbols: 'BTC,BNB,SOL',
+    modelMinConfidence: 58,
+    modelEntryLiveLeanMarginPct: 4,
+    modelBankGreenCents: 10,
+    modelMinTpCents: 10,
+    maxOpenPositions: 2,
+    modelConfirmCrossCents: 0,
+    modelMaxLossCents: 8,
+    modelDumpPullbackCents: 5,
+    modelFastRedCents: 5,
   },
 ];
 
@@ -323,6 +360,16 @@ function modelSetupConfigPatch(setup) {
     modelConfirmCrossCents: setup.modelConfirmCrossCents,
     modelMaxLossCents: setup.modelMaxLossCents,
     modelHardAdverseCents: setup.modelMaxLossCents,
+    modelMinEntryCents:
+      setup.modelMinEntryCents != null ? setup.modelMinEntryCents : MODEL_MIN_ENTRY_DEFAULT_CENTS,
+    modelDumpPullbackCents:
+      setup.modelDumpPullbackCents != null ? setup.modelDumpPullbackCents : MODEL_DUMP_PULLBACK_CENTS_DEFAULT,
+    modelFastRedCents:
+      setup.modelFastRedCents != null ? setup.modelFastRedCents : MODEL_FAST_RED_CENTS_DEFAULT,
+    modelLeanStopBarrierCents:
+      setup.modelLeanStopBarrierCents != null
+        ? setup.modelLeanStopBarrierCents
+        : MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT,
     activeSetupId: setup.id,
   };
 }
@@ -1898,6 +1945,9 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMaxAdverseCents',
   'modelHardAdverseCents',
   'modelMaxLossCents',
+  'modelDumpPullbackCents',
+  'modelFastRedCents',
+  'modelLeanStopBarrierCents',
   'modelRichAskCents',
   'modelRichMaxSpreadCents',
   'modelRichMinConfidence',
@@ -2673,6 +2723,88 @@ function saveTradeLog(trades) {
   }
 }
 
+function emptyShadowLedger() {
+  return {
+    trades: [],
+    reserveCents: 0,
+    insuranceCents: 0,
+    insuranceReady: false,
+    insuranceDepositedCents: 0,
+    periodStartTime: Date.now(),
+    activityLog: [],
+  };
+}
+
+function loadShadowBooks() {
+  try {
+    if (fs.existsSync(SHADOW_BOOKS_PATH)) {
+      const data = JSON.parse(fs.readFileSync(SHADOW_BOOKS_PATH, 'utf8'));
+      if (data && data.books && typeof data.books === 'object') return data.books;
+    }
+  } catch (err) {
+    console.error('[bot] failed to load shadow books:', err.message);
+  }
+  return Object.create(null);
+}
+
+function saveShadowBooks(books) {
+  try {
+    const out = Object.create(null);
+    for (const [id, book] of Object.entries(books || {})) {
+      if (!book || typeof book !== 'object') continue;
+      out[id] = {
+        setupId: id,
+        ledger: book.ledger || emptyShadowLedger(),
+        lastDecision: book.lastDecision || '',
+        confirmGates: book.confirmGates || {},
+        confirmArmed: Array.isArray(book.confirmArmed)
+          ? book.confirmArmed
+          : book.confirmArmed instanceof Set
+            ? [...book.confirmArmed]
+            : [],
+        confirmArmedFlag: !!book.confirmArmedFlag,
+        confirmStarted: Number(book.confirmStarted) || Date.now(),
+        entryMissUntil: book.entryMissUntil || {},
+        entryMissStreak: book.entryMissStreak || {},
+        entryMissSessionClose: book.entryMissSessionClose || {},
+      };
+    }
+    writeJsonAtomic(SHADOW_BOOKS_PATH, {
+      updatedAt: new Date().toISOString(),
+      books: out,
+    });
+  } catch (err) {
+    console.error('[bot] failed to persist shadow books:', err.message);
+  }
+}
+
+function summarizeShadowLedger(ledger, startingDollars = 100) {
+  const trades = Array.isArray(ledger && ledger.trades) ? ledger.trades : [];
+  const closed = trades.filter((t) => t && t.status === 'closed');
+  const open = trades.filter((t) => t && t.status === 'open');
+  const pnlCents = closed.reduce((sum, t) => sum + (Number(t.pnlCents) || 0), 0);
+  const wins = closed.filter((t) => (Number(t.pnlCents) || 0) > 0).length;
+  const openExposureCents = open.reduce(
+    (sum, t) => sum + (Number(t.entryPriceCents) || 0) * (Number(t.contracts) || 0),
+    0
+  );
+  const startingCents = Math.max(0, Math.round(Number(startingDollars) * 100) || 0);
+  const paperAvailableCents = Math.max(0, startingCents + pnlCents - openExposureCents);
+  return {
+    pnlCents,
+    trades: closed.length,
+    wins,
+    winRatePct: closed.length ? +((wins / closed.length) * 100).toFixed(1) : null,
+    openCount: open.length,
+    openSymbols: open
+      .map((t) => String(t.symbol || '').toUpperCase())
+      .filter(Boolean)
+      .join(','),
+    paperAvailableCents,
+    startingCents,
+  };
+}
+
 function upsertTradeLog(entry) {
   if (!entry || !entry.id) return;
   const trades = loadTradeLog();
@@ -2896,6 +3028,12 @@ class TradingBot {
     this._lastProtectionGateSymbol = null;
     // Serialize manage/settle so watchdog + cycle can't double-sell the same leg.
     this._tradeLock = Promise.resolve();
+    this._tradeLockDepth = 0;
+    this._tradeLockInner = Promise.resolve();
+    this._shadowBooks = loadShadowBooks();
+    this._inShadow = false;
+    this._shadowDirty = false;
+    this._inRunCycle = false;
     this._removeInvalidPaperTrades();
     this._seedTradeLogFromLedger();
     // Always flush the effective settings so a reboot reloads exactly what
@@ -3012,7 +3150,10 @@ class TradingBot {
     const result = this.updateConfig(modelSetupConfigPatch(setup));
     this.lastDecision = `Applied MODEL setup “${setup.label}” (${setup.autoTradeSymbols}, conf ${setup.modelMinConfidence}%, TP +${setup.modelBankGreenCents}¢, max ${setup.maxOpenPositions}).`;
     this._logActivity(this.lastDecision, { kind: 'settings' });
+    // Live book takes over this setup — drop its shadow so we don't double-count.
+    this._resetShadowBook(setup.id);
     this._persist();
+    this._persistShadowBooks();
     return {
       ok: true,
       setup,
@@ -3025,10 +3166,44 @@ class TradingBot {
   _modelSetupScoreboard() {
     const log = loadTradeLog();
     const active = String(this.config.activeSetupId || 'core');
-    return scoreModelSetupsAgainstLog(log).map((row) => ({
-      ...row,
-      active: row.id === active,
-    }));
+    const startingDollars = Number(this.config.paperStartingBalanceDollars);
+    const start = Number.isFinite(startingDollars) && startingDollars > 0 ? startingDollars : 100;
+    const liveCapital = this._capitalStatus();
+    return scoreModelSetupsAgainstLog(log).map((row) => {
+      const live = row.id === active;
+      const book = !live && row.id !== 'all-logged' && this._shadowBooks
+        ? this._shadowBooks[row.id]
+        : null;
+      const emptyShadow = {
+        pnlCents: 0,
+        trades: 0,
+        wins: 0,
+        winRatePct: null,
+        openCount: 0,
+        openSymbols: '',
+        paperAvailableCents: Math.round(start * 100),
+        startingCents: Math.round(start * 100),
+      };
+      const shadow =
+        row.id === 'all-logged' || live
+          ? null
+          : {
+              ...(book ? summarizeShadowLedger(book.ledger, start) : emptyShadow),
+              lastDecision: (book && book.lastDecision) || '',
+            };
+      const liveBook = live
+        ? {
+            paperAvailableCents: liveCapital.paperAvailableCents,
+            pnlCents: (liveCapital.paperTotalCents || 0) - (liveCapital.startingCents || 0) - (liveCapital.insuranceDepositedCents || 0),
+          }
+        : null;
+      return {
+        ...row,
+        active: live,
+        shadow,
+        live: liveBook,
+      };
+    });
   }
 
   /**
@@ -3129,8 +3304,10 @@ class TradingBot {
     this.lastError = null;
     this.lastDecision = 'Paper trading history and statistics were reset.';
     clearTradeLog({ archive: true });
+    this._clearAllShadowBooks();
     this._logActivity(this.lastDecision, { kind: 'reset' });
     this._persist();
+    this._persistShadowBooks();
     saveCalibration(this.calibration);
     return { ok: true, message: 'Paper trading history and statistics were reset.' };
   }
@@ -3341,7 +3518,218 @@ class TradingBot {
   }
 
   _persist() {
+    if (this._inShadow) {
+      this._shadowDirty = true;
+      return;
+    }
     saveLedger(this.ledger);
+  }
+
+  _upsertTradeLog(entry) {
+    if (this._inShadow) return;
+    upsertTradeLog(entry);
+  }
+
+  _ensureShadowBook(setup) {
+    const id = setup && setup.id;
+    if (!id) return null;
+    if (!this._shadowBooks) this._shadowBooks = Object.create(null);
+    let book = this._shadowBooks[id];
+    if (!book || typeof book !== 'object') {
+      book = {
+        setupId: id,
+        ledger: emptyShadowLedger(),
+        lastDecision: '',
+        confirmGates: Object.create(null),
+        confirmArmed: [],
+        confirmArmedFlag: false,
+        confirmStarted: Date.now(),
+        entryMissUntil: Object.create(null),
+        entryMissStreak: Object.create(null),
+        entryMissSessionClose: Object.create(null),
+      };
+      this._shadowBooks[id] = book;
+    }
+    if (!book.ledger || !Array.isArray(book.ledger.trades)) book.ledger = emptyShadowLedger();
+    if (!Array.isArray(book.ledger.activityLog)) book.ledger.activityLog = [];
+    if (!book.confirmGates || typeof book.confirmGates !== 'object') {
+      book.confirmGates = Object.create(null);
+    }
+    if (!book.entryMissUntil) book.entryMissUntil = Object.create(null);
+    if (!book.entryMissStreak) book.entryMissStreak = Object.create(null);
+    if (!book.entryMissSessionClose) book.entryMissSessionClose = Object.create(null);
+    return book;
+  }
+
+  _resetShadowBook(setupId) {
+    const id = String(setupId || '');
+    if (!id || !this._shadowBooks) return;
+    delete this._shadowBooks[id];
+    this._shadowDirty = true;
+  }
+
+  _clearAllShadowBooks() {
+    this._shadowBooks = Object.create(null);
+    this._shadowDirty = true;
+  }
+
+  _persistShadowBooks() {
+    if (this._inShadow) {
+      this._shadowDirty = true;
+      return;
+    }
+    saveShadowBooks(this._shadowBooks || {});
+    this._shadowDirty = false;
+  }
+
+  _snapshotLiveBook() {
+    return {
+      config: this.config,
+      ledger: this.ledger,
+      lastDecision: this.lastDecision,
+      lastError: this.lastError,
+      confirmGates: this._modelConfirmGates,
+      confirmArmed: this._modelConfirmArmedSymbols,
+      confirmArmedFlag: this._modelConfirmGateArmed,
+      confirmStarted: this._modelConfirmProcessStartedAt,
+      entryMissUntil: this._entryMissUntil,
+      entryMissStreak: this._entryMissStreak,
+      entryMissSessionClose: this._entryMissSessionClose,
+      stoppedThisCycle: this._stoppedSymbolsThisCycle,
+      protectionKey: this._lastProtectionGateKey,
+      protectionSymbol: this._lastProtectionGateSymbol,
+    };
+  }
+
+  _installShadowBook(setup, { resetStopped = false } = {}) {
+    const book = this._ensureShadowBook(setup);
+    this.config = {
+      ...this.config,
+      ...modelSetupConfigPatch(setup),
+      mode: 'paper',
+    };
+    this.ledger = book.ledger;
+    this.lastDecision = book.lastDecision || '';
+    this.lastError = null;
+    this._modelConfirmGates = book.confirmGates || Object.create(null);
+    this._modelConfirmArmedSymbols = new Set(
+      Array.isArray(book.confirmArmed) ? book.confirmArmed : []
+    );
+    this._modelConfirmGateArmed = !!book.confirmArmedFlag;
+    this._modelConfirmProcessStartedAt = Number(book.confirmStarted) || Date.now();
+    this._entryMissUntil = book.entryMissUntil || Object.create(null);
+    this._entryMissStreak = book.entryMissStreak || Object.create(null);
+    this._entryMissSessionClose = book.entryMissSessionClose || Object.create(null);
+    this._stoppedSymbolsThisCycle = resetStopped
+      ? new Set()
+      : new Set(Array.isArray(book.stoppedThisCycle) ? book.stoppedThisCycle : []);
+    this._lastProtectionGateKey = book.protectionKey || null;
+    this._lastProtectionGateSymbol = book.protectionSymbol || null;
+    return book;
+  }
+
+  _captureShadowBook(setup) {
+    const book = this._ensureShadowBook(setup);
+    book.ledger = this.ledger;
+    book.lastDecision = this.lastDecision || '';
+    book.confirmGates = this._modelConfirmGates || Object.create(null);
+    book.confirmArmed = this._modelConfirmArmedSymbols
+      ? [...this._modelConfirmArmedSymbols]
+      : [];
+    book.confirmArmedFlag = !!this._modelConfirmGateArmed;
+    book.confirmStarted = Number(this._modelConfirmProcessStartedAt) || Date.now();
+    book.entryMissUntil = this._entryMissUntil || Object.create(null);
+    book.entryMissStreak = this._entryMissStreak || Object.create(null);
+    book.entryMissSessionClose = this._entryMissSessionClose || Object.create(null);
+    book.stoppedThisCycle = this._stoppedSymbolsThisCycle
+      ? [...this._stoppedSymbolsThisCycle]
+      : [];
+    book.protectionKey = this._lastProtectionGateKey || null;
+    book.protectionSymbol = this._lastProtectionGateSymbol || null;
+    this._shadowDirty = true;
+    return book;
+  }
+
+  _restoreLiveBook(snap) {
+    if (!snap) return;
+    this.config = snap.config;
+    this.ledger = snap.ledger;
+    this.lastDecision = snap.lastDecision;
+    this.lastError = snap.lastError;
+    this._modelConfirmGates = snap.confirmGates;
+    this._modelConfirmArmedSymbols = snap.confirmArmed;
+    this._modelConfirmGateArmed = snap.confirmArmedFlag;
+    this._modelConfirmProcessStartedAt = snap.confirmStarted;
+    this._entryMissUntil = snap.entryMissUntil;
+    this._entryMissStreak = snap.entryMissStreak;
+    this._entryMissSessionClose = snap.entryMissSessionClose;
+    this._stoppedSymbolsThisCycle = snap.stoppedThisCycle;
+    this._lastProtectionGateKey = snap.protectionKey;
+    this._lastProtectionGateSymbol = snap.protectionSymbol;
+  }
+
+  async _withShadowBook(setup, fn, { resetStopped = false } = {}) {
+    if (!setup || this._inShadow) return;
+    const snap = this._snapshotLiveBook();
+    this._inShadow = true;
+    try {
+      this._installShadowBook(setup, { resetStopped });
+      await fn();
+      this._captureShadowBook(setup);
+    } catch (err) {
+      console.error(`[bot] shadow ${setup.id} failed:`, err && err.message ? err.message : err);
+      try {
+        this._captureShadowBook(setup);
+      } catch {
+        // keep going — live book must always be restored
+      }
+    } finally {
+      this._restoreLiveBook(snap);
+      this._inShadow = false;
+    }
+  }
+
+  /**
+   * Silent paper books for every named MODEL setup except the live one.
+   * Same Kalshi quotes; own ledger / knobs / max slots. Never places live orders.
+   */
+  async _runShadowBooks(predictions, { openNew = false } = {}) {
+    if (this._inShadow) return;
+    if (!isModelStrategyMode(this.config)) return;
+    const active = String(this.config.activeSetupId || 'core');
+    for (const setup of MODEL_SETUPS) {
+      if (!setup || setup.id === active) continue;
+      await this._withShadowBook(
+        setup,
+        async () => {
+          await this._manageOpenPositionsUnlocked(predictions);
+          try {
+            await this._reviewPendingStopVerdicts();
+          } catch (err) {
+            console.error(`[bot] shadow ${setup.id} stop review failed:`, err.message);
+          }
+          if (!openNew || !this.isRunning || !predictions) return;
+          if (this.openTrades.length >= this._effectiveMaxOpenPositions()) return;
+          const ranked =
+            this.config.symbol === 'AUTO'
+              ? await this._findModelOpportunities(predictions)
+              : [await this._evaluateSymbolForModel(this.config.symbol, predictions)].filter(
+                  Boolean
+                );
+          await this._openModelRanked(ranked);
+        },
+        { resetStopped: openNew }
+      );
+    }
+    if (this._shadowDirty) this._persistShadowBooks();
+  }
+
+  async _finishModelShadowCycle(predictions) {
+    if (this._inShadow) return;
+    if (!isModelStrategyMode(this.config)) return;
+    await this._withTradeLock(() =>
+      this._runShadowBooks(predictions, { openNew: this.isRunning && !!predictions })
+    );
   }
 
   /**
@@ -3357,6 +3745,7 @@ class TradingBot {
    * keeps accumulating across rotations rather than resetting to zero).
    */
   _maybeRotateLedger(now) {
+    if (this._inShadow) return;
     if (now - this.ledger.periodStartTime < ROTATION_PERIOD_MS) return;
 
     const closedTrades = this.ledger.trades.filter((t) => t.status === 'closed');
@@ -3511,6 +3900,15 @@ class TradingBot {
    * Until armed, losses hit Available; while ready, Insurance absorbs first.
    */
   _applyReserveFlow(trade) {
+    if (this._inShadow) {
+      trade.skimmedCents = 0;
+      trade.insuranceAddedCents = 0;
+      trade.insuranceOverflowCents = 0;
+      trade.insuranceDrawnCents = 0;
+      trade.insuranceReleasedCents = 0;
+      trade.reserveDrawnCents = 0;
+      return;
+    }
     const pnlCents = Number(trade.pnlCents) || 0;
 
     const flow = applyProfitBuckets({
@@ -3533,7 +3931,22 @@ class TradingBot {
   }
 
   _withTradeLock(fn) {
-    const run = this._tradeLock.then(() => fn(), () => fn());
+    // Reentrant: shadow books run under the lock, then _openPosition also
+    // takes it. Nesting on the same chain deadlocks the event loop.
+    if (this._tradeLockDepth > 0) {
+      const nested = this._tradeLockInner.then(() => fn(), () => fn());
+      this._tradeLockInner = nested.then(
+        () => undefined,
+        (err) => {
+          console.error('[bot] nested trade-lock task failed:', err && err.message ? err.message : err);
+        }
+      );
+      return nested;
+    }
+    const run = this._tradeLock.then(
+      () => this._runTradeLocked(fn),
+      () => this._runTradeLocked(fn)
+    );
     this._tradeLock = run.then(
       () => undefined,
       (err) => {
@@ -3541,6 +3954,16 @@ class TradingBot {
       }
     );
     return run;
+  }
+
+  async _runTradeLocked(fn) {
+    this._tradeLockDepth = 1;
+    this._tradeLockInner = Promise.resolve();
+    try {
+      return await fn();
+    } finally {
+      this._tradeLockDepth = 0;
+    }
   }
 
   _isLiveTrade(trade) {
@@ -4134,7 +4557,7 @@ class TradingBot {
       pnlCents: closedSlice.pnlCents,
       tradeId: closedSlice.id,
     });
-    upsertTradeLog({
+    this._upsertTradeLog({
       id: closedSlice.id,
       mode: closedSlice.mode,
       symbol: closedSlice.symbol,
@@ -4161,7 +4584,7 @@ class TradingBot {
       insuranceDrawnCents: closedSlice.insuranceDrawnCents || 0,
       partialExitOf: trade.id,
     });
-    upsertTradeLog({
+    this._upsertTradeLog({
       id: trade.id,
       mode: trade.mode,
       symbol: trade.symbol,
@@ -4417,7 +4840,7 @@ class TradingBot {
         pnlCents: trade.pnlCents,
         tradeId: trade.id,
       });
-      upsertTradeLog({
+      this._upsertTradeLog({
         id: trade.id,
         mode: trade.mode,
         symbol: trade.symbol,
@@ -4549,7 +4972,7 @@ class TradingBot {
         ledgerTrade.stopVerdict = ledgerTrade.stopVerdict || 'pending';
       }
     }
-    upsertTradeLog({
+    this._upsertTradeLog({
       id: row.id,
       stopVerdictPending: pending,
       stopVerdict: pending ? row.stopVerdict || 'pending' : row.stopVerdict,
@@ -4575,7 +4998,7 @@ class TradingBot {
       ledgerTrade.stopPostMaxBidCents = row.stopPostMaxBidCents;
     }
 
-    upsertTradeLog({
+    this._upsertTradeLog({
       id: row.id,
       stopVerdict: verdict,
       stopVerdictPending: false,
@@ -5662,6 +6085,10 @@ class TradingBot {
         }
       }
     }
+    // runCycle finishes shadows once (manage+open). Watchdog-only ticks still manage them.
+    if (!this._inShadow && !this._inRunCycle) {
+      await this._runShadowBooks(predictions, { openNew: false });
+    }
   }
 
   /**
@@ -5905,7 +6332,7 @@ class TradingBot {
     }
     const trade = {
       id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
-      mode: this.config.mode,
+      mode: this._inShadow ? 'paper' : this.config.mode,
       strategy: isSettle ? 'settle' : isModel ? 'model' : 'edge',
       symbol,
       ticker,
@@ -5954,8 +6381,13 @@ class TradingBot {
           }
         : {}),
     };
+    if (this._inShadow) {
+      trade.mode = 'paper';
+      trade.shadow = true;
+      trade.shadowSetupId = String(this.config.activeSetupId || '') || null;
+    }
 
-    if (this.config.mode === 'live') {
+    if (this.config.mode === 'live' && !this._inShadow) {
       // Default 2 IOC tries (lighter): re-quote each time, chase ask by +0/+1¢
       // inside the settle ceiling. Pass entryAttempts to override (cap 3).
       let filled = 0;
@@ -6247,7 +6679,7 @@ class TradingBot {
         strategy: trade.strategy,
         tradeId: trade.id,
       });
-      upsertTradeLog({
+      this._upsertTradeLog({
         id: trade.id,
         mode: trade.mode,
         strategy: trade.strategy,
@@ -6424,6 +6856,8 @@ class TradingBot {
    * symbols, so a switch never orphans an open trade.
    */
   async runCycle(predictions) {
+    this._inRunCycle = true;
+    try {
     this._stoppedSymbolsThisCycle = new Set();
     this._maybeRotateLedger(Date.now());
 
@@ -6443,6 +6877,7 @@ class TradingBot {
     await this.manageOpenPositions(predictions);
     await this._reviewPendingStopVerdicts();
 
+    try {
     if (!this.isRunning) {
       this.lastDecision = 'Bot is stopped; it will continue monitoring any already-open positions but will not open new ones.';
       return;
@@ -6533,6 +6968,12 @@ class TradingBot {
       engineConfidence: opportunity.window.confidence,
       strategy: 'edge',
     });
+    } finally {
+      await this._finishModelShadowCycle(predictions);
+    }
+    } finally {
+      this._inRunCycle = false;
+    }
   }
 
   _settleOppToOpenArgs(opp, entryAttempts = 2) {
@@ -7876,6 +8317,7 @@ class TradingBot {
    * growing indefinitely across every 12h period.
    */
   _recordCalibration(trade) {
+    if (this._inShadow || (trade && trade.shadow)) return;
     if (trade.engineProbability == null) return;
     const bucketKey = String(Math.min(90, Math.floor(trade.engineProbability / 10) * 10));
     if (!this.calibration.buckets[bucketKey]) {

@@ -498,7 +498,7 @@ body[data-view-mode="bot"] .asset-picker {
   color: var(--text-dim);
   margin-top: 6px;
 }
-.accuracy-value { font-family: var(--font-mono); font-weight: 700; color: var(--text); }
+.accuracy-value { font-family: var(--font-mono); font-weight: 700; color: var(--text); text-align: right; max-width: 70%; }
 
 /* ---------- Footer ---------- */
 
@@ -1138,14 +1138,26 @@ body[data-view-mode="bot"] .asset-picker {
   font-weight: 600;
 }
 .model-setup-card .setup-why,
-.model-setup-card .setup-score {
+.model-setup-card .setup-knobs,
+.model-setup-card .setup-score,
+.model-setup-card .setup-shadow {
   display: block;
   margin-top: 4px;
   font-size: 0.82rem;
   color: var(--text-dim);
 }
-.model-setup-card .setup-score.pos { color: var(--up); }
-.model-setup-card .setup-score.neg { color: var(--down); }
+.model-setup-card .setup-knobs {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.9;
+}
+.model-setup-card .setup-shadow {
+  font-weight: 600;
+}
+.model-setup-card .setup-shadow.live { color: var(--text); }
+.model-setup-card .setup-score.pos,
+.model-setup-card .setup-shadow.pos { color: var(--up); }
+.model-setup-card .setup-score.neg,
+.model-setup-card .setup-shadow.neg { color: var(--down); }
 .bot-field-grid label, .backtest-controls label {
   display: flex;
   flex-direction: column;

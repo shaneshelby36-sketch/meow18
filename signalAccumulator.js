@@ -53,13 +53,18 @@ class SignalAccumulatorManager {
     this.accumulators = new Map();
   }
 
-  get(symbol, windowKey) {
+  get(symbol, windowKey, sessionKey = null) {
     const key = `${symbol}:${windowKey}`;
-    if (!this.accumulators.has(key)) {
+    const session = sessionKey == null || sessionKey === '' ? null : String(sessionKey);
+    let slot = this.accumulators.get(key);
+    // New Kalshi 15m session → fresh red/green bars vs the new strike.
+    if (!slot || (session != null && slot.session !== session)) {
       const halfLifeMs = this.halfLivesByWindow[windowKey] || 2 * 60 * 1000;
-      this.accumulators.set(key, new SignalAccumulator(halfLifeMs));
+      const acc = new SignalAccumulator(halfLifeMs);
+      this.accumulators.set(key, { session, acc });
+      return acc;
     }
-    return this.accumulators.get(key);
+    return slot.acc;
   }
 }
 

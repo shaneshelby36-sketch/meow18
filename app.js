@@ -403,6 +403,17 @@ function renderAsset(symbol, assetData) {
   }
   if (price != null) lastPrices[symbol] = price;
 
+  const overall = assetData.overall;
+  const overallRec = panel.querySelector('.overall-rec');
+  const overallProb = panel.querySelector('.overall-prob');
+  if (overallRec && overall) {
+    overallRec.textContent = overall.recommendation || '—';
+    overallRec.className = 'overall-rec ' + (REC_CLASS[overall.recommendation] || 'wait');
+  }
+  if (overallProb && overall) {
+    overallProb.textContent = `UP ${overall.probabilityUp}% · DOWN ${overall.probabilityDown}%`;
+  }
+
   if (!assetData.ready) {
     const patternEl = panel.querySelector('.meta-pattern');
     if (patternEl) patternEl.textContent = 'Seeding history…';
@@ -487,9 +498,16 @@ function renderAsset(symbol, assetData) {
     // Rolling accuracy for this asset/window pair
     const accEl = card.querySelector('.accuracy-value');
     if (w.accuracy && w.accuracy.sampleSize > 0) {
-      accEl.textContent = `${w.accuracy.correctCount}/${w.accuracy.sampleSize} correct (${w.accuracy.accuracyPct}%)`;
+      const today = `${w.accuracy.correctCount}/${w.accuracy.sampleSize} (${w.accuracy.accuracyPct}%)`;
+      const prev = w.accuracy.previous && w.accuracy.previous.sampleSize
+        ? ` · yesterday ${w.accuracy.previous.correctCount}/${w.accuracy.previous.sampleSize} (${w.accuracy.previous.accuracyPct}%)`
+        : '';
+      accEl.textContent = `today ${today}${prev}`;
+    } else if (w.accuracy && w.accuracy.previous && w.accuracy.previous.sampleSize) {
+      const p = w.accuracy.previous;
+      accEl.textContent = `today 0 · yesterday ${p.correctCount}/${p.sampleSize} (${p.accuracyPct}%)`;
     } else {
-      accEl.textContent = 'No settled predictions yet';
+      accEl.textContent = 'No settled predictions yet today';
     }
   });
 }
@@ -1467,13 +1485,55 @@ function strategyModeLabel(mode) {
   return 'Edge';
 }
 
+function formatSetupKnobs(s) {
+  if (!s) return '';
+  const bits = [];
+  if (s.modelMinConfidence != null) bits.push(`conf ${s.modelMinConfidence}`);
+  if (s.modelEntryLiveLeanMarginPct != null) bits.push(`favor ${s.modelEntryLiveLeanMarginPct}`);
+  if (s.modelMinTpCents != null) bits.push(`TP +${s.modelMinTpCents}¢`);
+  if (s.modelMaxLossCents != null) bits.push(`max −${s.modelMaxLossCents}¢`);
+  if (s.maxOpenPositions != null) {
+    bits.push(`${s.maxOpenPositions} slot${Number(s.maxOpenPositions) === 1 ? '' : 's'}`);
+  }
+  if (s.modelDumpPullbackCents != null) bits.push(`dump ${s.modelDumpPullbackCents}¢`);
+  if (s.modelFastRedCents != null) bits.push(`fast-red ${s.modelFastRedCents}¢`);
+  if (s.modelMinEntryCents != null) bits.push(`min ${s.modelMinEntryCents}¢`);
+  if (s.modelLeanStopBarrierCents != null) bits.push(`barrier ${s.modelLeanStopBarrierCents}¢`);
+  return bits.join(' · ');
+}
+
 function formatSetupScore(score) {
-  if (!score || !score.trades) return 'no matching fills yet';
+  if (!score || !score.trades) return 'what-if: no matching fills';
   const pnl = Number(score.pnlCents) || 0;
   const dollars = `${pnl >= 0 ? '+' : '−'}$${(Math.abs(pnl) / 100).toFixed(2)}`;
   const wr = score.winRatePct != null ? `${score.winRatePct}% WR` : '';
   const worst = score.worstCents < 0 ? ` · worst −$${(Math.abs(score.worstCents) / 100).toFixed(2)}` : '';
-  return `${dollars} · ${score.trades} fills · ${wr}${worst}`.replace(/ · $/, '');
+  return `what-if ${dollars} · ${score.trades} fills · ${wr}${worst}`.replace(/ · $/, '');
+}
+
+function formatShadowScore(shadow) {
+  if (!shadow) return '';
+  const pnl = Number(shadow.pnlCents) || 0;
+  const dollars = `${pnl >= 0 ? '+' : '−'}$${(Math.abs(pnl) / 100).toFixed(2)}`;
+  const fills = Number(shadow.trades) || 0;
+  const open = Number(shadow.openCount) || 0;
+  const wr = shadow.winRatePct != null ? ` · ${shadow.winRatePct}% WR` : '';
+  const avail =
+    shadow.paperAvailableCents != null
+      ? ` · avail $${(Number(shadow.paperAvailableCents) / 100).toFixed(2)}`
+      : '';
+  const openBit = open ? ` · ${open} open${shadow.openSymbols ? ` ${shadow.openSymbols}` : ''}` : '';
+  if (!fills && !open) return `shadow · waiting${avail}`;
+  return `shadow ${dollars} · ${fills} fill${fills === 1 ? '' : 's'}${wr}${avail}${openBit}`;
+}
+
+function formatLiveBook(live) {
+  if (!live) return 'LIVE book';
+  const avail =
+    live.paperAvailableCents != null
+      ? ` · avail $${(Number(live.paperAvailableCents) / 100).toFixed(2)}`
+      : '';
+  return `LIVE book${avail}`;
 }
 
 function renderModelSetups(setups) {
@@ -1492,9 +1552,27 @@ function renderModelSetups(setups) {
       const rec = s.recommended ? ' · recommended' : '';
       const active = s.active ? ' active' : '';
       const coins = escapeHtml(s.autoTradeSymbols || '');
+      const shadow = s.shadow;
+      const shadowPnl = shadow ? Number(shadow.pnlCents) || 0 : 0;
+      const shadowTone =
+        shadow && (shadow.trades || shadow.openCount)
+          ? shadowPnl > 0
+            ? 'pos'
+            : shadowPnl < 0
+              ? 'neg'
+              : ''
+          : '';
+      const liveOrShadow = s.active
+        ? `<span class="setup-shadow live">${escapeHtml(formatLiveBook(s.live))}</span>`
+        : shadow
+          ? `<span class="setup-shadow ${shadowTone}">${escapeHtml(formatShadowScore(shadow))}</span>`
+          : '';
+      const knobs = formatSetupKnobs(s);
       return `<button type="button" class="model-setup-card${active}" data-setup-id="${escapeHtml(s.id)}">
         <span class="setup-label"><span>${escapeHtml(s.label)}${s.active ? ' · on' : ''}</span><span>${coins}</span></span>
         <span class="setup-why">${escapeHtml(s.why || '')}${rec}</span>
+        ${knobs ? `<span class="setup-knobs">${escapeHtml(knobs)}</span>` : ''}
+        ${liveOrShadow}
         <span class="setup-score ${tone}">${escapeHtml(formatSetupScore(score))}</span>
       </button>`;
     })
