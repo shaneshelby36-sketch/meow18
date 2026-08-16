@@ -12,7 +12,7 @@ const { CoinbaseFeed } = require('./coinbaseFeed');
 const { buildPredictions } = require('./prediction');
 const { PredictionTracker } = require('./tracker');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
-const { KalshiClient } = require('./kalshiClient');
+const { KalshiClient, marketStrikePrice, parseMarketCloseMs } = require('./kalshiClient');
 const { TradingBot, SERIES_BY_SYMBOL, tradeableKalshiSymbols, settleExitTiersForDashboard } = require('./bot');
 const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
 const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir, ARCHIVE_RETENTION_DAYS } = require('./paths');
@@ -240,14 +240,25 @@ function wireFeed() {
   return feed;
 }
 
+const lastKalshiTargets = Object.create(null);
+
+function targetFromKalshiMarket(market) {
+  if (!market) return null;
+  const closeTime = parseMarketCloseMs(market);
+  const ticker = market.ticker ? String(market.ticker) : '';
+  if (!ticker || !Number.isFinite(closeTime)) return null;
+  return {
+    price: marketStrikePrice(market),
+    closeTime,
+    ticker,
+  };
+}
+
 // Fetches the real, live Kalshi strike price + close time for each symbol's
 // current rolling 15-minute market. This is public market data (no API
 // credentials needed) so it runs regardless of whether the trading bot
 // itself is enabled — it's purely for showing the one real target price
 // the dashboard displays, and for computing probabilities relative to it.
-// Fetches the real, live Kalshi strike price + close time for each symbol's
-// current rolling 15-minute market. Falls back gracefully if the bot module
-// didn't export SERIES_BY_SYMBOL or if Kalshi is unavailable.
 async function fetchKalshiTargets() {
   const targets = {};
 
@@ -262,36 +273,44 @@ async function fetchKalshiTargets() {
   await Promise.all(
     Object.entries(series).map(async ([symbol, ticker]) => {
       try {
-        const markets = await kalshiClient.getOpenMarkets(ticker, 20);
-        const now = Date.now();
-        // Prefer soonest still-live close (current window). During settlement
-        // gaps status=open can briefly be empty — getOpenMarkets falls back.
-        let m = null;
+        let parsed = null;
         if (typeof kalshiClient.getLiveOpenMarket === 'function') {
-          m = await kalshiClient.getLiveOpenMarket(ticker, { minMsLeft: 1500 });
+          parsed = targetFromKalshiMarket(
+            await kalshiClient.getLiveOpenMarket(ticker, { minMsLeft: 1500 })
+          );
         }
-        if (!m) {
+        if (!parsed) {
+          const markets = await kalshiClient.getOpenMarkets(ticker, 20);
+          const now = Date.now();
           const live = (Array.isArray(markets) ? markets : [])
-            .map((market) => {
-              const closeMs = market.close_time ? new Date(market.close_time).getTime() : NaN;
-              return { market, closeMs };
-            })
+            .map((market) => ({ market, closeMs: parseMarketCloseMs(market) }))
             .filter(({ closeMs }) => Number.isFinite(closeMs) && closeMs > now + 1500)
             .sort((a, b) => a.closeMs - b.closeMs);
-          m = live[0] && live[0].market;
+          parsed = targetFromKalshiMarket(live[0] && live[0].market);
         }
 
-        if (m) {
-          targets[symbol] = {
-            price: m.floor_strike,
-            closeTime: new Date(m.close_time).getTime(),
-            ticker: m.ticker,
-          };
+        const prev = lastKalshiTargets[symbol];
+        if (parsed && parsed.price == null && prev && prev.ticker === parsed.ticker && prev.price != null) {
+          parsed = { ...parsed, price: prev.price };
+        }
+        if (parsed && parsed.price != null) {
+          lastKalshiTargets[symbol] = parsed;
+          targets[symbol] = parsed;
+          return;
+        }
+        if (parsed) {
+          targets[symbol] = parsed;
+          return;
         }
       } catch (err) {
         console.warn(
-          `[kalshi-target] ${symbol}: ${err.message} (using fallback timer)`
+          `[kalshi-target] ${symbol}: ${err.message} (keeping last live strike if still open)`
         );
+      }
+
+      const prev = lastKalshiTargets[symbol];
+      if (prev && Number(prev.closeTime) > Date.now() + 1500 && prev.price != null) {
+        targets[symbol] = prev;
       }
     })
   );

@@ -21,6 +21,45 @@ function priceInCents(legacyCents, dollarValue) {
   return Number.isFinite(dollars) ? Math.round(dollars * 100) : null;
 }
 
+function parseMarketCloseMs(market) {
+  if (!market || typeof market !== 'object') return NaN;
+  const closeRaw = market.close_time != null ? market.close_time : market.expected_expiration_time;
+  if (closeRaw == null || closeRaw === '') return NaN;
+  if (typeof closeRaw === 'number' && Number.isFinite(closeRaw)) {
+    return closeRaw < 1e12 ? closeRaw * 1000 : closeRaw;
+  }
+  const ms = new Date(closeRaw).getTime();
+  return Number.isFinite(ms) ? ms : NaN;
+}
+
+/**
+ * Kalshi 15m crypto strike. List payloads sometimes omit `floor_strike`
+ * (subtitle still has "Target Price: $63,048.28") or use cap-only `less`
+ * markets. Never treat TBD / missing as 0.
+ */
+function marketStrikePrice(market) {
+  if (!market || typeof market !== 'object') return null;
+  const type = String(market.strike_type || market.strikeType || '').toLowerCase();
+  const ordered =
+    type === 'less' || type === 'less_or_equal'
+      ? [market.cap_strike, market.capStrike, market.floor_strike, market.floorStrike]
+      : [market.floor_strike, market.floorStrike, market.cap_strike, market.capStrike];
+  ordered.push(market.strike_price, market.strikePrice, market.strike);
+  for (const raw of ordered) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  const subtitle = String(
+    market.yes_sub_title || market.yesSubTitle || market.subtitle || market.title || ''
+  );
+  const m = subtitle.match(/\$\s*([\d,]+(?:\.\d+)?)/);
+  if (m) {
+    const n = Number(String(m[1]).replace(/,/g, ''));
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
 function sizeFromFp(legacy, fpValue) {
   if (legacy != null && legacy !== '') {
     const n = Number(legacy);
@@ -185,6 +224,7 @@ class KalshiClient {
     this.privateKey = privateKeyPem || (privateKeyPath && fs.existsSync(privateKeyPath)
       ? fs.readFileSync(privateKeyPath, 'utf8')
       : null);
+    this._openMarketsCache = new Map();
   }
 
   get hasCredentials() {
@@ -218,12 +258,17 @@ class KalshiClient {
     };
   }
 
-  async _request(method, path, { query, body, auth = true } = {}) {
+  async _request(method, path, opts = {}) {
+    const { query, body, auth = true, _retried = false } = opts;
     const qs = query
       ? '?' + new URLSearchParams(Object.entries(query).filter(([, v]) => v != null)).toString()
       : '';
     const url = `${this.baseUrl}${path}${qs}`;
-    const headers = { 'Content-Type': 'application/json' };
+    const headers = {
+      'Content-Type': 'application/json',
+      'User-Agent': 'crypto-prediction-engine',
+      Accept: 'application/json',
+    };
     if (auth) {
       if (!this.hasCredentials) throw new Error('Kalshi credentials not configured for an authenticated request');
       Object.assign(headers, this._sign(method, path));
@@ -233,6 +278,10 @@ class KalshiClient {
       headers,
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (res.status === 429 && !_retried) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return this._request(method, path, { ...opts, query, body, auth, _retried: true });
+    }
     const text = await res.text();
     let json;
     try {
@@ -252,6 +301,11 @@ class KalshiClient {
   // ---------- public market data (no auth needed) ----------
 
   async getOpenMarkets(seriesTicker, limit = 20) {
+    if (!this._openMarketsCache) this._openMarketsCache = new Map();
+    const cacheKey = String(seriesTicker || '');
+    const cached = this._openMarketsCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < 3000) return cached.markets;
+
     const fetchList = async (query) => {
       try {
         const data = await this._request('GET', '/markets', {
@@ -259,28 +313,33 @@ class KalshiClient {
           auth: false,
         });
         return (data.markets || []).map(normalizeMarketPrices);
-      } catch {
+      } catch (err) {
+        if (err && err.status === 429) throw err;
         return [];
       }
     };
     const usable = (list) =>
       (Array.isArray(list) ? list : []).filter((m) => {
         const s = String(m.status || '').toLowerCase();
+        // Live 15m crypto markets currently come back as status=active even
+        // when requested with status=open. Do not query status=active — that
+        // param is 400 on Kalshi's API.
         return !s || s === 'open' || s === 'active' || s === 'initialized' || s === 'unopened';
       });
 
-    let open = usable(await fetchList({ status: 'open' }));
-    if (open.length) return open;
-
-    // 15m rollover: status=open is often empty for a few seconds.
-    open = usable(await fetchList({ status: 'unopened' }));
-    if (open.length) return open;
-
-    const nowSec = Math.floor(Date.now() / 1000);
-    open = usable(await fetchList({ min_close_ts: nowSec }));
-    if (open.length) return open;
-
-    return usable(await fetchList({}));
+    try {
+      let open = usable(await fetchList({ status: 'open' }));
+      if (!open.length) {
+        open = usable(await fetchList({ min_close_ts: Math.floor(Date.now() / 1000) }));
+      }
+      if (!open.length) open = usable(await fetchList({}));
+      this._openMarketsCache.set(cacheKey, { at: Date.now(), markets: open });
+      return open;
+    } catch (err) {
+      if (cached) return cached.markets;
+      console.warn(`[kalshi] getOpenMarkets ${seriesTicker}:`, err && err.message ? err.message : err);
+      return [];
+    }
   }
 
   /**
@@ -291,18 +350,7 @@ class KalshiClient {
     const pick = (floorMs) => {
       const nowMs = Date.now();
       const live = (Array.isArray(markets) ? markets : [])
-        .map((m) => {
-          const closeRaw = m && (m.close_time != null ? m.close_time : m.expected_expiration_time);
-          let closeMs = NaN;
-          if (closeRaw != null && closeRaw !== '') {
-            if (typeof closeRaw === 'number' && Number.isFinite(closeRaw)) {
-              closeMs = closeRaw < 1e12 ? closeRaw * 1000 : closeRaw;
-            } else {
-              closeMs = new Date(closeRaw).getTime();
-            }
-          }
-          return { m, closeMs };
-        })
+        .map((m) => ({ m, closeMs: parseMarketCloseMs(m) }))
         .filter(({ closeMs }) => Number.isFinite(closeMs) && closeMs > nowMs + floorMs);
       if (!live.length) return null;
       live.sort((a, b) => a.closeMs - b.closeMs);
@@ -367,6 +415,8 @@ module.exports = {
   KalshiClient,
   normalizeMarketPrices,
   priceInCents,
+  marketStrikePrice,
+  parseMarketCloseMs,
   bookSideFromLegacy,
   buildCreateOrderV2Body,
   normalizeCreateOrderResponse,

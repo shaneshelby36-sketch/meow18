@@ -422,8 +422,10 @@ function buildPredictions(data, kalshiTargets = {}, accumulatorManager = null) {
     const crossCorrelation = other ? correlations[symbol] : null;
 
     const kalshiTarget = kalshiTargets[symbol];
-    const targetPrice = kalshiTarget && kalshiTarget.price != null ? kalshiTarget.price : ind.price;
-    const targetSource = kalshiTarget && kalshiTarget.price != null ? 'kalshi' : 'current_price';
+    const strike = kalshiTarget ? Number(kalshiTarget.price) : NaN;
+    const hasKalshiStrike = Number.isFinite(strike) && strike > 0;
+    const targetPrice = hasKalshiStrike ? strike : ind.price;
+    const targetSource = hasKalshiStrike ? 'kalshi' : 'current_price';
 
     const windows = {};
     for (const w of WINDOWS) {

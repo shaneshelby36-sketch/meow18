@@ -45,6 +45,8 @@ const {
   KalshiClient,
   normalizeMarketPrices,
   priceInCents,
+  marketStrikePrice,
+  parseMarketCloseMs,
   bookSideFromLegacy,
   buildCreateOrderV2Body,
   normalizeCreateOrderResponse,
@@ -541,7 +543,7 @@ function testPrediction() {
 
 // ───────────────────────────── kalshi client helpers ─────────────────────────────
 
-function testKalshiClient() {
+async function testKalshiClient() {
   section('kalshiClient.js');
   checkEq(priceInCents(56, null), 56, 'legacy cents');
   checkEq(priceInCents(null, '0.5600'), 56, 'dollar string → cents');
@@ -629,6 +631,42 @@ function testKalshiClient() {
   checkEq(flatNorm.order.order_id, 'oid-flat', 'normalize flat V2 create response');
   const nestedNorm = normalizeCreateOrderResponse({ order: { order_id: 'oid-nested' } });
   checkEq(nestedNorm.order.order_id, 'oid-nested', 'normalize nested legacy create response');
+
+  checkEq(marketStrikePrice({ floor_strike: 63048.28 }), 63048.28, 'strike from floor_strike');
+  checkEq(
+    marketStrikePrice({ yes_sub_title: 'Target Price: $63,048.28' }),
+    63048.28,
+    'strike from yes_sub_title when floor_strike omitted'
+  );
+  checkEq(marketStrikePrice({ strike_type: 'less', cap_strike: 1884.4 }), 1884.4, 'less markets use cap_strike');
+  checkEq(marketStrikePrice({ yes_sub_title: 'Target price: TBD' }), null, 'TBD subtitle is not a strike');
+  check(
+    Number.isFinite(parseMarketCloseMs({ close_time: new Date(Date.now() + 60_000).toISOString() })),
+    'parseMarketCloseMs reads ISO close_time'
+  );
+
+  {
+    const liveClient = new KalshiClient({});
+    const close = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    liveClient._request = async (_method, _path, opts = {}) => {
+      check(opts.query && opts.query.status !== 'active', 'never query Kalshi with status=active (400)');
+      return {
+        markets: [
+          {
+            ticker: 'KXBTC15M-ACTIVE',
+            status: 'active',
+            close_time: close,
+            yes_sub_title: 'Target Price: $63,048.28',
+            yes_bid_dollars: '0.5700',
+            yes_ask_dollars: '0.5800',
+          },
+        ],
+      };
+    };
+    const picked = await liveClient.getLiveOpenMarket('KXBTC15M', { minMsLeft: 1500 });
+    check(picked && picked.ticker === 'KXBTC15M-ACTIVE', 'status=active 15m market is treated as live');
+    checkEq(marketStrikePrice(picked), 63048.28, 'live active market strike parsed from subtitle');
+  }
 
   // fill_count_fp parsing (v1.2.17+) — never invent fills from status alone
   const fillBot = makeBot(mockClient({}));
@@ -7548,7 +7586,7 @@ async function run() {
   testSignalAccumulator();
   testTracker();
   testPrediction();
-  testKalshiClient();
+  await testKalshiClient();
   testBacktest();
   testBotControls();
   await testBotExits();

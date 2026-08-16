@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { dataPath, ensureDataDir, writeJsonAtomic, pruneArchiveFiles } = require('./paths');
-const { bookSideFromLegacy } = require('./kalshiClient');
+const { bookSideFromLegacy, marketStrikePrice } = require('./kalshiClient');
 
 ensureDataDir();
 pruneArchiveFiles();
@@ -5051,7 +5051,10 @@ class TradingBot {
       return;
     }
 
-    const strike = trade.floorStrike != null ? Number(trade.floorStrike) : Number(market && market.floor_strike);
+    const strike =
+      trade.floorStrike != null
+        ? Number(trade.floorStrike)
+        : marketStrikePrice(market);
     const livePrice =
       predictions &&
       predictions[trade.symbol] &&
@@ -6962,7 +6965,7 @@ class TradingBot {
       ticker: opportunity.market.ticker,
       side: opportunity.side,
       priceCents: opportunity.priceCents,
-      floorStrike: opportunity.market.floor_strike,
+      floorStrike: marketStrikePrice(opportunity.market) ?? opportunity.market.floor_strike,
       closeTime: opportunity.closeTime,
       engineProbability: opportunity.side === 'yes' ? opportunity.window.probabilityUp : opportunity.window.probabilityDown,
       engineConfidence: opportunity.window.confidence,
@@ -6982,7 +6985,7 @@ class TradingBot {
       ticker: opp.market.ticker,
       side: opp.side,
       priceCents: opp.priceCents,
-      floorStrike: opp.market.floor_strike,
+      floorStrike: marketStrikePrice(opp.market) ?? opp.market.floor_strike,
       closeTime: opp.closeTime,
       engineProbability: opp.side === 'yes' ? opp.window.probabilityUp : opp.window.probabilityDown,
       engineConfidence: opp.window.confidence,
@@ -7778,7 +7781,7 @@ class TradingBot {
       ticker: opportunity.market.ticker,
       side: opportunity.side,
       priceCents: opportunity.priceCents,
-      floorStrike: opportunity.market.floor_strike,
+      floorStrike: marketStrikePrice(opportunity.market) ?? opportunity.market.floor_strike,
       closeTime: opportunity.closeTime,
       engineProbability:
         (opportunity.signalSide || opportunity.side) === 'yes'
