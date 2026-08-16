@@ -195,10 +195,34 @@ body[data-view-mode="bot"] .asset-picker {
   padding: 8px 12px;
 }
 
-.asset-tab.selected {
-  border-color: var(--up);
-  background: color-mix(in srgb, var(--up) 16%, var(--panel-raised));
+.asset-tab.pinned {
+  border-color: var(--accent);
   color: var(--text);
+}
+.picker-hint {
+  margin: 4px 22px 0;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+.manual-strike-form {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  align-items: center;
+}
+.manual-strike-input {
+  width: 9.5rem;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+}
+.manual-strike-form button {
+  padding: 4px 8px;
+  font-size: 0.75rem;
 }
 
 .bot-dashboard-card {

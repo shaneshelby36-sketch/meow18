@@ -49,8 +49,9 @@
     <p class="server-note" id="server-note">Engine + bot run on the server. Closing this page does not stop trading.</p>
 
     <div class="asset-picker" id="asset-picker">
-      <!-- one chip per supported symbol, injected by app.js; tap to toggle which are shown below -->
+      <!-- one chip per supported symbol, injected by app.js; tap to pin which stay on screen -->
     </div>
+    <p class="picker-hint" id="asset-picker-hint">Tap a coin to pin it (max 2). Pinned coins stay on screen and do not rotate.</p>
 
     <main class="grid" id="main-grid">
       <!-- selected asset panels are injected here by app.js -->
@@ -113,9 +114,14 @@
 
       <div class="asset-target-row">
         <div class="target-block">
-          <span class="stat-label">Kalshi 15-min target (over/under)</span>
+          <span class="stat-label">Price to beat (over/under)</span>
           <span class="stat-value target-price">—</span>
           <span class="target-source"></span>
+          <form class="manual-strike-form" autocomplete="off">
+            <input class="manual-strike-input" type="number" inputmode="decimal" step="any" min="0" placeholder="Enter strike $" />
+            <button type="submit" class="btn-secondary manual-strike-set">Set</button>
+            <button type="button" class="btn-secondary manual-strike-clear">Clear</button>
+          </form>
         </div>
         <div class="countdown-block">
           <span class="stat-label">Window settles in</span>

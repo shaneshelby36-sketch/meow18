@@ -15,7 +15,7 @@ const { SignalAccumulatorManager } = require('./signalAccumulator');
 const { KalshiClient, marketStrikePrice, parseMarketCloseMs } = require('./kalshiClient');
 const { TradingBot, SERIES_BY_SYMBOL, tradeableKalshiSymbols, settleExitTiersForDashboard } = require('./bot');
 const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
-const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir, ARCHIVE_RETENTION_DAYS } = require('./paths');
+const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir, ARCHIVE_RETENTION_DAYS, writeJsonAtomic } = require('./paths');
 const APP_VERSION = require('./package.json').version;
 
 ensureDataDir();
@@ -241,6 +241,68 @@ function wireFeed() {
 }
 
 const lastKalshiTargets = Object.create(null);
+const MANUAL_STRIKES_PATH = dataPath('manual-strikes.json');
+const MANUAL_STRIKE_TTL_MS = 15 * 60 * 1000;
+
+function loadManualStrikes() {
+  try {
+    if (fs.existsSync(MANUAL_STRIKES_PATH)) {
+      const raw = JSON.parse(fs.readFileSync(MANUAL_STRIKES_PATH, 'utf8'));
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
+    }
+  } catch (err) {
+    console.warn('[kalshi-target] failed to load manual strikes:', err.message);
+  }
+  return Object.create(null);
+}
+
+let manualStrikes = loadManualStrikes();
+
+function saveManualStrikes() {
+  try {
+    writeJsonAtomic(MANUAL_STRIKES_PATH, manualStrikes);
+  } catch (err) {
+    console.warn('[kalshi-target] failed to save manual strikes:', err.message);
+  }
+}
+
+function pruneManualStrikes(now = Date.now()) {
+  let changed = false;
+  for (const [symbol, row] of Object.entries(manualStrikes)) {
+    const price = Number(row && row.price);
+    const expires = Number(row && row.expiresAt);
+    if (!Number.isFinite(price) || price <= 0 || (Number.isFinite(expires) && expires <= now)) {
+      delete manualStrikes[symbol];
+      changed = true;
+    }
+  }
+  if (changed) saveManualStrikes();
+}
+
+function applyManualStrikes(targets, now = Date.now()) {
+  pruneManualStrikes(now);
+  const out = { ...targets };
+  const fifteen = 15 * 60 * 1000;
+  for (const [symbol, row] of Object.entries(manualStrikes)) {
+    const price = Number(row && row.price);
+    if (!Number.isFinite(price) || price <= 0) continue;
+    const existing = out[symbol];
+    const bucketStart = Math.floor(now / fifteen) * fifteen;
+    out[symbol] = {
+      price,
+      closeTime:
+        (existing && Number(existing.closeTime)) ||
+        Number(row.closeTime) ||
+        bucketStart + fifteen,
+      ticker:
+        (existing && existing.ticker) ||
+        row.ticker ||
+        `FALLBACK-${symbol}-${bucketStart}`,
+      source: 'manual',
+    };
+  }
+  return out;
+}
 
 function targetFromKalshiMarket(market) {
   if (!market) return null;
@@ -325,7 +387,7 @@ async function recompute() {
       input[symbol] = { series: s.series, book: s.book };
     }
 
-    const kalshiTargets = await fetchKalshiTargets();
+    const kalshiTargets = applyManualStrikes(await fetchKalshiTargets());
     const result = buildPredictions(input, kalshiTargets, signalAccumulatorManager);
     result.feedStatus = Object.fromEntries(
       Object.entries(state).map(([sym, s]) => [sym, s.feedStatus])
@@ -375,6 +437,9 @@ async function recompute() {
     }
 
     latestPrediction = result;
+    if (latestPrediction && typeof latestPrediction === 'object') {
+      latestPrediction.manualStrikes = manualStrikes;
+    }
     lastComputeError = null;
 
     if (bot) {
@@ -436,6 +501,40 @@ app.get("/", (req, res) => {
 });
   app.get('/api/latest', (req, res) => {
     res.json(latestPrediction);
+  });
+
+  app.get('/api/strikes/manual', (req, res) => {
+    pruneManualStrikes();
+    res.json({ ok: true, strikes: manualStrikes });
+  });
+
+  app.post('/api/strikes/manual', (req, res) => {
+    const symbol = String((req.body && req.body.symbol) || '').toUpperCase();
+    if (!state[symbol]) {
+      return res.status(400).json({ ok: false, message: 'Unknown symbol.' });
+    }
+    const raw = req.body && req.body.price;
+    if (raw == null || raw === '') {
+      delete manualStrikes[symbol];
+      saveManualStrikes();
+      recompute().catch((err) => console.error('[kalshi-target] recompute after clear failed:', err.message));
+      return res.json({ ok: true, strikes: manualStrikes });
+    }
+    const price = Number(raw);
+    if (!Number.isFinite(price) || price <= 0) {
+      return res.status(400).json({ ok: false, message: 'Enter a price greater than 0.' });
+    }
+    const prev = lastKalshiTargets[symbol] || (latestPrediction && latestPrediction[symbol]) || {};
+    manualStrikes[symbol] = {
+      price,
+      setAt: Date.now(),
+      expiresAt: Date.now() + MANUAL_STRIKE_TTL_MS,
+      ticker: prev.kalshiTicker || prev.ticker || null,
+      closeTime: prev.targetCloseTime || prev.closeTime || null,
+    };
+    saveManualStrikes();
+    recompute().catch((err) => console.error('[kalshi-target] recompute after manual strike failed:', err.message));
+    res.json({ ok: true, strikes: manualStrikes });
   });
 
   app.get('/api/health', (req, res) => {

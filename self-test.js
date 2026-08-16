@@ -536,6 +536,13 @@ function testPrediction() {
     new SignalAccumulatorManager({ w5: 120000, w10: 240000, w15: 420000 })
   );
   check(result.BTC && result.BTC.ready, 'BTC prediction ready');
+  checkEq(result.BTC.targetSource, 'kalshi', 'kalshi target source when strike provided');
+  const manualPred = buildPredictions(
+    { BTC: { series, book } },
+    { BTC: { price: 61234.5, ticker: 'MANUAL-BTC', closeTime: Date.now() + 600_000, source: 'manual' } }
+  );
+  checkEq(manualPred.BTC.targetSource, 'manual', 'manual price-to-beat source');
+  checkEq(manualPred.BTC.targetPrice, 61234.5, 'manual strike used as target');
   check(result.ETH && result.ETH.ready, 'ETH prediction ready');
   check(result.BTC.windows.w5 && result.BTC.windows.w15, 'all windows present');
   check(result.BTC.targetCloseTime > Date.now(), 'targetCloseTime in future');

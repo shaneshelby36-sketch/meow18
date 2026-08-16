@@ -425,7 +425,11 @@ function buildPredictions(data, kalshiTargets = {}, accumulatorManager = null) {
     const strike = kalshiTarget ? Number(kalshiTarget.price) : NaN;
     const hasKalshiStrike = Number.isFinite(strike) && strike > 0;
     const targetPrice = hasKalshiStrike ? strike : ind.price;
-    const targetSource = hasKalshiStrike ? 'kalshi' : 'current_price';
+    const targetSource = hasKalshiStrike
+      ? kalshiTarget.source === 'manual'
+        ? 'manual'
+        : 'kalshi'
+      : 'current_price';
 
     const windows = {};
     for (const w of WINDOWS) {

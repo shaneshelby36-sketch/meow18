@@ -28,7 +28,7 @@ const ASSET_LABELS = {
 
 // Non-asset keys that can appear alongside per-symbol entries in the
 // /api/latest response — used to figure out which keys are actual assets.
-const NON_ASSET_KEYS = new Set(['correlation', 'timestamp', 'feedStatus', 'message']);
+const NON_ASSET_KEYS = new Set(['correlation', 'timestamp', 'feedStatus', 'message', 'manualStrikes']);
 
 const REC_CLASS = {
   'Strong Buy': 'strong-buy',
@@ -40,6 +40,7 @@ const REC_CLASS = {
 
 const MAX_BROWSER_WINDOWS = 3;
 const WINDOW_REGISTRY_KEY = 'cpe-window-registry';
+const PINNED_ASSETS_KEY = 'cpe-pinned-assets';
 const WINDOW_CHANNEL_NAME = 'cpe-windows';
 const THIS_WINDOW_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -54,7 +55,6 @@ const FOCUS_VIEW = parseFocusView();
 
 let pollTimer = null;
 let lastPrices = {};
-let activeAssetSymbol = null;
 let latestRankedSymbols = [];
 let windowChannel = null;
 const companionHandles = {};
@@ -141,8 +141,10 @@ function openOtherWindows() {
   const btn = document.getElementById('open-windows-btn');
 
   if (FOCUS_VIEW.mode === 'hub') {
-    const best = ranked[0];
-    const second = ranked[1];
+    const pinned = loadPinnedAssets();
+    const featured = pickFeaturedSymbols(ranked, pinned);
+    const best = featured[0] || ranked[0];
+    const second = featured[1] || ranked.find((s) => s !== best);
     let blocked = false;
     let opened = 0;
 
@@ -228,6 +230,53 @@ function applyFocusModeLayout() {
 
 // ---------- settings persistence ----------
 
+function loadPinnedAssets() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PINNED_ASSETS_KEY) || '[]');
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const item of raw) {
+      const symbol = String(item || '').toUpperCase();
+      if (!symbol || seen.has(symbol)) continue;
+      seen.add(symbol);
+      out.push(symbol);
+      if (out.length >= 2) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function savePinnedAssets(symbols) {
+  localStorage.setItem(PINNED_ASSETS_KEY, JSON.stringify((symbols || []).slice(0, 2)));
+}
+
+function togglePinnedAsset(symbol) {
+  const key = String(symbol || '').toUpperCase();
+  if (!key) return loadPinnedAssets();
+  const cur = loadPinnedAssets();
+  const idx = cur.indexOf(key);
+  if (idx >= 0) cur.splice(idx, 1);
+  else if (cur.length < 2) cur.push(key);
+  else {
+    cur.shift();
+    cur.push(key);
+  }
+  savePinnedAssets(cur);
+  return cur;
+}
+
+function pickFeaturedSymbols(ranked, pinned) {
+  const pins = (pinned || []).filter((symbol) => ranked.includes(symbol));
+  if (pins.length) {
+    const extra = ranked.find((symbol) => !pins.includes(symbol));
+    return [...pins, extra].filter(Boolean).slice(0, 2);
+  }
+  return (ranked || []).filter(Boolean).slice(0, 2);
+}
+
 function loadSettings() {
   let engineUrl = localStorage.getItem('engineUrl') || DEFAULTS.engineUrl;
   let refreshSeconds = parseInt(localStorage.getItem('refreshSeconds') || '', 10);
@@ -238,6 +287,25 @@ function loadSettings() {
 function saveSettings(engineUrl, refreshSeconds) {
   localStorage.setItem('engineUrl', engineUrl.replace(/\/+$/, ''));
   localStorage.setItem('refreshSeconds', String(refreshSeconds));
+}
+
+async function submitManualStrike(symbol, rawPrice) {
+  const { engineUrl } = loadSettings();
+  const trimmed = String(rawPrice ?? '').trim();
+  try {
+    const res = await fetch(`${engineUrl}/api/strikes/manual`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbol,
+        price: trimmed === '' ? null : trimmed,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.message || 'Could not save strike');
+  } catch (err) {
+    console.warn('[dashboard] manual strike failed:', err.message);
+  }
 }
 
 // ---------- rendering ----------
@@ -275,6 +343,19 @@ function ensurePanels(symbols) {
     // Default starting tab before any real data/phase info has arrived.
     selectTab(panel, 'w5');
 
+    const form = panel.querySelector('.manual-strike-form');
+    const input = panel.querySelector('.manual-strike-input');
+    const clearBtn = panel.querySelector('.manual-strike-clear');
+    if (form && input) {
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submitManualStrike(symbol, input.value);
+      });
+    }
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => submitManualStrike(symbol, ''));
+    }
+
     grid.appendChild(panel);
   }
 }
@@ -305,6 +386,8 @@ function renderAssetTabs(symbols, data) {
   if (FOCUS_VIEW.mode === 'bot') {
     picker.replaceChildren();
     picker.hidden = true;
+    const hint = document.getElementById('asset-picker-hint');
+    if (hint) hint.hidden = true;
     grid.querySelectorAll('.asset-panel[data-symbol]').forEach((panel) => {
       panel.hidden = true;
     });
@@ -320,7 +403,9 @@ function renderAssetTabs(symbols, data) {
   if (FOCUS_VIEW.mode === 'asset') {
     picker.hidden = true;
     picker.replaceChildren();
-    const focusSymbol = ranked.includes(FOCUS_VIEW.symbol) ? FOCUS_VIEW.symbol : ranked[0];
+    const hint = document.getElementById('asset-picker-hint');
+    if (hint) hint.hidden = true;
+    const focusSymbol = FOCUS_VIEW.symbol;
     grid.querySelectorAll('.asset-panel[data-symbol]').forEach((panel) => {
       panel.hidden = panel.dataset.symbol !== focusSymbol;
     });
@@ -334,23 +419,27 @@ function renderAssetTabs(symbols, data) {
     return;
   }
 
-  // Hub: at most two best cryptos + the bot card (3 panels total).
+  // Hub: at most two cryptos + the bot card. Pinned coins stay; otherwise best/2nd.
   picker.hidden = false;
-  const topSymbol = ranked[0] || null;
-  if (!ranked.includes(activeAssetSymbol) || activeAssetSymbol === topSymbol) activeAssetSymbol = null;
-  const featured = [topSymbol, activeAssetSymbol || ranked[1]].filter((symbol, index, arr) => symbol && arr.indexOf(symbol) === index).slice(0, 2);
+  const hint = document.getElementById('asset-picker-hint');
+  if (hint) hint.hidden = false;
+  const pinned = loadPinnedAssets();
+  const featured = pickFeaturedSymbols(ranked, pinned);
 
   picker.replaceChildren();
-  ranked.forEach((symbol, index) => {
+  ranked.forEach((symbol) => {
     const asset = data[symbol];
     const tab = document.createElement('button');
     tab.type = 'button';
-    tab.className = 'asset-tab' + (featured.includes(symbol) ? ' selected' : '');
+    tab.className =
+      'asset-tab' +
+      (featured.includes(symbol) ? ' selected' : '') +
+      (pinned.includes(symbol) ? ' pinned' : '');
     const rec = asset && asset.ready && asset.overall ? asset.overall.recommendation : 'Seeding';
-    tab.textContent = `${index === 0 ? 'Best: ' : index === 1 ? '2nd: ' : ''}${symbol} · ${rec}`;
+    const pinMark = pinned.includes(symbol) ? '📌 ' : '';
+    tab.textContent = `${pinMark}${symbol} · ${rec}`;
     tab.addEventListener('click', () => {
-      // Second slot only — best stays pinned; never show more than 2 crypto panels.
-      activeAssetSymbol = symbol === topSymbol ? null : symbol;
+      togglePinnedAsset(symbol);
       renderAssetTabs(symbols, data);
     });
     picker.appendChild(tab);
@@ -425,7 +514,21 @@ function renderAsset(symbol, assetData) {
   const targetEl = panel.querySelector('.target-price');
   const sourceEl = panel.querySelector('.target-source');
   targetEl.textContent = assetData.targetPrice != null ? `$${formatPrice(assetData.targetPrice, symbol)}` : '—';
-  sourceEl.textContent = assetData.targetSource === 'kalshi' ? 'Live Kalshi strike' : 'No Kalshi market found — using current price';
+  sourceEl.textContent =
+    assetData.targetSource === 'kalshi'
+      ? 'Live Kalshi strike'
+      : assetData.targetSource === 'manual'
+        ? 'Manual price to beat'
+        : 'No Kalshi market found — using current price (enter strike below)';
+  const strikeInput = panel.querySelector('.manual-strike-input');
+  if (strikeInput && document.activeElement !== strikeInput) {
+    if (assetData.targetSource === 'manual' && assetData.targetPrice != null) {
+      strikeInput.value = String(assetData.targetPrice);
+    } else if (!strikeInput.value) {
+      strikeInput.placeholder =
+        assetData.targetPrice != null ? `Strike (now $${formatPrice(assetData.targetPrice, symbol)})` : 'Enter strike $';
+    }
+  }
   if (assetData.targetCloseTime) {
     panel.dataset.targetCloseTime = String(assetData.targetCloseTime);
     updateBigCountdown(panel);
