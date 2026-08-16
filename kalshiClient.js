@@ -225,6 +225,13 @@ class KalshiClient {
       ? fs.readFileSync(privateKeyPath, 'utf8')
       : null);
     this._openMarketsCache = new Map();
+    this._openMarketsInflight = new Map();
+    this._marketByTickerCache = new Map();
+    this._marketByTickerInflight = new Map();
+    this._publicGate = Promise.resolve();
+    this._lastPublicAt = 0;
+    this._cooldownUntil = 0;
+    this._429LogAt = 0;
   }
 
   get hasCredentials() {
@@ -259,7 +266,7 @@ class KalshiClient {
   }
 
   async _request(method, path, opts = {}) {
-    const { query, body, auth = true, _retried = false } = opts;
+    const { query, body, auth = true } = opts;
     const qs = query
       ? '?' + new URLSearchParams(Object.entries(query).filter(([, v]) => v != null)).toString()
       : '';
@@ -278,10 +285,6 @@ class KalshiClient {
       headers,
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (res.status === 429 && !_retried) {
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      return this._request(method, path, { ...opts, query, body, auth, _retried: true });
-    }
     const text = await res.text();
     let json;
     try {
@@ -300,46 +303,94 @@ class KalshiClient {
 
   // ---------- public market data (no auth needed) ----------
 
-  async getOpenMarkets(seriesTicker, limit = 20) {
-    if (!this._openMarketsCache) this._openMarketsCache = new Map();
-    const cacheKey = String(seriesTicker || '');
-    const cached = this._openMarketsCache.get(cacheKey);
-    if (cached && Date.now() - cached.at < 3000) return cached.markets;
+  _noteRateLimit() {
+    this._cooldownUntil = Date.now() + 20_000;
+    if (Date.now() - this._429LogAt > 10_000) {
+      this._429LogAt = Date.now();
+      console.warn('[kalshi] rate limited (429) — pausing public GETs ~20s and using cached markets');
+    }
+  }
 
+  async _withPublicGate(fn) {
+    const run = this._publicGate.then(async () => {
+      const wait = Math.max(
+        0,
+        this._cooldownUntil - Date.now(),
+        this._lastPublicAt + 350 - Date.now()
+      );
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      this._lastPublicAt = Date.now();
+      return fn();
+    });
+    this._publicGate = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  async _listOpenMarketsUncached(seriesTicker, limit) {
     const fetchList = async (query) => {
-      try {
-        const data = await this._request('GET', '/markets', {
-          query: { series_ticker: seriesTicker, limit, ...query },
-          auth: false,
-        });
-        return (data.markets || []).map(normalizeMarketPrices);
-      } catch (err) {
-        if (err && err.status === 429) throw err;
-        return [];
-      }
+      const data = await this._request('GET', '/markets', {
+        query: { series_ticker: seriesTicker, limit, ...query },
+        auth: false,
+      });
+      return (data.markets || []).map(normalizeMarketPrices);
     };
     const usable = (list) =>
       (Array.isArray(list) ? list : []).filter((m) => {
         const s = String(m.status || '').toLowerCase();
-        // Live 15m crypto markets currently come back as status=active even
-        // when requested with status=open. Do not query status=active — that
-        // param is 400 on Kalshi's API.
         return !s || s === 'open' || s === 'active' || s === 'initialized' || s === 'unopened';
       });
 
-    try {
-      let open = usable(await fetchList({ status: 'open' }));
-      if (!open.length) {
-        open = usable(await fetchList({ min_close_ts: Math.floor(Date.now() / 1000) }));
-      }
-      if (!open.length) open = usable(await fetchList({}));
-      this._openMarketsCache.set(cacheKey, { at: Date.now(), markets: open });
-      return open;
-    } catch (err) {
+    let open = usable(await fetchList({ status: 'open' }));
+    if (!open.length) {
+      open = usable(await fetchList({ min_close_ts: Math.floor(Date.now() / 1000) }));
+    }
+    return open;
+  }
+
+  async getOpenMarkets(seriesTicker, limit = 20) {
+    if (!this._openMarketsCache) this._openMarketsCache = new Map();
+    if (!this._openMarketsInflight) this._openMarketsInflight = new Map();
+    const cacheKey = String(seriesTicker || '');
+    const now = Date.now();
+    const cached = this._openMarketsCache.get(cacheKey);
+    if (cached && now - cached.at < 12_000) return cached.markets;
+
+    const inflight = this._openMarketsInflight.get(cacheKey);
+    if (inflight) return inflight;
+
+    if (now < this._cooldownUntil) {
       if (cached) return cached.markets;
-      console.warn(`[kalshi] getOpenMarkets ${seriesTicker}:`, err && err.message ? err.message : err);
       return [];
     }
+
+    const work = this._withPublicGate(async () => {
+      try {
+        if (Date.now() < this._cooldownUntil) {
+          const again = this._openMarketsCache.get(cacheKey);
+          return again ? again.markets : [];
+        }
+        const markets = await this._listOpenMarketsUncached(seriesTicker, limit);
+        this._openMarketsCache.set(cacheKey, { at: Date.now(), markets });
+        return markets;
+      } catch (err) {
+        if (err && err.status === 429) {
+          this._noteRateLimit();
+          if (cached) return cached.markets;
+          return [];
+        }
+        if (cached && now - cached.at < 60_000) return cached.markets;
+        console.warn(`[kalshi] getOpenMarkets ${seriesTicker}:`, err && err.message ? err.message : err);
+        return cached ? cached.markets : [];
+      } finally {
+        this._openMarketsInflight.delete(cacheKey);
+      }
+    });
+
+    this._openMarketsInflight.set(cacheKey, work);
+    return work;
   }
 
   /**
@@ -360,8 +411,38 @@ class KalshiClient {
   }
 
   async getMarket(ticker) {
-    const data = await this._request('GET', `/markets/${ticker}`, { auth: false });
-    return normalizeMarketPrices(data.market);
+    const key = String(ticker || '');
+    if (!key) return null;
+    if (!this._marketByTickerCache) this._marketByTickerCache = new Map();
+    if (!this._marketByTickerInflight) this._marketByTickerInflight = new Map();
+    const now = Date.now();
+    const cached = this._marketByTickerCache.get(key);
+    if (cached && now - cached.at < 1500) return cached.market;
+
+    const inflight = this._marketByTickerInflight.get(key);
+    if (inflight) return inflight;
+
+    if (now < this._cooldownUntil && cached) return cached.market;
+
+    const work = this._withPublicGate(async () => {
+      try {
+        if (Date.now() < this._cooldownUntil) {
+          return cached ? cached.market : null;
+        }
+        const data = await this._request('GET', `/markets/${key}`, { auth: false });
+        const market = normalizeMarketPrices(data.market);
+        this._marketByTickerCache.set(key, { at: Date.now(), market });
+        return market;
+      } catch (err) {
+        if (err && err.status === 429) this._noteRateLimit();
+        if (cached) return cached.market;
+        throw err;
+      } finally {
+        this._marketByTickerInflight.delete(key);
+      }
+    });
+    this._marketByTickerInflight.set(key, work);
+    return work;
   }
 
   async getOrderbook(ticker) {

@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { dataPath, ensureDataDir, writeJsonAtomic, pruneArchiveFiles } = require('./paths');
-const { bookSideFromLegacy, marketStrikePrice } = require('./kalshiClient');
+const { bookSideFromLegacy, marketStrikePrice, parseMarketCloseMs } = require('./kalshiClient');
 
 ensureDataDir();
 pruneArchiveFiles();
@@ -5148,6 +5148,24 @@ class TradingBot {
   async _fetchLiveMarket(seriesTicker, minMsLeft = 1500) {
     if (!seriesTicker || !this.client) return null;
     if (!this._lastLiveMarket) this._lastLiveMarket = Object.create(null);
+    const cached = this._lastLiveMarket[seriesTicker];
+    const cachedClose = cached ? parseMarketCloseMs(cached) : NaN;
+    if (cached && Number.isFinite(cachedClose) && cachedClose > Date.now() + Math.max(500, minMsLeft)) {
+      const ticker = cached.ticker;
+      if (ticker && typeof this.client.getMarket === 'function') {
+        try {
+          const fresh = await this._getMarketBounded(ticker, 2000);
+          if (fresh) {
+            this._lastLiveMarket[seriesTicker] = fresh;
+            return fresh;
+          }
+        } catch (_) {
+          // keep cached window rather than re-list the whole series
+        }
+      }
+      return cached;
+    }
+
     let found = null;
     if (typeof this.client.getLiveOpenMarket === 'function') {
       try {
@@ -5156,7 +5174,7 @@ class TradingBot {
         found = null;
       }
     }
-    if (!found) {
+    if (!found && typeof this.client.getOpenMarkets === 'function') {
       const markets = await this.client.getOpenMarkets(seriesTicker, 20);
       found =
         pickLiveOpenMarket(markets, Date.now(), minMsLeft) ||
@@ -5166,12 +5184,7 @@ class TradingBot {
       this._lastLiveMarket[seriesTicker] = found;
       return found;
     }
-    const cached = this._lastLiveMarket[seriesTicker];
-    if (cached) {
-      const closeRaw = cached.close_time != null ? cached.close_time : cached.expected_expiration_time;
-      const closeMs = closeRaw ? new Date(closeRaw).getTime() : NaN;
-      if (Number.isFinite(closeMs) && closeMs > Date.now() + 500) return cached;
-    }
+    if (cached && Number.isFinite(cachedClose) && cachedClose > Date.now() + 500) return cached;
     return null;
   }
 

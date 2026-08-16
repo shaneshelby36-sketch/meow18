@@ -668,6 +668,43 @@ async function testKalshiClient() {
     checkEq(marketStrikePrice(picked), 63048.28, 'live active market strike parsed from subtitle');
   }
 
+  {
+    const c = new KalshiClient({});
+    let n = 0;
+    c._request = async () => {
+      n += 1;
+      await new Promise((r) => setTimeout(r, 15));
+      return {
+        markets: [
+          {
+            ticker: 'KXBTC15M-ONE',
+            status: 'open',
+            close_time: new Date(Date.now() + 60_000).toISOString(),
+            floor_strike: 1,
+          },
+        ],
+      };
+    };
+    const [a, b] = await Promise.all([c.getOpenMarkets('KXBTC15M'), c.getOpenMarkets('KXBTC15M')]);
+    checkEq(n, 1, 'parallel getOpenMarkets coalesces to one HTTP call');
+    check(a[0] && b[0] && a[0].ticker === b[0].ticker, 'coalesced callers share the same list');
+  }
+
+  {
+    const c = new KalshiClient({});
+    c._openMarketsCache.set('KXBTC15M', {
+      at: Date.now() - 20_000,
+      markets: [{ ticker: 'STALE-OK' }],
+    });
+    c._request = async () => {
+      const err = new Error('Kalshi API GET /markets -> HTTP 429');
+      err.status = 429;
+      throw err;
+    };
+    const list = await c.getOpenMarkets('KXBTC15M');
+    checkEq(list[0] && list[0].ticker, 'STALE-OK', '429 serves stale markets instead of empty');
+  }
+
   // fill_count_fp parsing (v1.2.17+) — never invent fills from status alone
   const fillBot = makeBot(mockClient({}));
   checkEq(fillBot._orderFillCount({ fill_count_fp: '3.00' }), 3, 'fill_count_fp string');

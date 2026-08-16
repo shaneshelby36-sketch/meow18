@@ -272,34 +272,31 @@ async function fetchKalshiTargets() {
 
   await Promise.all(
     Object.entries(series).map(async ([symbol, ticker]) => {
+      const prev = lastKalshiTargets[symbol];
+      // Strike/close don't change mid-window — skip list GETs until rollover.
+      if (prev && prev.price != null && Number(prev.closeTime) > Date.now() + 20_000) {
+        targets[symbol] = prev;
+        return;
+      }
       try {
-        let parsed = null;
-        if (typeof kalshiClient.getLiveOpenMarket === 'function') {
-          parsed = targetFromKalshiMarket(
-            await kalshiClient.getLiveOpenMarket(ticker, { minMsLeft: 1500 })
-          );
-        }
-        if (!parsed) {
-          const markets = await kalshiClient.getOpenMarkets(ticker, 20);
-          const now = Date.now();
-          const live = (Array.isArray(markets) ? markets : [])
-            .map((market) => ({ market, closeMs: parseMarketCloseMs(market) }))
-            .filter(({ closeMs }) => Number.isFinite(closeMs) && closeMs > now + 1500)
-            .sort((a, b) => a.closeMs - b.closeMs);
-          parsed = targetFromKalshiMarket(live[0] && live[0].market);
-        }
+        const parsed = targetFromKalshiMarket(
+          typeof kalshiClient.getLiveOpenMarket === 'function'
+            ? await kalshiClient.getLiveOpenMarket(ticker, { minMsLeft: 1500 })
+            : null
+        );
 
-        const prev = lastKalshiTargets[symbol];
-        if (parsed && parsed.price == null && prev && prev.ticker === parsed.ticker && prev.price != null) {
-          parsed = { ...parsed, price: prev.price };
+        const keep = lastKalshiTargets[symbol];
+        let next = parsed;
+        if (next && next.price == null && keep && keep.ticker === next.ticker && keep.price != null) {
+          next = { ...next, price: keep.price };
         }
-        if (parsed && parsed.price != null) {
-          lastKalshiTargets[symbol] = parsed;
-          targets[symbol] = parsed;
+        if (next && next.price != null) {
+          lastKalshiTargets[symbol] = next;
+          targets[symbol] = next;
           return;
         }
-        if (parsed) {
-          targets[symbol] = parsed;
+        if (next) {
+          targets[symbol] = next;
           return;
         }
       } catch (err) {
@@ -308,7 +305,6 @@ async function fetchKalshiTargets() {
         );
       }
 
-      const prev = lastKalshiTargets[symbol];
       if (prev && Number(prev.closeTime) > Date.now() + 1500 && prev.price != null) {
         targets[symbol] = prev;
       }
