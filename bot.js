@@ -5242,14 +5242,27 @@ class TradingBot {
   }
 
   async _getMarketBounded(ticker, timeoutMs = 4000) {
+    if (!ticker || !this.client || typeof this.client.getMarket !== 'function') return null;
+    const peek = (maxAgeMs) =>
+      typeof this.client.getCachedMarket === 'function'
+        ? this.client.getCachedMarket(ticker, maxAgeMs)
+        : null;
+    const fresh = peek(1500);
+    if (fresh) return fresh;
+
     let timer = null;
     try {
       return await Promise.race([
         this.client.getMarket(ticker),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`getMarket timeout after ${timeoutMs}ms`)), timeoutMs);
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(peek(60_000) || null), timeoutMs);
         }),
       ]);
+    } catch (err) {
+      const fallback = peek(60_000);
+      if (fallback) return fallback;
+      console.warn(`[bot] getMarket ${ticker}:`, err && err.message ? err.message : err);
+      return null;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -5334,9 +5347,8 @@ class TradingBot {
     try {
       market = await this._getMarketBounded(trade.ticker, 4000);
     } catch (err) {
-      this.lastError = `Failed to fetch open position's market (${trade.ticker}): ${err.message}`;
-      console.error('[bot]', this.lastError);
-      return;
+      console.warn(`[bot] market fetch ${trade.ticker}:`, err && err.message ? err.message : err);
+      market = null;
     }
 
     if (!market) return;
@@ -6101,10 +6113,8 @@ class TradingBot {
         }
       }
     }
-    // runCycle finishes shadows once (manage+open). Watchdog-only ticks still manage them.
-    if (!this._inShadow && !this._inRunCycle) {
-      await this._runShadowBooks(predictions, { openNew: false });
-    }
+    // Shadows settle on the prediction cycle. The 2s watchdog is live-only so
+    // six shadow books cannot queue getMarket behind a 429 cooldown.
   }
 
   /**

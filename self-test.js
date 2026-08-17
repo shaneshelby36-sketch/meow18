@@ -712,6 +712,22 @@ async function testKalshiClient() {
     checkEq(list[0] && list[0].ticker, 'STALE-OK', '429 serves stale markets instead of empty');
   }
 
+  {
+    const c = new KalshiClient({});
+    c._cooldownUntil = Date.now() + 20_000;
+    let n = 0;
+    c._request = async () => {
+      n += 1;
+      await new Promise((r) => setTimeout(r, 50));
+      return { market: { ticker: 'SHOULD-NOT-FETCH' } };
+    };
+    const started = Date.now();
+    const m = await c.getMarket('KXETH15M-TIMEOUT');
+    checkEq(m, null, 'getMarket during 429 cooldown returns immediately');
+    checkEq(n, 0, 'getMarket during cooldown does not hit HTTP');
+    check(Date.now() - started < 200, 'getMarket cooldown path does not wait on the gate');
+  }
+
   // fill_count_fp parsing (v1.2.17+) — never invent fills from status alone
   const fillBot = makeBot(mockClient({}));
   checkEq(fillBot._orderFillCount({ fill_count_fp: '3.00' }), 3, 'fill_count_fp string');

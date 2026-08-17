@@ -234,6 +234,16 @@ class KalshiClient {
     this._429LogAt = 0;
   }
 
+  getCachedMarket(ticker, maxAgeMs = Infinity) {
+    const key = String(ticker || '');
+    if (!key || !this._marketByTickerCache) return null;
+    const hit = this._marketByTickerCache.get(key);
+    if (!hit || !hit.market) return null;
+    const age = Date.now() - Number(hit.at || 0);
+    if (Number.isFinite(maxAgeMs) && age > maxAgeMs) return null;
+    return hit.market;
+  }
+
   get hasCredentials() {
     return !!(this.keyId && this.privateKey);
   }
@@ -418,11 +428,13 @@ class KalshiClient {
     const now = Date.now();
     const cached = this._marketByTickerCache.get(key);
     if (cached && now - cached.at < 1500) return cached.market;
+    // Never sit on the 429 cooldown — timeouts then pile up and freeze paper.
+    if (now < this._cooldownUntil) {
+      return cached ? cached.market : null;
+    }
 
     const inflight = this._marketByTickerInflight.get(key);
     if (inflight) return inflight;
-
-    if (now < this._cooldownUntil && cached) return cached.market;
 
     const work = this._withPublicGate(async () => {
       try {
