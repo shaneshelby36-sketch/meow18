@@ -643,9 +643,10 @@ const MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT = 78;
 const MODEL_MOMENTUM_STALL_MS_DEFAULT = 4_000;
 /** After +bank green, TP if bid pulls back this many ¢ from peak. */
 const MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT = 1;
-/** Model entries below this ask use reduced stake (see modelLowPriceStakeQuarters). */
-const MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT = 70;
-/** Under-70¢ stake as fourths of full: 1=¼, 2=½ (default), 3=¾. */
+/** Model entries below this ask always use half stake. Hard cutoff — not a slider. */
+const MODEL_HALF_STAKE_UNDER_CENTS = 70;
+/** Kept for saved configs / UI remnants; sizing ignores this and always uses ½ under 70¢. */
+const MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT = MODEL_HALF_STAKE_UNDER_CENTS;
 const MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT = 2;
 /**
  * Confirmation gate: must observe ask below this, then cross it, before entry
@@ -865,27 +866,25 @@ function modelMaxEntrySpreadCents(config = {}) {
   return MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT;
 }
 
-function modelLowPriceMaxCents(config = {}) {
-  const n = Number(config.modelLowPriceMaxCents);
-  if (Number.isFinite(n) && n > 0) return Math.round(n);
-  return MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
+function modelLowPriceMaxCents(_config = {}) {
+  return MODEL_HALF_STAKE_UNDER_CENTS;
 }
 
-/** Under-threshold stake multiplier: 0.25 / 0.5 / 0.75 from quarters slider (1–3). */
-function modelLowPriceStakeQuarters(config = {}) {
-  const q = Math.round(Number(config.modelLowPriceStakeQuarters));
-  if (q === 1 || q === 2 || q === 3) return q;
-  return MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT;
+function modelIsHalfStakeAsk(priceCents) {
+  const p = Number(priceCents);
+  return Number.isFinite(p) && p < MODEL_HALF_STAKE_UNDER_CENTS;
 }
 
-function modelLowPriceStakeFraction(config = {}) {
-  return modelLowPriceStakeQuarters(config) / 4;
+/** Under-70¢ is always half stake. Quarters slider is ignored. */
+function modelLowPriceStakeQuarters(_config = {}) {
+  return 2;
 }
 
-function modelLowPriceStakeLabel(config = {}) {
-  const q = modelLowPriceStakeQuarters(config);
-  if (q === 1) return '¼';
-  if (q === 3) return '¾';
+function modelLowPriceStakeFraction(_config = {}) {
+  return 0.5;
+}
+
+function modelLowPriceStakeLabel(_config = {}) {
   return '½';
 }
 
@@ -1479,7 +1478,7 @@ const MODEL_MAX_ADVERSE_CENTS_DEFAULT = 0;
 const MODEL_HARD_ADVERSE_CENTS_DEFAULT = 8;
 /** Alias / paper fill ceiling: never book more than this many ¢ loss from entry on adverse exits. */
 const MODEL_MAX_LOSS_CENTS_DEFAULT = 8;
-/** Asks at/above this → tighter spread + higher conf + half stake (rich tickets gap hard). */
+/** Asks at/above this → tighter spread + higher conf (rich tickets gap hard). */
 const MODEL_RICH_ASK_CENTS_DEFAULT = 78;
 /** Max ask−bid for rich asks (tighter than normal). */
 const MODEL_RICH_MAX_SPREAD_CENTS_DEFAULT = 2;
@@ -3820,8 +3819,7 @@ class TradingBot {
 
   /**
    * Stake for this entry.
-   * Model: under modelLowPriceMaxCents → fraction of stake (¼ / ½ / ¾).
-   * Model: rich asks (≥78¢) → ½ stake (gap dumps hurt less in dollars).
+   * Model: ask under 70¢ → ½ stake. Hard cutoff — not confidence, rich-ask, or sliders.
    * Settle:
    * - Ask &lt; 80¢: ¼ normal (all coins)
    * - Else NEAR: ½ normal when halfStakeNear is on
@@ -3836,20 +3834,14 @@ class TradingBot {
     const base = Number(this._computeNextStake());
     const safeBase = Number.isFinite(base) && base > 0 ? base : Number(this.config.stakeDollars) || 3;
     const p = Number(priceCents);
-    // Model: only price under low-price threshold gets reduced stake.
     if (model) {
-      if (Number.isFinite(p) && p < modelLowPriceMaxCents(this.config)) {
-        const frac = modelLowPriceStakeFraction(this.config);
-        return Math.max(0.5, +(safeBase * frac).toFixed(2));
-      }
-      if (Number.isFinite(p) && p >= modelRichAskCents(this.config)) {
+      if (modelIsHalfStakeAsk(p)) {
         return Math.max(0.5, +(safeBase * 0.5).toFixed(2));
       }
       return safeBase;
     }
     if (modelUncertain) {
-      const frac = modelLowPriceStakeFraction(this.config);
-      return Math.max(0.5, +(safeBase * frac).toFixed(2));
+      return Math.max(0.5, +(safeBase * 0.5).toFixed(2));
     }
     if (!settle) return safeBase;
     if (Number.isFinite(p) && p < 80) {
@@ -6197,12 +6189,8 @@ class TradingBot {
       return false;
     }
     const isModel = strategy === 'model';
-    // Model reduced stake: cheap asks (low-price) or rich asks (≥78¢ half).
-    let modelQuarter =
-      isModel &&
-      Number.isFinite(priceCents) &&
-      (priceCents < modelLowPriceMaxCents(this.config) ||
-        priceCents >= modelRichAskCents(this.config));
+    // Model reduced stake: hard cutoff — ask under 70¢ uses half stake.
+    let modelQuarter = isModel && modelIsHalfStakeAsk(priceCents);
     const symKey = String(symbol || '').toUpperCase();
     // Never reopen a coin that exited earlier in this same cycle (same-second knife-catch).
     if (this._stoppedSymbolsThisCycle && this._stoppedSymbolsThisCycle.has(symKey)) {
@@ -6475,11 +6463,8 @@ class TradingBot {
           }
         }
 
-        // Re-check reduced-stake threshold on the live working ask.
-        const liveQuarter =
-          isModel &&
-          Number.isFinite(workingPrice) &&
-          workingPrice < modelLowPriceMaxCents(this.config);
+        // Re-check the hard 70¢ half-stake cutoff on the live working ask.
+        const liveQuarter = isModel && modelIsHalfStakeAsk(workingPrice);
         let attemptContracts = Math.max(
           1,
           Math.floor(
@@ -6619,11 +6604,7 @@ class TradingBot {
         }
       }
       trade.entryFeesCents = this._orderFeesCents(fill && fill.order);
-      if (
-        isModel &&
-        Number.isFinite(trade.entryPriceCents) &&
-        trade.entryPriceCents < modelLowPriceMaxCents(this.config)
-      ) {
+      if (isModel && modelIsHalfStakeAsk(trade.entryPriceCents)) {
         modelQuarter = true;
         trade.modelUncertain = true;
       }
@@ -6685,11 +6666,7 @@ class TradingBot {
           `Opened ${symbol} ${side.toUpperCase()} settle position at ${trade.entryPriceCents}¢` +
           ` (hold to settlement${lateNote}${sizeNote}).`;
       } else if (isModel) {
-        const sizeNote = modelQuarter
-          ? priceCents >= modelRichAskCents(this.config)
-            ? ' · ½ stake'
-            : ` · ${modelLowPriceStakeLabel(this.config)}`
-          : '';
+        const sizeNote = modelQuarter ? ' · half stake' : '';
         this.lastDecision =
           `Opened ${symbol} ${side.toUpperCase()} model position at ${trade.entryPriceCents}¢` +
           `${sizeNote} (confidence ${engineConfidence}%).`;
@@ -7750,8 +7727,7 @@ class TradingBot {
     }
 
     const leanStrength = Math.abs(Number(window.probabilityUp) - 50) || 1;
-    // Reduced stake only for asks under the low-price threshold.
-    const uncertain = priceCents < modelLowPriceMaxCents(this.config);
+    const uncertain = modelIsHalfStakeAsk(priceCents);
     return {
       symbol,
       market,
@@ -8547,6 +8523,8 @@ module.exports = {
   modelLowPriceStakeQuarters,
   modelLowPriceStakeFraction,
   modelLowPriceStakeLabel,
+  modelIsHalfStakeAsk,
+  MODEL_HALF_STAKE_UNDER_CENTS,
   modelConfirmCrossCents,
   modelConfirmMaxExtensionCents,
   modelConfirmMinContinueCents,

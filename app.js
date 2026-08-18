@@ -1509,13 +1509,6 @@ const SLIDER_UNITS = {
   'bot-model-confirm-ext': (v) => `+${Math.round(v)}¢ max`,
   'bot-model-min-entry': (v) => `${Math.round(v)}¢`,
   'bot-model-max-entry': (v) => `${Math.round(v)}¢`,
-  'bot-model-low-price': (v) => `under ${Math.round(v)}¢`,
-  'bot-model-low-stake': (v) => {
-    const q = Math.round(Number(v));
-    if (q === 1) return '¼ stake';
-    if (q === 3) return '¾ stake';
-    return '½ stake';
-  },
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
   'bot-model-sitout': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-settle-min': (v) => `${Math.round(v)}¢`,
@@ -1855,8 +1848,6 @@ function wireSliderDisplays() {
     'bot-model-confirm-ext',
     'bot-model-min-entry',
     'bot-model-max-entry',
-    'bot-model-low-price',
-    'bot-model-low-stake',
     'bot-model-bank-green',
     'bot-model-late-extend-conf',
     'bot-settle-min',
@@ -1971,8 +1962,6 @@ function wireBotConfigAutoSave() {
     'bot-model-confirm-ext',
     'bot-model-min-entry',
     'bot-model-max-entry',
-    'bot-model-low-price',
-    'bot-model-low-stake',
     'bot-model-bank-green',
     'bot-model-sitout',
     'bot-settle-min',
@@ -2067,13 +2056,6 @@ async function loadBotConfigIntoForm() {
     if (modelMinEntry) modelMinEntry.value = c.modelMinEntryCents != null ? c.modelMinEntryCents : 60;
     const modelMaxEntry = document.getElementById('bot-model-max-entry');
     if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 93;
-    const modelLowPrice = document.getElementById('bot-model-low-price');
-    if (modelLowPrice) modelLowPrice.value = c.modelLowPriceMaxCents != null ? c.modelLowPriceMaxCents : 70;
-    const modelLowStake = document.getElementById('bot-model-low-stake');
-    if (modelLowStake) {
-      const q = Number(c.modelLowPriceStakeQuarters);
-      modelLowStake.value = q === 1 || q === 2 || q === 3 ? q : 2;
-    }
     const modelBankGreen = document.getElementById('bot-model-bank-green');
     if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 10;
     const modelSitout = document.getElementById('bot-model-sitout');
@@ -2153,8 +2135,6 @@ async function loadBotConfigIntoForm() {
       'bot-model-confirm-ext',
       'bot-model-min-entry',
       'bot-model-max-entry',
-      'bot-model-low-price',
-      'bot-model-low-stake',
       'bot-model-bank-green',
       'bot-model-sitout',
       'bot-settle-min',
@@ -2311,11 +2291,8 @@ async function saveBotConfig(opts = {}) {
     ),
     modelMinEntryCents: parseFloat(document.getElementById('bot-model-min-entry')?.value || '60'),
     modelMaxEntryCents: parseFloat(document.getElementById('bot-model-max-entry')?.value || '93'),
-    modelLowPriceMaxCents: parseFloat(document.getElementById('bot-model-low-price')?.value || '70'),
-    modelLowPriceStakeQuarters: (() => {
-      const q = Math.round(parseFloat(document.getElementById('bot-model-low-stake')?.value || '2'));
-      return q === 1 || q === 2 || q === 3 ? q : 2;
-    })(),
+    modelLowPriceMaxCents: 70,
+    modelLowPriceStakeQuarters: 2,
     modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '10'),
     modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '10'),
     modelPostExitCooldownMinutes:

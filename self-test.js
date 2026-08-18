@@ -3405,6 +3405,41 @@ async function testBotTradingFlow() {
     checkEq(halfBot._effectiveMaxOpenPositions(), 2, 'without touched 90 stay at maxOpen');
   }
 
+  {
+    const modelStakeBot = makeBot(mockClient({}), {
+      stakeDollars: 10,
+      strategyMode: 'model',
+      modelLowPriceMaxCents: 90,
+      modelLowPriceStakeQuarters: 1,
+      modelRichAskCents: 78,
+    });
+    checkEq(
+      modelStakeBot._stakeDollarsForEntry(69, { model: true }),
+      5,
+      'model half stake under 70'
+    );
+    checkEq(
+      modelStakeBot._stakeDollarsForEntry(70, { model: true }),
+      10,
+      'model full stake at 70'
+    );
+    checkEq(
+      modelStakeBot._stakeDollarsForEntry(85, { model: true }),
+      10,
+      'model full stake above 70 even if saved slider said otherwise'
+    );
+    checkEq(
+      modelStakeBot._stakeDollarsForEntry(80, { model: true }),
+      10,
+      'model does not half-stake rich asks'
+    );
+    checkEq(
+      modelStakeBot._stakeDollarsForEntry(50, { model: true, symbol: 'NEAR' }),
+      5,
+      'model under 70 is half only — not NEAR/quarter extra'
+    );
+  }
+
   // Live: official Kalshi result books 0/100 with NO sell order
   let liveOrders = 0;
   let getOrderCalls = 0;
