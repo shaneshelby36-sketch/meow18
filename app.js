@@ -907,6 +907,7 @@ async function refreshBotStatus() {
     bindActivityLogUi();
     bindTradeLogUi();
     renderModelSetups(data.modelSetups);
+    renderModelAutoSwitchNote(data.modelAutoSwitch);
     renderBotDashboard(data);
   } catch (err) {
     modeLine.textContent = 'Could not reach the engine to check bot status.';
@@ -993,6 +994,7 @@ function renderBotDashboard(data) {
   bindTradeLogUi();
   bindActivityLogUi();
   renderModelSetups(data.modelSetups);
+  renderModelAutoSwitchNote(data.modelAutoSwitch);
 }
 
 async function setBotRunning(running) {
@@ -1599,12 +1601,24 @@ function formatSetupKnobs(s) {
 }
 
 function formatSetupScore(score) {
-  if (!score || !score.trades) return 'what-if: no matching fills';
+  if (!score || !score.trades) return 'what-if: no matching fills (raw PnL — no skim)';
   const pnl = Number(score.pnlCents) || 0;
   const dollars = `${pnl >= 0 ? '+' : '−'}$${(Math.abs(pnl) / 100).toFixed(2)}`;
   const wr = score.winRatePct != null ? `${score.winRatePct}% WR` : '';
   const worst = score.worstCents < 0 ? ` · worst −$${(Math.abs(score.worstCents) / 100).toFixed(2)}` : '';
-  return `what-if ${dollars} · ${score.trades} fills · ${wr}${worst}`.replace(/ · $/, '');
+  return `what-if ${dollars} · ${score.trades} fills · ${wr}${worst} (raw, no skim)`.replace(/ · $/, '');
+}
+
+function formatSetupCapital(capital, { prefix = '' } = {}) {
+  if (!capital) return prefix || '';
+  const bits = [];
+  if (capital.paperAvailableCents != null) {
+    bits.push(`avail $${(Number(capital.paperAvailableCents) / 100).toFixed(2)}`);
+  }
+  bits.push(`wallet $${((Number(capital.reserveCents) || 0) / 100).toFixed(2)}`);
+  bits.push(`ins $${((Number(capital.insuranceCents) || 0) / 100).toFixed(2)}`);
+  const line = bits.join(' · ');
+  return prefix ? `${prefix} · ${line}` : line;
 }
 
 function formatShadowScore(shadow) {
@@ -1614,22 +1628,33 @@ function formatShadowScore(shadow) {
   const fills = Number(shadow.trades) || 0;
   const open = Number(shadow.openCount) || 0;
   const wr = shadow.winRatePct != null ? ` · ${shadow.winRatePct}% WR` : '';
-  const avail =
-    shadow.paperAvailableCents != null
-      ? ` · avail $${(Number(shadow.paperAvailableCents) / 100).toFixed(2)}`
-      : '';
+  const cap = formatSetupCapital(shadow);
+  const capBit = cap ? ` · ${cap}` : '';
   const openBit = open ? ` · ${open} open${shadow.openSymbols ? ` ${shadow.openSymbols}` : ''}` : '';
-  if (!fills && !open) return `shadow · waiting${avail}`;
-  return `shadow ${dollars} · ${fills} fill${fills === 1 ? '' : 's'}${wr}${avail}${openBit}`;
+  if (!fills && !open) return `shadow · waiting${capBit}`;
+  return `shadow ${dollars} · ${fills} fill${fills === 1 ? '' : 's'}${wr}${capBit}${openBit}`;
 }
 
-function formatLiveBook(live) {
+function formatLiveBook(live, availDeltaCents = null) {
   if (!live) return 'LIVE book';
-  const avail =
-    live.paperAvailableCents != null
-      ? ` · avail $${(Number(live.paperAvailableCents) / 100).toFixed(2)}`
-      : '';
-  return `LIVE book${avail}`;
+  let line = formatSetupCapital(live, { prefix: 'LIVE book' });
+  if (availDeltaCents != null && Number(availDeltaCents) !== 0) {
+    const d = Number(availDeltaCents);
+    line += ` · ${d > 0 ? '+' : '−'}$${(Math.abs(d) / 100).toFixed(2)}`;
+  }
+  return line;
+}
+
+function renderModelAutoSwitchNote(autoSwitch) {
+  const el = document.getElementById('bot-model-auto-switch-note');
+  if (!el || !autoSwitch) return;
+  if (!autoSwitch.enabled) {
+    el.textContent = 'Auto-switch off — tap a setup to change live book manually.';
+    el.style.color = '';
+    return;
+  }
+  el.textContent = autoSwitch.note || 'Auto-switch on — watches shadow avail when live cash is low.';
+  el.style.color = autoSwitch.note && /Auto-switched/i.test(autoSwitch.note) ? 'var(--up)' : '';
 }
 
 function renderModelSetups(setups) {
@@ -1659,9 +1684,9 @@ function renderModelSetups(setups) {
               : ''
           : '';
       const liveOrShadow = s.active
-        ? `<span class="setup-shadow live">${escapeHtml(formatLiveBook(s.live))}</span>`
+        ? `<span class="setup-shadow live">${escapeHtml(formatLiveBook(s.live, s.availDeltaCents))}</span>`
         : shadow
-          ? `<span class="setup-shadow ${shadowTone}">${escapeHtml(formatShadowScore(shadow))}</span>`
+          ? `<span class="setup-shadow ${shadowTone}">${escapeHtml(formatShadowScore(shadow))}${s.availDeltaCents != null && s.availDeltaCents > 0 ? ` · +$${(s.availDeltaCents / 100).toFixed(2)}` : ''}</span>`
           : '';
       const knobs = formatSetupKnobs(s);
       return `<button type="button" class="model-setup-card${active}" data-setup-id="${escapeHtml(s.id)}">
@@ -1989,6 +2014,7 @@ function wireBotConfigAutoSave() {
     'bot-half-stake-near',
     'bot-second-green',
     'bot-model-invert',
+    'bot-model-auto-switch',
     'bot-symbol',
     'bot-strategy-mode',
   ]) {
@@ -2034,6 +2060,15 @@ async function loadBotConfigIntoForm() {
         c.modelInvertSide === 'on' ||
         c.modelInvertSide === 'true';
       modelInvert.value = on ? 'on' : 'off';
+    }
+    const modelAutoSwitch = document.getElementById('bot-model-auto-switch');
+    if (modelAutoSwitch) {
+      const on =
+        c.modelAutoSwitchSetup === true ||
+        c.modelAutoSwitchSetup === 1 ||
+        c.modelAutoSwitchSetup === 'on' ||
+        c.modelAutoSwitchSetup === 'true';
+      modelAutoSwitch.value = on ? 'on' : 'off';
     }
     const modelConf = document.getElementById('bot-model-confidence');
     if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 58;
@@ -2283,6 +2318,7 @@ async function saveBotConfig(opts = {}) {
     takeProfitCents: parseFloat(document.getElementById('bot-takeprofit').value),
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     modelInvertSide: document.getElementById('bot-model-invert')?.value || 'off',
+    modelAutoSwitchSetup: document.getElementById('bot-model-auto-switch')?.value || 'off',
     modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '58'),
     modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '4'),
     modelConfirmCrossCents: parseFloat(document.getElementById('bot-model-confirm-cross')?.value || '0'),

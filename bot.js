@@ -1956,6 +1956,9 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelOpenGraceMs',
   'modelMaxEntrySpreadCents',
   'modelMinMinutesToOpen',
+  'modelAutoSwitchLowAvailDollars',
+  'modelAutoSwitchMinLeadDollars',
+  'modelAutoSwitchCooldownMinutes',
   'stakeDollars',
   'maxOpenPositions',
   'skimPercent',
@@ -1970,6 +1973,10 @@ const EDITABLE_NUMERIC_FIELDS = [
 const INSURANCE_ARM_DEFAULT = 10;
 const INSURANCE_FLOOR_DEFAULT = 6;
 const INSURANCE_OVERFLOW_DEFAULT = 15;
+/** Auto-switch live MODEL setup when Available is low and a shadow is climbing. */
+const MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT = 20;
+const MODEL_AUTO_SWITCH_MIN_LEAD_DEFAULT = 5;
+const MODEL_AUTO_SWITCH_COOLDOWN_MINUTES_DEFAULT = 60;
 
 /**
  * Resolve arm/floor cents. Floor must be strictly below arm — clamp if not.
@@ -2577,6 +2584,7 @@ const EDITABLE_STRING_FIELDS = {
     return MODEL_SETUPS.some((x) => x.id === s) ? s : null;
   },
   modelInvertSide: (v) => parseOnOffField(v, false),
+  modelAutoSwitchSetup: (v) => parseOnOffField(v, false),
   skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
 };
@@ -2777,7 +2785,39 @@ function saveShadowBooks(books) {
   }
 }
 
-function summarizeShadowLedger(ledger, startingDollars = 100) {
+function summarizeShadowLedger(ledger, startingDollars = 100, settings = {}) {
+  return summarizeLedgerCapital(ledger, startingDollars, settings);
+}
+
+/** Replay skim buckets so shadow avail matches live wallet/insurance rules. */
+function rebuildLedgerSkimFromTrades(ledger, settings = {}) {
+  if (!ledger || !Array.isArray(ledger.trades)) return ledger;
+  let reserveCents = 0;
+  let insuranceCents = 0;
+  let insuranceReady = false;
+  const closed = ledger.trades
+    .filter((t) => t && t.status === 'closed')
+    .sort((a, b) => (Number(a.closedAt) || 0) - (Number(b.closedAt) || 0));
+  for (const t of closed) {
+    const flow = applyProfitBuckets({
+      pnlCents: Number(t.pnlCents) || 0,
+      reserveCents,
+      insuranceCents,
+      insuranceReady,
+      settings,
+      rebuildInsurance: true,
+    });
+    reserveCents = flow.reserveCents;
+    insuranceCents = flow.insuranceCents;
+    insuranceReady = flow.insuranceReady;
+  }
+  ledger.reserveCents = reserveCents;
+  ledger.insuranceCents = insuranceCents;
+  ledger.insuranceReady = insuranceReady;
+  return ledger;
+}
+
+function summarizeLedgerCapital(ledger, startingDollars = 100, settings = {}) {
   const trades = Array.isArray(ledger && ledger.trades) ? ledger.trades : [];
   const closed = trades.filter((t) => t && t.status === 'closed');
   const open = trades.filter((t) => t && t.status === 'open');
@@ -2788,7 +2828,33 @@ function summarizeShadowLedger(ledger, startingDollars = 100) {
     0
   );
   const startingCents = Math.max(0, Math.round(Number(startingDollars) * 100) || 0);
-  const paperAvailableCents = Math.max(0, startingCents + pnlCents - openExposureCents);
+  const insuranceDepositedCents = Number(ledger && ledger.insuranceDepositedCents) || 0;
+
+  let reserveCents = 0;
+  let insuranceCents = 0;
+  let insuranceReady = false;
+  const closedChrono = [...closed].sort(
+    (a, b) => (Number(a.closedAt) || 0) - (Number(b.closedAt) || 0)
+  );
+  for (const t of closedChrono) {
+    const flow = applyProfitBuckets({
+      pnlCents: Number(t.pnlCents) || 0,
+      reserveCents,
+      insuranceCents,
+      insuranceReady,
+      settings,
+      rebuildInsurance: true,
+    });
+    reserveCents = flow.reserveCents;
+    insuranceCents = flow.insuranceCents;
+    insuranceReady = flow.insuranceReady;
+  }
+
+  const paperTotalCents = startingCents + pnlCents + insuranceDepositedCents;
+  const paperAvailableCents = Math.max(
+    0,
+    paperTotalCents - reserveCents - insuranceCents - openExposureCents
+  );
   return {
     pnlCents,
     trades: closed.length,
@@ -2799,8 +2865,14 @@ function summarizeShadowLedger(ledger, startingDollars = 100) {
       .map((t) => String(t.symbol || '').toUpperCase())
       .filter(Boolean)
       .join(','),
-    paperAvailableCents,
     startingCents,
+    paperTotalCents,
+    reserveCents,
+    insuranceCents,
+    insuranceDepositedCents,
+    insuranceReady,
+    openExposureCents,
+    paperAvailableCents,
   };
 }
 
@@ -2954,6 +3026,10 @@ class TradingBot {
       // AUTO universe — which coins may open (default BTC/BNB/SOL). Editable in settings.
       autoTradeSymbols: DEFAULT_AUTO_TRADE_SYMBOLS.join(','),
       activeSetupId: 'core',
+      modelAutoSwitchSetup: 'off',
+      modelAutoSwitchLowAvailDollars: MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT,
+      modelAutoSwitchMinLeadDollars: MODEL_AUTO_SWITCH_MIN_LEAD_DEFAULT,
+      modelAutoSwitchCooldownMinutes: MODEL_AUTO_SWITCH_COOLDOWN_MINUTES_DEFAULT,
       // Legacy opt-in flags (kept in sync from autoTradeSymbols when saved).
       tradeDoge: 'off',
       tradeNear: 'off',
@@ -3030,8 +3106,12 @@ class TradingBot {
     this._tradeLockDepth = 0;
     this._tradeLockInner = Promise.resolve();
     this._shadowBooks = loadShadowBooks();
+    this._rebuildAllShadowLedgerSkim();
     this._inShadow = false;
     this._shadowDirty = false;
+    this._setupAvailSnapshots = Object.create(null);
+    this._lastAutoSetupSwitchAt = 0;
+    this._lastAutoSwitchNote = null;
     this._inRunCycle = false;
     this._removeInvalidPaperTrades();
     this._seedTradeLogFromLedger();
@@ -3168,41 +3248,154 @@ class TradingBot {
     const startingDollars = Number(this.config.paperStartingBalanceDollars);
     const start = Number.isFinite(startingDollars) && startingDollars > 0 ? startingDollars : 100;
     const liveCapital = this._capitalStatus();
+    const skimSettings = this.config;
     return scoreModelSetupsAgainstLog(log).map((row) => {
       const live = row.id === active;
       const book = !live && row.id !== 'all-logged' && this._shadowBooks
         ? this._shadowBooks[row.id]
         : null;
-      const emptyShadow = {
-        pnlCents: 0,
-        trades: 0,
-        wins: 0,
-        winRatePct: null,
-        openCount: 0,
-        openSymbols: '',
-        paperAvailableCents: Math.round(start * 100),
-        startingCents: Math.round(start * 100),
-      };
+      const emptyShadow = summarizeLedgerCapital(emptyShadowLedger(), start, skimSettings);
       const shadow =
         row.id === 'all-logged' || live
           ? null
           : {
-              ...(book ? summarizeShadowLedger(book.ledger, start) : emptyShadow),
+              ...(book ? summarizeLedgerCapital(book.ledger, start, skimSettings) : emptyShadow),
               lastDecision: (book && book.lastDecision) || '',
             };
       const liveBook = live
         ? {
             paperAvailableCents: liveCapital.paperAvailableCents,
-            pnlCents: (liveCapital.paperTotalCents || 0) - (liveCapital.startingCents || 0) - (liveCapital.insuranceDepositedCents || 0),
+            reserveCents: liveCapital.reserveCents,
+            insuranceCents: liveCapital.insuranceCents,
+            insuranceReady: liveCapital.insuranceReady,
+            insuranceDepositedCents: liveCapital.insuranceDepositedCents,
+            paperTotalCents: liveCapital.paperTotalCents,
+            openExposureCents: liveCapital.openExposureCents,
+            pnlCents:
+              (liveCapital.paperTotalCents || 0) -
+              (liveCapital.startingCents || 0) -
+              (liveCapital.insuranceDepositedCents || 0),
           }
         : null;
+      const cap = live ? liveBook : shadow;
+      const prevAvail = this._setupAvailSnapshots ? this._setupAvailSnapshots[row.id] : null;
+      const availDeltaCents =
+        cap && cap.paperAvailableCents != null && prevAvail != null
+          ? cap.paperAvailableCents - prevAvail
+          : null;
       return {
         ...row,
         active: live,
         shadow,
         live: liveBook,
+        availDeltaCents,
       };
     });
+  }
+
+  _snapshotSetupAvails(scoreboard) {
+    if (!this._setupAvailSnapshots) this._setupAvailSnapshots = Object.create(null);
+    for (const row of scoreboard || []) {
+      if (!row || row.id === 'all-logged') continue;
+      const cap = row.active ? row.live : row.shadow;
+      if (cap && cap.paperAvailableCents != null) {
+        this._setupAvailSnapshots[row.id] = cap.paperAvailableCents;
+      }
+    }
+  }
+
+  _modelAutoSwitchEnabled() {
+    const v = String(this.config.modelAutoSwitchSetup == null ? 'off' : this.config.modelAutoSwitchSetup).toLowerCase();
+    return !(v === 'off' || v === 'false' || v === '0' || v === 'no');
+  }
+
+  /**
+   * When live Available is low, switch to a shadow setup whose Available is
+   * climbing and beats live by a margin. Off by default (modelAutoSwitchSetup).
+   */
+  _maybeAutoSwitchModelSetup() {
+    if (!this._modelAutoSwitchEnabled()) {
+      this._lastAutoSwitchNote = null;
+      return null;
+    }
+    if (!isModelStrategyMode(this.config)) return null;
+
+    const scoreboard = this._modelSetupScoreboard();
+    const activeRow = scoreboard.find((r) => r.active);
+    if (!activeRow || !activeRow.live) {
+      this._snapshotSetupAvails(scoreboard);
+      return null;
+    }
+
+    const liveAvail = Number(activeRow.live.paperAvailableCents) || 0;
+    const lowThresholdCents = Math.max(
+      0,
+      Math.round((Number(this.config.modelAutoSwitchLowAvailDollars) || MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT) * 100)
+    );
+    const minLeadCents = Math.max(
+      0,
+      Math.round((Number(this.config.modelAutoSwitchMinLeadDollars) || MODEL_AUTO_SWITCH_MIN_LEAD_DEFAULT) * 100)
+    );
+    const cooldownMs =
+      Math.max(0, Number(this.config.modelAutoSwitchCooldownMinutes) || MODEL_AUTO_SWITCH_COOLDOWN_MINUTES_DEFAULT) *
+      60_000;
+
+    if (liveAvail >= lowThresholdCents) {
+      this._lastAutoSwitchNote = `Live avail $${(liveAvail / 100).toFixed(2)} — above $${(lowThresholdCents / 100).toFixed(2)} switch floor.`;
+      this._snapshotSetupAvails(scoreboard);
+      return null;
+    }
+    if (this._lastAutoSetupSwitchAt && Date.now() - this._lastAutoSetupSwitchAt < cooldownMs) {
+      const mins = Math.ceil((cooldownMs - (Date.now() - this._lastAutoSetupSwitchAt)) / 60000);
+      this._lastAutoSwitchNote = `Live avail low — auto-switch cooling down (~${mins}m).`;
+      this._snapshotSetupAvails(scoreboard);
+      return null;
+    }
+
+    let best = null;
+    for (const row of scoreboard) {
+      if (!row || row.active || row.id === 'all-logged' || !row.shadow) continue;
+      const avail = Number(row.shadow.paperAvailableCents) || 0;
+      if (avail < liveAvail + minLeadCents) continue;
+      if (!row.shadow.trades && !row.shadow.openCount) continue;
+      const prev = this._setupAvailSnapshots ? this._setupAvailSnapshots[row.id] : null;
+      if (prev == null) continue;
+      const delta = avail - prev;
+      if (delta <= 0) continue;
+      if (!best || avail > best.avail || (avail === best.avail && delta > best.delta)) {
+        best = { id: row.id, label: row.label, avail, delta, liveAvail };
+      }
+    }
+
+    this._snapshotSetupAvails(scoreboard);
+
+    if (!best) {
+      this._lastAutoSwitchNote =
+        liveAvail < lowThresholdCents
+          ? `Live avail $${(liveAvail / 100).toFixed(2)} low — no shadow climbing with +$${(minLeadCents / 100).toFixed(2)} lead yet.`
+          : null;
+      return null;
+    }
+
+    this._lastAutoSetupSwitchAt = Date.now();
+    const result = this.applyModelSetup(best.id);
+    const msg =
+      `Auto-switched to “${best.label}”: live avail $${(best.liveAvail / 100).toFixed(2)} → shadow $${(best.avail / 100).toFixed(2)} (+$${(best.delta / 100).toFixed(2)}).`;
+    this.lastDecision = msg;
+    this._logActivity(msg, { kind: 'settings', autoSwitch: true, setupId: best.id });
+    this._lastAutoSwitchNote = msg;
+    return { switched: true, to: best.id, message: msg, ...result };
+  }
+
+  _rebuildAllShadowLedgerSkim() {
+    if (!this._shadowBooks) return;
+    let dirty = false;
+    for (const book of Object.values(this._shadowBooks)) {
+      if (!book || !book.ledger) continue;
+      rebuildLedgerSkimFromTrades(book.ledger, this.config);
+      dirty = true;
+    }
+    if (dirty) this._shadowDirty = true;
   }
 
   /**
@@ -3729,6 +3922,10 @@ class TradingBot {
     await this._withTradeLock(() =>
       this._runShadowBooks(predictions, { openNew: this.isRunning && !!predictions })
     );
+    if (!this._setupAvailSnapshots || !Object.keys(this._setupAvailSnapshots).length) {
+      this._snapshotSetupAvails(this._modelSetupScoreboard());
+    }
+    this._maybeAutoSwitchModelSetup();
   }
 
   /**
@@ -3892,15 +4089,6 @@ class TradingBot {
    * Until armed, losses hit Available; while ready, Insurance absorbs first.
    */
   _applyReserveFlow(trade) {
-    if (this._inShadow) {
-      trade.skimmedCents = 0;
-      trade.insuranceAddedCents = 0;
-      trade.insuranceOverflowCents = 0;
-      trade.insuranceDrawnCents = 0;
-      trade.insuranceReleasedCents = 0;
-      trade.reserveDrawnCents = 0;
-      return;
-    }
     const pnlCents = Number(trade.pnlCents) || 0;
 
     const flow = applyProfitBuckets({
@@ -8419,6 +8607,17 @@ class TradingBot {
       tradeLogTotal: permanentLog.length,
       hourlyPnl,
       modelSetups: this._modelSetupScoreboard(),
+      modelAutoSwitch: {
+        enabled: this._modelAutoSwitchEnabled(),
+        lowAvailDollars:
+          Number(this.config.modelAutoSwitchLowAvailDollars) || MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT,
+        minLeadDollars:
+          Number(this.config.modelAutoSwitchMinLeadDollars) || MODEL_AUTO_SWITCH_MIN_LEAD_DEFAULT,
+        cooldownMinutes:
+          Number(this.config.modelAutoSwitchCooldownMinutes) || MODEL_AUTO_SWITCH_COOLDOWN_MINUTES_DEFAULT,
+        lastSwitchAt: this._lastAutoSetupSwitchAt || null,
+        note: this._lastAutoSwitchNote || null,
+      },
       settleWindowRec,
       stats: {
         totalAttempts: this.ledger.trades.length, // current period open + closed
@@ -8525,6 +8724,11 @@ module.exports = {
   modelLowPriceStakeLabel,
   modelIsHalfStakeAsk,
   MODEL_HALF_STAKE_UNDER_CENTS,
+  summarizeLedgerCapital,
+  rebuildLedgerSkimFromTrades,
+  MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT,
+  MODEL_AUTO_SWITCH_MIN_LEAD_DEFAULT,
+  MODEL_AUTO_SWITCH_COOLDOWN_MINUTES_DEFAULT,
   modelConfirmCrossCents,
   modelConfirmMaxExtensionCents,
   modelConfirmMinContinueCents,

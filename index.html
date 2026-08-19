@@ -372,7 +372,14 @@
 
           <div class="model-setups" id="bot-model-setups">
             <h4 class="bot-panel-subhead">Paper setups</h4>
-            <p class="settings-hint">Tap one to make it the <strong>live</strong> book. The others paper-trade in <strong>shadow</strong> on the same quotes with different knobs (conf, slots, max loss, dump cut) — real parallel PnL + remaining cash, not a what-if. What-if score is still your saved fills filtered by coins/conf.</p>
+            <p class="settings-hint">Tap one to make it the <strong>live</strong> book. Others paper-trade in <strong>shadow</strong> on the same quotes (parallel PnL + skim-adjusted avail / wallet / ins). <strong>What-if</strong> is raw PnL on saved fills only — no skim, not a live bankroll.</p>
+            <label>Auto-switch live setup
+              <select id="bot-model-auto-switch">
+                <option value="off">Off — manual only (default)</option>
+                <option value="on">On — when live avail is low, jump to a climbing shadow</option>
+              </select>
+            </label>
+            <p class="settings-hint" id="bot-model-auto-switch-note" role="status" aria-live="polite">Auto-switch status loads with bot status.</p>
             <div id="bot-model-setups-list" class="model-setups-list"></div>
           </div>
 
