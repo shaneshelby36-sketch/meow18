@@ -1490,6 +1490,29 @@ const EDGE_PRE_CLOSE_MINUTES_DEFAULT = 5;
 /** Edge: after this many minutes held, stop rises to breakeven (entry). 0 = off. */
 const EDGE_BREAKEVEN_AFTER_MINUTES_DEFAULT = 3;
 
+/**
+ * Live exits that must keep selling until flat — not a one-shot GTC that can
+ * sit unfilled while the signal fades. Includes stop + MODEL/edge cash-outs.
+ */
+function isForceRetryExitReason(reason) {
+  const r = String(reason || '').toLowerCase();
+  return (
+    r === 'stop_loss' ||
+    r === 'take_profit' ||
+    r === 'breakeven' ||
+    r === 'model_lean_stop' ||
+    r === 'model_lean_flip' ||
+    r === 'near_certain' ||
+    r === 'pre_close_bank' ||
+    r === 'pre_close_small_loss' ||
+    r === 'settle_stale' ||
+    r === 'settle_stuck' ||
+    r === 'settle_weak_switch' ||
+    r === 'reversal_signal' ||
+    r === 'signal_flip'
+  );
+}
+
 function settleMinutesLeftAtOpen(trade) {
   const opened = Number(trade && trade.openedAt);
   const close = Number(trade && trade.windowCloseTime);
@@ -4820,9 +4843,10 @@ class TradingBot {
           this.lastError =
             `Live exit blocked for ${trade.symbol}: refusing sell at ${baseSellPrice}¢ (must be 1–99). Position left open.`;
           console.error('[bot]', this.lastError);
-          if (reason === 'stop_loss') {
-            trade.pendingForceExit = 'stop_loss';
-            this.lastDecision = 'Stop-loss sell failed — will retry next cycle.';
+          if (isForceRetryExitReason(reason)) {
+            trade.pendingForceExit = reason;
+            this.lastDecision =
+              `${reason} sell blocked (no valid bid) — will retry next cycle until flat.`;
             this._logActivity(this.lastDecision, {
               kind: 'close',
               symbol: trade.symbol,
@@ -4834,36 +4858,50 @@ class TradingBot {
           return false;
         }
 
-        // Protective stop_loss: up to 3 increasingly aggressive sell attempts
-        // in one call so a transient miss does not leave inventory naked.
-        const maxAttempts = reason === 'stop_loss' ? 3 : 1;
+        // Cash-outs / stops: up to 3 IOC sells in one call (−1¢ each, re-quote bid)
+        // so a miss does not leave inventory sitting until the signal clears.
+        const forceRetry = isForceRetryExitReason(reason);
+        const maxAttempts = forceRetry ? 3 : 1;
         let lastErr = null;
         let soldOk = false;
+        let workingBase = baseSellPrice;
 
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
-          const sellPrice = Math.max(1, Math.min(99, baseSellPrice - attempt));
+          if (attempt > 0) {
+            try {
+              const mkt = await this._getMarketBounded(trade.ticker, 1500);
+              const liveBid = mkt ? this._heldSideBidCents(trade, mkt) : null;
+              if (Number.isFinite(liveBid) && liveBid >= 1 && liveBid <= 99) {
+                workingBase = Math.round(liveBid);
+              }
+            } catch {
+              /* keep prior base */
+            }
+            await this._sleep(120);
+          }
+          const sellPrice = Math.max(1, Math.min(99, workingBase - attempt));
           bookedExit = sellPrice;
           if (attempt > 0) {
             console.warn(
-              `[bot] stop-loss sell retry ${attempt + 1}/${maxAttempts} at ${sellPrice}¢ ` +
+              `[bot] ${reason} sell retry ${attempt + 1}/${maxAttempts} at ${sellPrice}¢ ` +
                 `on ${trade.ticker} (${trade.contracts} contracts)`
             );
-            await this._sleep(400);
           }
           try {
             const order = await this.client.createOrder({
-          ticker: trade.ticker,
-          side: trade.side,
-          action: 'sell',
-          count: trade.contracts,
+              ticker: trade.ticker,
+              side: trade.side,
+              action: 'sell',
+              count: trade.contracts,
               priceCents: sellPrice,
+              timeInForce: 'immediate_or_cancel',
             });
             const orderId = this._extractOrderId(order);
             if (!orderId) throw new Error('sell response missing order_id');
             const fill = await this._awaitOrderFill(orderId, {
               minFill: trade.contracts,
-              attempts: 6,
-              delayMs: 350,
+              attempts: forceRetry ? 3 : 6,
+              delayMs: forceRetry ? 120 : 350,
               seedOrder: order,
               heldSide: trade.side,
               action: 'sell',
@@ -4875,8 +4913,6 @@ class TradingBot {
               );
             }
             if (filled > 0 && filled < trade.contracts) {
-              // Partial fill then cancel/timeout: ledger must shrink with exchange
-              // inventory. Book the sold slice; leave the remainder OPEN.
               const avgPartial = this._orderAvgFillPriceCents(
                 fill.order,
                 trade.side,
@@ -4903,8 +4939,6 @@ class TradingBot {
                   fill.order && fill.order.status
                 }) — remainder left open`
               );
-              // Remainder needs another protective exit — do not burn more
-              // same-call retries on a shrunk book; next cycle / pendingForceExit.
               break;
             }
             if (!fill.ok || filled < trade.contracts) {
@@ -4928,7 +4962,7 @@ class TradingBot {
             trade.exitFeesCents = this._orderFeesCents(fill.order);
             soldOk = true;
             break;
-      } catch (err) {
+          } catch (err) {
             lastErr = err;
             console.error(
               `[bot] live exit attempt ${attempt + 1}/${maxAttempts} (${reason}) on ${trade.ticker}: ${err.message}`
@@ -4939,10 +4973,11 @@ class TradingBot {
         if (!soldOk) {
           const msg = (lastErr && lastErr.message) || 'sell failed';
           this.lastError = `Failed live exit (${reason}) on ${trade.ticker}: ${msg}. Position left OPEN.`;
-        console.error('[bot]', this.lastError);
-          if (reason === 'stop_loss') {
-            trade.pendingForceExit = 'stop_loss';
-            this.lastDecision = 'Stop-loss sell failed — will retry next cycle.';
+          console.error('[bot]', this.lastError);
+          if (forceRetry) {
+            trade.pendingForceExit = reason;
+            this.lastDecision =
+              `${reason} sell missed — forcing retry every cycle until flat.`;
             this._logActivity(this.lastDecision, {
               kind: 'close',
               symbol: trade.symbol,
@@ -6590,8 +6625,8 @@ class TradingBot {
     }
 
     if (this.config.mode === 'live' && !this._inShadow) {
-      // Default 2 IOC tries (lighter): re-quote each time, chase ask by +0/+1¢
-      // inside the settle ceiling. Pass entryAttempts to override (cap 3).
+      // MODEL default 3 IOC tries; settle/edge default 2. Re-quote + chase ask.
+      // Pass entryAttempts to override (cap 3).
       let filled = 0;
       let fill = null;
       let orderId = null;
@@ -6600,10 +6635,14 @@ class TradingBot {
       let freshAsk = null;
       const rawAttempts = Number(entryAttempts);
       const maxEntryAttempts =
-        Number.isFinite(rawAttempts) && rawAttempts > 0 ? Math.min(3, Math.floor(rawAttempts)) : 2;
+        Number.isFinite(rawAttempts) && rawAttempts > 0
+          ? Math.min(3, Math.floor(rawAttempts))
+          : isModel
+            ? 3
+            : 2;
 
       for (let attempt = 0; attempt < maxEntryAttempts; attempt++) {
-        if (attempt > 0) await this._sleep(250);
+        if (attempt > 0) await this._sleep(80);
 
         let liveMarket = null;
         try {
@@ -6708,8 +6747,8 @@ class TradingBot {
           }
           fill = await this._awaitOrderFill(orderId, {
             minFill: 1,
-            attempts: 4,
-            delayMs: 200,
+            attempts: 3,
+            delayMs: 100,
             seedOrder: order,
             heldSide: side,
             action: 'buy',
@@ -6719,7 +6758,7 @@ class TradingBot {
             const lastChance = await this._recoverOrderFillsAfterCancel(orderId, {
               priorOrder: fill.order,
               attempts: 2,
-              delayMs: 250,
+              delayMs: 120,
             });
             if (lastChance.filled > 0) {
               filled = lastChance.filled;
@@ -8729,6 +8768,7 @@ module.exports = {
   MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT,
   MODEL_AUTO_SWITCH_MIN_LEAD_DEFAULT,
   MODEL_AUTO_SWITCH_COOLDOWN_MINUTES_DEFAULT,
+  isForceRetryExitReason,
   modelConfirmCrossCents,
   modelConfirmMaxExtensionCents,
   modelConfirmMinContinueCents,
