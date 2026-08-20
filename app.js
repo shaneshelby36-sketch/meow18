@@ -2071,11 +2071,11 @@ async function loadBotConfigIntoForm() {
       modelAutoSwitch.value = on ? 'on' : 'off';
     }
     const modelConf = document.getElementById('bot-model-confidence');
-    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 58;
+    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 55;
     const modelLiveFavor = document.getElementById('bot-model-live-favor');
     if (modelLiveFavor) {
       modelLiveFavor.value =
-        c.modelEntryLiveLeanMarginPct != null ? c.modelEntryLiveLeanMarginPct : 4;
+        c.modelEntryLiveLeanMarginPct != null ? c.modelEntryLiveLeanMarginPct : 3;
     }
     const modelConfirmCross = document.getElementById('bot-model-confirm-cross');
     if (modelConfirmCross) {
@@ -2319,8 +2319,8 @@ async function saveBotConfig(opts = {}) {
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     modelInvertSide: document.getElementById('bot-model-invert')?.value || 'off',
     modelAutoSwitchSetup: document.getElementById('bot-model-auto-switch')?.value || 'off',
-    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '58'),
-    modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '4'),
+    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '55'),
+    modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '3'),
     modelConfirmCrossCents: parseFloat(document.getElementById('bot-model-confirm-cross')?.value || '0'),
     modelConfirmMaxExtensionCents: parseFloat(
       document.getElementById('bot-model-confirm-ext')?.value || '15'

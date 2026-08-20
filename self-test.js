@@ -5821,7 +5821,7 @@ async function testModelStrategy() {
     checkEq(opp && opp.windowKey, 'w5', '12m left uses w5');
   }
 
-  // Soft lean / fair under ask → no entry (don't buy if it might dump)
+  // Soft live favor → no entry (need a real lead)
   {
     const closeMs = Date.now() + 12 * 60 * 1000;
     const bot = makeBot(
@@ -5835,21 +5835,22 @@ async function testModelStrategy() {
         no_bid: 35,
         no_ask: 38,
       }),
-      { strategyMode: 'model', modelMinConfidence: 55 }
+      { strategyMode: 'model', modelMinConfidence: 55, modelEntryLiveLeanMarginPct: 3 }
     );
     const preds = {
       ETH: {
         ready: true,
         price: 3010,
         windows: {
-          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w5: { ...win(51, 70), tracking: { predictedDirection: 'UP' } },
           w10: win(55, 60),
           w15: win(50, 60),
         },
       },
     };
     const soft = await bot._evaluateSymbolForModel('ETH', preds);
-    checkEq(soft, null, 'blocks entry when model % under ask (not likely to hold)');
+    checkEq(soft, null, 'blocks entry when live favor under margin');
+    check(/live favor|live lean/i.test(bot.lastDecision || ''), 'decision cites live favor');
   }
 
   // Fade: lock UP still requires live UP lean, but buys NO
@@ -6065,10 +6066,10 @@ async function testModelStrategy() {
         status: 'open',
         floor_strike: 100000,
         close_time: new Date(closeMs).toISOString(),
-        yes_bid: 37,
-        yes_ask: 39,
-        no_bid: 61,
-        no_ask: 62,
+        yes_bid: 48,
+        yes_ask: 52,
+        no_bid: 80,
+        no_ask: 85,
       }),
       { strategyMode: 'model', modelMinConfidence: 44 }
     );
@@ -6084,11 +6085,11 @@ async function testModelStrategy() {
       },
     };
     const dump = await bot._evaluateSymbolForModel('BTC', preds);
-    checkEq(dump, null, 'blocks entry when model prices ticket below ask (dump risk)');
-    check(/not likely to hold|priced to fall|skip entry/i.test(bot.lastDecision || ''), 'decision cites dump / fair vs ask');
+    checkEq(dump, null, 'blocks entry on extreme overpay (model << ask)');
+    check(/overpay|skip entry|live lean|live favor/i.test(bot.lastDecision || ''), 'decision cites overpay or lean');
   }
 
-  // Pre-entry: steady (not strengthening) signalScore → skip
+  // Pre-entry: steady signalScore is allowed (only weakening blocks)
   {
     const risk = modelEntryDumpRisk({
       window: {
@@ -6101,8 +6102,7 @@ async function testModelStrategy() {
       priceCents: 65,
       minConf: 44,
     });
-    check(risk.dump === true, 'steady signalScore blocks entry');
-    check(/strengthening/i.test(risk.reason || ''), 'reason wants strengthening');
+    check(risk.dump === false, 'steady signalScore allows entry when lean is good');
   }
 
   // Pre-entry dump: signalScore weakening even if lock still DOWN

@@ -177,8 +177,8 @@ const MODEL_SETUPS = [
     label: 'Core BTC / BNB / SOL',
     why: 'Best mix from recent PnL: keep the coins that actually bank, drop ETH/DOGE/XRP bleed. 2 slots so correlated dumps don’t stack.',
     autoTradeSymbols: 'BTC,BNB,SOL',
-    modelMinConfidence: 58,
-    modelEntryLiveLeanMarginPct: 4,
+    modelMinConfidence: 55,
+    modelEntryLiveLeanMarginPct: 3,
     modelBankGreenCents: 10,
     modelMinTpCents: 10,
     maxOpenPositions: 2,
@@ -190,8 +190,8 @@ const MODEL_SETUPS = [
     label: 'BTC + SOL only',
     why: 'Fewest names, still enough hits. Use if BNB is chopping.',
     autoTradeSymbols: 'BTC,SOL',
-    modelMinConfidence: 58,
-    modelEntryLiveLeanMarginPct: 4,
+    modelMinConfidence: 55,
+    modelEntryLiveLeanMarginPct: 3,
     modelBankGreenCents: 10,
     modelMinTpCents: 10,
     maxOpenPositions: 2,
@@ -246,8 +246,8 @@ const MODEL_SETUPS = [
     label: 'Cut losers at 6¢',
     why: 'Same Core coins/conf, tighter max loss (6¢ vs 8¢) and dump cut. Tests whether scratches stay small enough for the skim to win.',
     autoTradeSymbols: 'BTC,BNB,SOL',
-    modelMinConfidence: 58,
-    modelEntryLiveLeanMarginPct: 4,
+    modelMinConfidence: 55,
+    modelEntryLiveLeanMarginPct: 3,
     modelBankGreenCents: 10,
     modelMinTpCents: 10,
     maxOpenPositions: 2,
@@ -262,8 +262,8 @@ const MODEL_SETUPS = [
     label: 'Hold small red (dump 5 / fast-red 5)',
     why: 'Core coins/conf, but slower scratches. Tests if the ~55% WR run was from holding −2–4¢ instead of cutting.',
     autoTradeSymbols: 'BTC,BNB,SOL',
-    modelMinConfidence: 58,
-    modelEntryLiveLeanMarginPct: 4,
+    modelMinConfidence: 55,
+    modelEntryLiveLeanMarginPct: 3,
     modelBankGreenCents: 10,
     modelMinTpCents: 10,
     maxOpenPositions: 2,
@@ -594,7 +594,7 @@ function modelSignalDropCents(signalEntryCents, signalBidCents) {
 /** Live lean against held side — low so stops fire early (preemptive). */
 const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 2;
 /** Entry: live lean must favor the locked side by at least this many pts (0 = any lead). */
-const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 4;
+const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 3;
 /** Don't early-exit a Model hold until it's been open at least this long. */
 const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
 /** After Model BE/TP, sit out that coin this long before rebuy. */
@@ -623,8 +623,8 @@ const MODEL_FAST_RED_CENTS_DEFAULT = 2;
 const MODEL_PROB_DRIFT_PTS_DEFAULT = 3;
 /** Min hold before fast-red (0 = cut same tick if bid gaps on fill). */
 const MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT = 0;
-/** Max ask−bid spread allowed at entry — blocks 62 ask / 49 bid gaps. */
-const MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT = 4;
+/** Max ask−bid spread allowed at entry — blocks absurd gaps, allows thin 15m books. */
+const MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT = 6;
 /** Red lean-stop barrier: stop if bid ≤ this or pace projects here. */
 const MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT = 50;
 /** Horizon used to project bid pace toward the barrier (ms). */
@@ -1091,8 +1091,9 @@ function modelEngineClearlyWithUs({ window, direction, side, entryHeldProb, conf
 }
 
 /**
- * Pre-entry gate: only buy when the model most likely says the ticket won't dump.
- * Positive conviction — soft / fair-under-ask / non-strengthening = skip.
+ * Pre-entry gate: skip only when the lean is clearly rotting.
+ * Does NOT require model% ≈ Kalshi ask — that starved every setup for hours
+ * (asks sit 65–80¢ while leans often print 55–65%).
  * Returns { dump: true, reason } or { dump: false }.
  */
 function modelEntryDumpRisk({
@@ -1118,12 +1119,9 @@ function modelEntryDumpRisk({
     return { dump: true, reason: `confidence ${Math.round(conf)}% under ${minConf}%` };
   }
 
-  // Weakening / soft trend = expect dump. Need strengthening to buy.
+  // Weakening = expect dump. Steady / strengthening / missing score are fine.
   if (ss && ss.trend === 'weakening') {
     return { dump: true, reason: 'signalScore trend weakening — expect dump' };
-  }
-  if (!fade && (!ss || ss.trend !== 'strengthening')) {
-    return { dump: true, reason: 'signalScore not strengthening — won\'t buy a soft lean' };
   }
 
   // Fade buys the underdog on purpose — only conf + weakening above.
@@ -1132,13 +1130,15 @@ function modelEntryDumpRisk({
   if (!Number.isFinite(heldProb)) {
     return { dump: true, reason: 'no held-side probability' };
   }
-  // Model must price the ticket at/above the ask (≤1¢ slack) — otherwise likely to fall.
-  if (Number.isFinite(ask) && ask >= 1 && heldProb + 1 < ask) {
+
+  // Extreme overpay only: e.g. model 55% vs 85¢ ask. Normal 60% vs 70¢ is allowed.
+  if (Number.isFinite(ask) && ask >= 1 && heldProb + 20 < ask) {
     return {
       dump: true,
-      reason: `model ${Math.round(heldProb)}% vs ask ${Math.round(ask)}¢ — not likely to hold`,
+      reason: `model ${Math.round(heldProb)}% vs ask ${Math.round(ask)}¢ — extreme overpay`,
     };
   }
+
   // Need a real live lead, not a coin-flip.
   if (!modelLiveLeanStillFavors(window, side, entryMargin)) {
     return {
@@ -1154,31 +1154,14 @@ function modelEntryDumpRisk({
   if (modelLiveProbNotWithUs(window, side) || modelLiveLeanAgainstHeld(window, side, entryMargin)) {
     return { dump: true, reason: `live lean against ${String(side).toUpperCase()}` };
   }
-  if (modelSignalTurningAgainst(window, side)) {
-    return { dump: true, reason: 'signalScore dominance not with ticket' };
-  }
-  // Dominance must clearly favor the side we're buying.
+  // Dominance flipped against the ticket (not merely soft).
   if (Number.isFinite(nd)) {
-    if (side === 'yes' && !(nd > 0.5)) {
-      return { dump: true, reason: `netDominance ${nd.toFixed(2)} too soft for YES` };
+    if (side === 'yes' && nd < -0.15) {
+      return { dump: true, reason: `netDominance ${nd.toFixed(2)} against YES` };
     }
-    if (side === 'no' && !(nd < -0.5)) {
-      return { dump: true, reason: `netDominance ${nd.toFixed(2)} too soft for NO` };
+    if (side === 'no' && nd > 0.15) {
+      return { dump: true, reason: `netDominance ${nd.toFixed(2)} against NO` };
     }
-  }
-  if (
-    !modelEngineClearlyWithUs({
-      window,
-      direction,
-      side,
-      entryHeldProb: heldProb,
-      config,
-    })
-  ) {
-    return {
-      dump: true,
-      reason: `model not clearly with ${String(side).toUpperCase()}`,
-    };
   }
   return { dump: false };
 }
@@ -1467,7 +1450,7 @@ const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
 const MODEL_PERFECT_LEAN_DEFAULT = 15;
 /** Model confidence floor default. */
-const MODEL_MIN_CONFIDENCE_DEFAULT = 58;
+const MODEL_MIN_CONFIDENCE_DEFAULT = 55;
 /** Trail off peak — unused by simplified Model exits (kept for config compat). */
 const MODEL_TRAIL_CENTS_DEFAULT = 0;
 /** Soft lean margin — treat 52/48 as turning (bank before the dump). */
@@ -6726,7 +6709,9 @@ class TradingBot {
         const richFloor = isSettle ? settleRichAskFloorCents(this.config) : 100;
         const ceiling = isSettle
           ? Math.min(99, richFloor - 1, Math.max(band?.max ?? priceCents, priceCents) + 2)
-          : Math.min(99, priceCents + 2);
+          : isModel
+            ? Math.min(99, priceCents + 4)
+            : Math.min(99, priceCents + 2);
         if (Number.isFinite(freshAsk)) {
           const chase = Math.min(99, Math.round(freshAsk) + attempt);
           workingPrice = Math.min(ceiling, Math.max(priceCents, freshAsk, chase));

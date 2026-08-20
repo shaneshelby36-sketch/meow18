@@ -143,7 +143,7 @@ const bot = KALSHI_ENABLED
   : null;
 
 if (KALSHI_ENABLED) {
-  console.log(`[bot] Kalshi bot enabled in ${wantsLive ? 'LIVE' : 'paper'} mode, trading ${(process.env.KALSHI_SYMBOL || 'AUTO').toUpperCase()}, strategy ${(process.env.KALSHI_STRATEGY_MODE || 'settle').toLowerCase() === 'edge' ? 'edge' : 'settle'}`);
+  console.log(`[bot] Kalshi bot enabled in ${wantsLive ? 'LIVE' : 'paper'} mode, trading ${(process.env.KALSHI_SYMBOL || 'AUTO').toUpperCase()}, strategy ${(process.env.KALSHI_STRATEGY_MODE || 'model').toLowerCase()}`);
 }
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
