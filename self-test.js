@@ -3466,6 +3466,41 @@ async function testBotTradingFlow() {
     check(!isForceRetryExitReason('settled'), 'settled is not a live sell retry');
   }
 
+  {
+    const swapBot = makeBot(mockClient({}), {
+      strategyMode: 'model',
+      activeSetupId: 'core',
+      paperStartingBalanceDollars: 100,
+      skimMode: 'insurance',
+    });
+    swapBot.config.activeSetupId = 'core';
+    swapBot.ledger.trades = [{ status: 'closed', pnlCents: -3000, closedAt: 1 }];
+    swapBot.ledger.reserveCents = 0;
+    swapBot.ledger.insuranceCents = 0;
+    const tight = modelSetupById('tight');
+    check(!!tight, 'tight setup exists for swap test');
+    swapBot._ensureShadowBook(tight);
+    swapBot._shadowBooks.tight.ledger = {
+      trades: [{ status: 'closed', pnlCents: 2000, closedAt: 1 }],
+      reserveCents: 800,
+      insuranceCents: 400,
+      insuranceReady: false,
+      insuranceDepositedCents: 0,
+      periodStartTime: Date.now(),
+      activityLog: [],
+    };
+    const beforeLiveAvail = swapBot._capitalStatus().paperAvailableCents;
+    const result = swapBot.applyModelSetup('tight');
+    check(result.ok, 'applyModelSetup swap ok');
+    checkEq(swapBot.config.activeSetupId, 'tight', 'active setup becomes tight');
+    const afterLiveAvail = swapBot._capitalStatus().paperAvailableCents;
+    check(afterLiveAvail > beforeLiveAvail, 'switch brings healthier shadow avail into live');
+    check(!!swapBot._shadowBooks.core, 'old live core is parked as shadow');
+    check(!swapBot._shadowBooks.tight, 'promoted tight shadow is not double-counted');
+    const coreShadow = summarizeLedgerCapital(swapBot._shadowBooks.core.ledger, 100, swapBot.config);
+    check(coreShadow.paperAvailableCents < afterLiveAvail, 'parked core shadow keeps scarred avail');
+  }
+
   // Live: official Kalshi result books 0/100 with NO sell order
   let liveOrders = 0;
   let getOrderCalls = 0;

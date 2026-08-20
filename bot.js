@@ -3249,11 +3249,82 @@ class TradingBot {
   applyModelSetup(setupId) {
     const setup = modelSetupById(setupId);
     if (!setup) return { ok: false, message: `Unknown setup '${setupId}'.` };
+
+    const prevId = String(this.config.activeSetupId || 'core');
+    const switching = prevId !== setup.id;
+    let broughtAvailLabel = '';
+
+    if (switching) {
+      // Live Kalshi inventory is tied to the live ledger — don't orphan fills.
+      const liveOpens = this.openTrades.filter((t) => this._isLiveTrade(t));
+      if (this.config.mode === 'live' && liveOpens.length) {
+        return {
+          ok: false,
+          message:
+            `Close ${liveOpens.length} live Kalshi position(s) before switching setups — ` +
+            `otherwise the old book would keep the inventory while knobs change.`,
+        };
+      }
+
+      // Park the current live book as the previous setup's shadow (keeps its scarred avail).
+      const prevSetup = modelSetupById(prevId);
+      if (prevSetup) {
+        this._ensureShadowBook(prevSetup);
+        this._captureShadowBook(prevSetup);
+      }
+
+      // Promote the chosen setup's shadow bankroll into live (not the old scarred ledger).
+      const incoming = this._shadowBooks && this._shadowBooks[setup.id];
+      if (incoming && incoming.ledger) {
+        const startDollars = Number(this.config.paperStartingBalanceDollars);
+        const start = Number.isFinite(startDollars) && startDollars > 0 ? startDollars : 100;
+        const cap = summarizeLedgerCapital(incoming.ledger, start, this.config);
+        broughtAvailLabel = ` · brought shadow avail $${((cap.paperAvailableCents || 0) / 100).toFixed(2)}`;
+        this.ledger = incoming.ledger;
+        this.lastDecision = incoming.lastDecision || '';
+        this.lastError = null;
+        this._modelConfirmGates = incoming.confirmGates || Object.create(null);
+        this._modelConfirmArmedSymbols = new Set(
+          Array.isArray(incoming.confirmArmed) ? incoming.confirmArmed : []
+        );
+        this._modelConfirmGateArmed = !!incoming.confirmArmedFlag;
+        this._modelConfirmProcessStartedAt = Number(incoming.confirmStarted) || Date.now();
+        this._entryMissUntil = incoming.entryMissUntil || Object.create(null);
+        this._entryMissStreak = incoming.entryMissStreak || Object.create(null);
+        this._entryMissSessionClose = incoming.entryMissSessionClose || Object.create(null);
+        this._stoppedSymbolsThisCycle = new Set(
+          Array.isArray(incoming.stoppedThisCycle) ? incoming.stoppedThisCycle : []
+        );
+        this._lastProtectionGateKey = incoming.protectionKey || null;
+        this._lastProtectionGateSymbol = incoming.protectionSymbol || null;
+      } else {
+        // No shadow history yet — clean bankroll, not the previous setup's losses.
+        this.ledger = emptyShadowLedger();
+        this.lastError = null;
+        this._modelConfirmGates = Object.create(null);
+        this._modelConfirmArmedSymbols = new Set();
+        this._modelConfirmGateArmed = false;
+        this._modelConfirmProcessStartedAt = Date.now();
+        this._entryMissUntil = Object.create(null);
+        this._entryMissStreak = Object.create(null);
+        this._entryMissSessionClose = Object.create(null);
+        this._stoppedSymbolsThisCycle = new Set();
+        this._lastProtectionGateKey = null;
+        this._lastProtectionGateSymbol = null;
+        broughtAvailLabel = ' · fresh bankroll (no shadow history yet)';
+      }
+
+      // Live owns this setup now — don't keep a duplicate shadow of the same book.
+      this._resetShadowBook(setup.id);
+    }
+
     const result = this.updateConfig(modelSetupConfigPatch(setup));
-    this.lastDecision = `Applied MODEL setup “${setup.label}” (${setup.autoTradeSymbols}, conf ${setup.modelMinConfidence}%, TP +${setup.modelBankGreenCents}¢, max ${setup.maxOpenPositions}).`;
+    const prevLabel = (modelSetupById(prevId) && modelSetupById(prevId).label) || prevId;
+    this.lastDecision = switching
+      ? `Switched live book to “${setup.label}” (from “${prevLabel}”)${broughtAvailLabel}. ` +
+        `Prior book is parked as shadow. Knobs: ${setup.autoTradeSymbols}, conf ${setup.modelMinConfidence}%, TP +${setup.modelBankGreenCents}¢, max ${setup.maxOpenPositions}.`
+      : `Applied MODEL setup “${setup.label}” (${setup.autoTradeSymbols}, conf ${setup.modelMinConfidence}%, TP +${setup.modelBankGreenCents}¢, max ${setup.maxOpenPositions}).`;
     this._logActivity(this.lastDecision, { kind: 'settings' });
-    // Live book takes over this setup — drop its shadow so we don't double-count.
-    this._resetShadowBook(setup.id);
     this._persist();
     this._persistShadowBooks();
     return {
