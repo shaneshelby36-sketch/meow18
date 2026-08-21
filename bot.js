@@ -5635,11 +5635,18 @@ class TradingBot {
 
     let touched = false;
     for (const row of pending.slice(0, 8)) {
+      // Cache-only — never open a Kalshi GET just for post-stop analytics.
       let market = null;
-      try {
-        market = await this._getMarketBounded(row.ticker, 1500);
-      } catch {
-        market = null;
+      if (this.client && typeof this.client.getCachedMarket === 'function') {
+        market = this.client.getCachedMarket(row.ticker, 120_000);
+      }
+      if (!market && this._lastLiveMarket) {
+        for (const m of Object.values(this._lastLiveMarket)) {
+          if (m && String(m.ticker) === String(row.ticker)) {
+            market = m;
+            break;
+          }
+        }
       }
       const sideBid = market ? this._heldSideBidCents(row, market) : null;
       if (Number.isFinite(sideBid)) {
@@ -5883,6 +5890,11 @@ class TradingBot {
    */
   async _fetchLiveMarket(seriesTicker, minMsLeft = 1500) {
     if (!seriesTicker || !this.client) return null;
+    // Shadow books reuse the live cycle's cached market — no extra Kalshi GETs.
+    if (this._inShadow) {
+      const cached = this._lastLiveMarket && this._lastLiveMarket[seriesTicker];
+      return cached || null;
+    }
     if (!this._lastLiveMarket) this._lastLiveMarket = Object.create(null);
     const cached = this._lastLiveMarket[seriesTicker];
     const cachedClose = cached ? parseMarketCloseMs(cached) : NaN;
@@ -5999,6 +6011,17 @@ class TradingBot {
       typeof this.client.getCachedMarket === 'function'
         ? this.client.getCachedMarket(ticker, maxAgeMs)
         : null;
+    // Shadow sims must not burn Kalshi quota — cache / live-cycle snapshot only.
+    if (this._inShadow) {
+      const hit = peek(Infinity);
+      if (hit) return hit;
+      if (this._lastLiveMarket) {
+        for (const m of Object.values(this._lastLiveMarket)) {
+          if (m && String(m.ticker) === String(ticker)) return m;
+        }
+      }
+      return null;
+    }
     // Align with getMarket cache (~2.5s) so the 2s manage watchdog usually avoids HTTP.
     const fresh = peek(2500);
     if (fresh) return fresh;
@@ -7639,7 +7662,14 @@ class TradingBot {
     this._stoppedSymbolsThisCycle = new Set();
     this._maybeRotateLedger(Date.now());
 
-    if (this.config.mode === 'live' && this.client.hasCredentials && (!this.liveBalanceUpdatedAt || Date.now() - this.liveBalanceUpdatedAt > 15000)) {
+    const hasOpenInventory = Array.isArray(this.openTrades) && this.openTrades.length > 0;
+    // Live balance only when trading or managing inventory — never poll Kalshi idle.
+    if (
+      this.config.mode === 'live' &&
+      this.client.hasCredentials &&
+      (this.isRunning || hasOpenInventory) &&
+      (!this.liveBalanceUpdatedAt || Date.now() - this.liveBalanceUpdatedAt > 15000)
+    ) {
       try {
         const balance = await this.client.getBalance();
         this.liveBalanceCents = Number(balance.balance);

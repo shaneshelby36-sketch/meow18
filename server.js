@@ -12,8 +12,8 @@ const { CoinbaseFeed } = require('./coinbaseFeed');
 const { buildPredictions } = require('./prediction');
 const { PredictionTracker } = require('./tracker');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
-const { KalshiClient, marketStrikePrice, parseMarketCloseMs } = require('./kalshiClient');
-const { TradingBot, SERIES_BY_SYMBOL, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, settleExitTiersForDashboard } = require('./bot');
+const { KalshiClient } = require('./kalshiClient');
+const { TradingBot, SERIES_BY_SYMBOL, symbolsNeedingEngineCompute, settleExitTiersForDashboard } = require('./bot');
 const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
 const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir, ARCHIVE_RETENTION_DAYS, writeJsonAtomic } = require('./paths');
 const APP_VERSION = require('./package.json').version;
@@ -240,7 +240,7 @@ function wireFeed() {
   return feed;
 }
 
-const lastKalshiTargets = Object.create(null);
+const lastManualStrikeMeta = Object.create(null);
 const MANUAL_STRIKES_PATH = dataPath('manual-strikes.json');
 const MANUAL_STRIKE_TTL_MS = 15 * 60 * 1000;
 
@@ -251,7 +251,7 @@ function loadManualStrikes() {
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
     }
   } catch (err) {
-    console.warn('[kalshi-target] failed to load manual strikes:', err.message);
+    console.warn('[manual-strike] failed to load manual strikes:', err.message);
   }
   return Object.create(null);
 }
@@ -262,7 +262,7 @@ function saveManualStrikes() {
   try {
     writeJsonAtomic(MANUAL_STRIKES_PATH, manualStrikes);
   } catch (err) {
-    console.warn('[kalshi-target] failed to save manual strikes:', err.message);
+    console.warn('[manual-strike] failed to save manual strikes:', err.message);
   }
 }
 
@@ -304,79 +304,11 @@ function applyManualStrikes(targets, now = Date.now()) {
   return out;
 }
 
-function targetFromKalshiMarket(market) {
-  if (!market) return null;
-  const closeTime = parseMarketCloseMs(market);
-  const ticker = market.ticker ? String(market.ticker) : '';
-  if (!ticker || !Number.isFinite(closeTime)) return null;
-  return {
-    price: marketStrikePrice(market),
-    closeTime,
-    ticker,
-  };
-}
-
-// Fetches live Kalshi strike + close only for coins we trade (AUTO list /
-// pinned symbol) plus any still-open inventory. Other dashboard coins use
-// fallback 15m clocks — avoids 8-series GET storms / 429s.
-async function fetchKalshiTargets() {
-  const targets = {};
-  const series =
-    SERIES_BY_SYMBOL && typeof SERIES_BY_SYMBOL === 'object' ? SERIES_BY_SYMBOL : {};
-
-  const want = bot
-    ? symbolsNeedingKalshiTargets({
-        config: bot.config,
-        openTrades: bot.openTrades,
-      })
-    : [];
-
-  if (!want.length) return targets;
-
-  await Promise.all(
-    want.map(async (symbol) => {
-      const ticker = series[symbol];
-      if (!ticker) return;
-      const prev = lastKalshiTargets[symbol];
-      // Strike/close don't change mid-window — skip list GETs until rollover.
-      if (prev && prev.price != null && Number(prev.closeTime) > Date.now() + 20_000) {
-        targets[symbol] = prev;
-        return;
-      }
-      try {
-        const parsed = targetFromKalshiMarket(
-          typeof kalshiClient.getLiveOpenMarket === 'function'
-            ? await kalshiClient.getLiveOpenMarket(ticker, { minMsLeft: 1500 })
-            : null
-        );
-
-        const keep = lastKalshiTargets[symbol];
-        let next = parsed;
-        if (next && next.price == null && keep && keep.ticker === next.ticker && keep.price != null) {
-          next = { ...next, price: keep.price };
-        }
-        if (next && next.price != null) {
-          lastKalshiTargets[symbol] = next;
-          targets[symbol] = next;
-          return;
-        }
-        if (next) {
-          targets[symbol] = next;
-          return;
-        }
-      } catch (err) {
-        console.warn(
-          `[kalshi-target] ${symbol}: ${err.message} (keeping last live strike if still open)`
-        );
-      }
-
-      if (prev && Number(prev.closeTime) > Date.now() + 1500 && prev.price != null) {
-        targets[symbol] = prev;
-      }
-    })
-  );
-
-  return targets;
+// Intentionally no Kalshi HTTP here. Dashboard/engine strikes are manual or
+// Coinbase current-price + wall-clock 15m fallbacks. Only the trading bot
+// talks to Kalshi (entries, exits, balance, fill polls).
+function dashboardStrikeTargets() {
+  return applyManualStrikes({});
 }
 
 function activeEngineSymbols() {
@@ -419,7 +351,7 @@ async function recompute() {
       input[symbol] = { series: s.series, book: s.book };
     }
 
-    const kalshiTargets = applyManualStrikes(await fetchKalshiTargets());
+    const kalshiTargets = dashboardStrikeTargets();
     const result = buildPredictions(input, kalshiTargets, signalAccumulatorManager);
     result.feedStatus = Object.fromEntries(
       Object.entries(state).map(([sym, s]) => [sym, s.feedStatus])
@@ -526,13 +458,9 @@ async function main() {
       bot.forceSettleOverdue(latestPrediction).catch((err) => {
         console.error('[bot] settle-watchdog error:', err.message);
       });
-      // Always manage opens (TP/stops). Cache absorbs most GETs; skip only when
-      // rate-limited AND flat (no inventory / no forced exit) to stop 429 thrash.
+      // Manage opens only when inventory exists — never poll Kalshi when flat.
       const opens = Array.isArray(bot.openTrades) ? bot.openTrades : [];
-      const needsManage =
-        opens.length > 0 ||
-        !(bot.client && typeof bot.client.isPublicRateLimited === 'function' && bot.client.isPublicRateLimited());
-      if (needsManage) {
+      if (opens.length > 0) {
         bot.manageOpenPositions(latestPrediction).catch((err) => {
           console.error('[bot] manage-watchdog error:', err.message);
         });
@@ -567,14 +495,14 @@ app.get("/", (req, res) => {
     if (raw == null || raw === '') {
       delete manualStrikes[symbol];
       saveManualStrikes();
-      recompute().catch((err) => console.error('[kalshi-target] recompute after clear failed:', err.message));
+      recompute().catch((err) => console.error('[manual-strike] recompute after clear failed:', err.message));
       return res.json({ ok: true, strikes: manualStrikes });
     }
     const price = Number(raw);
     if (!Number.isFinite(price) || price <= 0) {
       return res.status(400).json({ ok: false, message: 'Enter a price greater than 0.' });
     }
-    const prev = lastKalshiTargets[symbol] || (latestPrediction && latestPrediction[symbol]) || {};
+    const prev = lastManualStrikeMeta[symbol] || (latestPrediction && latestPrediction[symbol]) || {};
     manualStrikes[symbol] = {
       price,
       setAt: Date.now(),
@@ -582,8 +510,13 @@ app.get("/", (req, res) => {
       ticker: prev.kalshiTicker || prev.ticker || null,
       closeTime: prev.targetCloseTime || prev.closeTime || null,
     };
+    lastManualStrikeMeta[symbol] = {
+      ticker: manualStrikes[symbol].ticker,
+      closeTime: manualStrikes[symbol].closeTime,
+      price,
+    };
     saveManualStrikes();
-    recompute().catch((err) => console.error('[kalshi-target] recompute after manual strike failed:', err.message));
+    recompute().catch((err) => console.error('[manual-strike] recompute after save failed:', err.message));
     res.json({ ok: true, strikes: manualStrikes });
   });
 

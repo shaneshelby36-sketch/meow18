@@ -4723,13 +4723,13 @@ async function testBotTradingFlow() {
       config: { autoTradeSymbols: 'BTC,SOL', symbol: 'AUTO' },
       openTrades: [],
     });
-    checkEq(onlyTrade.join(','), 'BTC,SOL', 'Kalshi targets only tradeable symbols');
-    check(!onlyTrade.includes('ETH'), 'Kalshi targets skip ETH when not traded');
+    checkEq(onlyTrade.join(','), 'BTC,SOL', 'trade-active symbol set is BTC,SOL');
+    check(!onlyTrade.includes('ETH'), 'trade-active set skips ETH when not traded');
     const withOpen = symbolsNeedingKalshiTargets({
       config: { autoTradeSymbols: 'BTC,SOL', symbol: 'AUTO' },
       openTrades: [{ symbol: 'ETH', status: 'open' }],
     });
-    check(withOpen.includes('ETH'), 'open ETH still gets Kalshi target while held');
+    check(withOpen.includes('ETH'), 'open ETH stays in trade-active set while held');
     check(withOpen.includes('BTC') && withOpen.includes('SOL'), 'tradeable kept with open hold');
     const engineSol = symbolsNeedingEngineCompute({
       config: { autoTradeSymbols: 'SOL', symbol: 'AUTO' },
@@ -4742,7 +4742,7 @@ async function testBotTradingFlow() {
       config: { autoTradeSymbols: 'SOL', symbol: 'AUTO' },
       openTrades: [],
     });
-    check(!kalshiSol.includes('BTC'), 'silent BTC ref does not poll Kalshi');
+    checkEq(kalshiSol.join(','), 'SOL', 'trade-active SOL-only has no silent BTC');
   }
   check(
     isKalshiTradeEnabled('BNB', { autoTradeSymbols: 'BTC,BNB,SOL' }),
@@ -8038,7 +8038,7 @@ function testCountdownLogic() {
   checkEq(labelFor(Date.now() - 5000, Date.now()), 'Next window…', 'past close → Next window');
   check(/^\d+:\d{2}$/.test(labelFor(Date.now() + 125_000, Date.now())), 'future close → mm:ss');
 
-  // Server-side expired-market filter (same rule as fetchKalshiTargets)
+  // Wall-clock fallback close filter (engine no longer polls Kalshi for strikes)
   const now = Date.now();
   const markets = [
     { close_time: new Date(now - 1000).toISOString(), ticker: 'OLD' },

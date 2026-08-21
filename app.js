@@ -526,17 +526,17 @@ function renderAsset(symbol, assetData) {
     return;
   }
 
-  // One shared target price per asset — Kalshi's real 15-minute strike when
-  // available, otherwise the current price itself as a neutral fallback.
+  // One shared target price per asset — manual strike when set, otherwise
+  // current Coinbase price (Kalshi is trade-only; no dashboard strike polls).
   const targetEl = panel.querySelector('.target-price');
   const sourceEl = panel.querySelector('.target-source');
   targetEl.textContent = assetData.targetPrice != null ? `$${formatPrice(assetData.targetPrice, symbol)}` : '—';
   sourceEl.textContent =
-    assetData.targetSource === 'kalshi'
-      ? 'Live Kalshi strike'
-      : assetData.targetSource === 'manual'
-        ? 'Manual price to beat'
-        : 'No Kalshi market found — using current price (enter strike below)';
+    assetData.targetSource === 'manual'
+      ? 'Manual price to beat'
+      : assetData.targetSource === 'kalshi'
+        ? 'Live Kalshi strike'
+        : 'Using current price (enter strike below) — Kalshi reserved for trading';
   const strikeInput = panel.querySelector('.manual-strike-input');
   if (strikeInput && document.activeElement !== strikeInput) {
     if (assetData.targetSource === 'manual' && assetData.targetPrice != null) {
