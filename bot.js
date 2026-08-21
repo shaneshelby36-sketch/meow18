@@ -626,7 +626,7 @@ const MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT = 0;
 /** Max ask−bid spread allowed at entry — blocks absurd gaps, allows thin 15m books. */
 const MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT = 8;
 /** Red lean-stop barrier: stop if bid ≤ this or pace projects here. */
-const MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT = 50;
+const MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT = 55;
 /** Horizon used to project bid pace toward the barrier (ms). */
 const MODEL_LEAN_STOP_PACE_HORIZON_MS_DEFAULT = 90_000;
 /** Need at least this long of red sample before trusting pace. */
@@ -707,6 +707,8 @@ function modelOpenGraceMs(config = {}) {
 function modelLeanStopBarrierCents(config = {}) {
   const n = Number(config.modelLeanStopBarrierCents);
   if (Number.isFinite(n) && n > 0) return Math.round(n);
+  const hard = modelHardStopFloorCents(config);
+  if (hard > 0) return hard;
   return MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT;
 }
 
@@ -969,11 +971,18 @@ function modelRichStopFloorCents(config = {}) {
   return MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT;
 }
 
-function modelMidRichStopFloorCents(config = {}) {
-  const n = Number(config.modelMidRichStopFloorCents);
+function modelHardStopFloorCents(config = {}) {
+  const n = Number(config.modelHardStopFloorCents);
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return Math.round(n);
-  return MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT;
+  // Legacy: mid-rich floor configs map onto the universal hard floor.
+  const legacy = Number(config.modelMidRichStopFloorCents);
+  if (Number.isFinite(legacy) && legacy > 0) return Math.round(legacy);
+  return MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT;
+}
+
+function modelMidRichStopFloorCents(config = {}) {
+  return modelHardStopFloorCents(config);
 }
 
 function modelRichStopEntryMinCents(config = {}) {
@@ -989,26 +998,33 @@ function modelRichStopMinConfidence(config = {}) {
 }
 
 /**
- * Absolute bid floor for this entry: ~75¢ band → 60¢; ≥78¢ → rich floor (default 68).
- * 0 = no widen (flat max loss).
+ * Absolute bid floor for this entry — universal hard floor (default 55¢).
+ * Rich-floor slider is optional: only used when set (>0) AND lower than hard
+ * (more room). A higher rich floor (e.g. 68) is ignored so 78+/80/85 stay on 55.
  */
 function modelStopFloorForEntryCents(entryCents, config = {}) {
   const entry = Number(entryCents);
   if (!Number.isFinite(entry)) return 0;
-  const midFloor = modelMidRichStopFloorCents(config);
-  const midMin = MODEL_MID_RICH_ENTRY_MIN_CENTS_DEFAULT;
-  const midMax = MODEL_MID_RICH_ENTRY_MAX_CENTS_DEFAULT;
-  if (midFloor > 0 && entry >= midMin && entry <= midMax) return midFloor;
-
+  const hard = modelHardStopFloorCents(config);
   const richFloor = modelRichStopFloorCents(config);
   const richMin = modelRichStopEntryMinCents(config);
-  if (richFloor > 0 && entry >= richMin) return richFloor;
+  // Optional richer room only if rich floor is below the hard floor (more drawdown).
+  if (
+    richFloor > 0 &&
+    hard > 0 &&
+    richFloor < hard &&
+    entry >= richMin &&
+    entry > richFloor
+  ) {
+    return richFloor;
+  }
+  if (hard > 0 && entry > hard) return hard;
   return 0;
 }
 
 /**
- * Hard max-loss for this ticket. Base −N¢ on normal entries.
- * ~75¢: ride to 60 (−15). ≥78¢: ride to rich floor (default 68 → 80/−12, 85/−17).
+ * Hard max-loss for this ticket. Base −N¢, widened down to the hard floor (55¢)
+ * for all entries including 78+/80/85.
  */
 function modelEffectiveMaxLossCents(trade, config = {}) {
   const base = modelMaxLossCents(config);
@@ -1016,22 +1032,34 @@ function modelEffectiveMaxLossCents(trade, config = {}) {
   const entry = Number(trade && trade.entryPriceCents);
   if (!Number.isFinite(entry)) return base;
 
-  let floor = modelStopFloorForEntryCents(entry, config);
-  if (!(floor > 0)) {
-    // High-conf ticket just under rich band: still allow rich floor if conf qualifies.
-    const minConf = modelRichStopMinConfidence(config);
-    const conf = Number(trade && trade.engineConfidence);
-    const richFloor = modelRichStopFloorCents(config);
-    const highConf = Number.isFinite(conf) && conf >= minConf;
-    if (highConf && richFloor > 0 && entry > richFloor && entry >= MODEL_MID_RICH_ENTRY_MIN_CENTS_DEFAULT) {
-      floor = richFloor;
-    } else {
-      return base;
-    }
-  }
-  if (entry <= floor) return base;
+  const floor = modelStopFloorForEntryCents(entry, config);
+  if (!(floor > 0) || entry <= floor) return base;
   const room = Math.max(0, Math.round(entry - floor));
   return Math.max(base, room);
+}
+
+/**
+ * After a MODEL direction flip, how long to confirm the new lean before bidding.
+ * More time left → longer confirm (avoid chop); late window → faster confirm.
+ */
+function modelSideSwitchConfirmMs(minutesLeft, config = {}) {
+  const configured = Number(config.modelSideSwitchConfirmMs);
+  if (Number.isFinite(configured) && configured >= 0) return Math.round(configured);
+  const m = Number(minutesLeft);
+  if (!(m > 0)) return 8_000;
+  if (m >= 10) return 15_000;
+  if (m >= 5) return 8_000;
+  if (m >= 2) return 5_000;
+  return 3_000;
+}
+
+function modelSideSwitchConfirmTicks(minutesLeft, config = {}) {
+  const configured = Number(config.modelSideSwitchConfirmTicks);
+  if (Number.isFinite(configured) && configured >= 1) return Math.floor(configured);
+  const m = Number(minutesLeft);
+  if (m >= 10) return 3;
+  if (m >= 5) return 2;
+  return 2;
 }
 
 /** Paper: don't book a gap worse than max loss from entry. Live: real bid. */
@@ -1543,16 +1571,19 @@ const MODEL_HARD_ADVERSE_CENTS_DEFAULT = 8;
 /** Alias / paper fill ceiling: never book more than this many ¢ loss from entry on adverse exits. */
 const MODEL_MAX_LOSS_CENTS_DEFAULT = 8;
 /**
- * Rich tickets (entry ≥78¢): drawdown floor before hard cliff — 80→68 (−12), 85→68 (−17).
- * Mid-rich ~75¢ band uses a separate lower floor (see MID_RICH).
+ * Legacy rich-floor knob (default off). Hard floor 55 applies to all tickets
+ * including 78+/80/85. Setting this below the hard floor can optionally allow
+ * more room on very rich entries; values above hard floor are ignored.
  */
-const MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT = 68;
-/** ~75¢ band (72–77¢ entry): allow ride down to this bid — 75→60 (−15). */
-const MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT = 60;
+const MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT = 0;
+/** Absolute bid floor for all tickets — e.g. 75→55, 78→55, 85→55. */
+const MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT = 55;
+/** @deprecated mid-band folded into hard floor; kept for saved configs. */
+const MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT = MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT;
 const MODEL_MID_RICH_ENTRY_MIN_CENTS_DEFAULT = 72;
 const MODEL_MID_RICH_ENTRY_MAX_CENTS_DEFAULT = 77;
-/** Rich (68¢) floor applies once entry is at least this. */
-const MODEL_RICH_STOP_ENTRY_MIN_CENTS_DEFAULT = 78;
+/** Rich (68¢) floor applies once entry is at least this (78¢ still uses hard 55). */
+const MODEL_RICH_STOP_ENTRY_MIN_CENTS_DEFAULT = 80;
 /** Prefer rich-floor widen when engine conf is at least this (or entry already rich). */
 const MODEL_RICH_STOP_MIN_CONFIDENCE_DEFAULT = 70;
 /** Asks at/above this → tighter spread + higher conf (rich tickets gap hard). */
@@ -2044,10 +2075,13 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMaxAdverseCents',
   'modelHardAdverseCents',
   'modelMaxLossCents',
+  'modelHardStopFloorCents',
   'modelRichStopFloorCents',
   'modelMidRichStopFloorCents',
   'modelRichStopEntryMinCents',
   'modelRichStopMinConfidence',
+  'modelSideSwitchConfirmMs',
+  'modelSideSwitchConfirmTicks',
   'modelDumpPullbackCents',
   'modelFastRedCents',
   'modelLeanStopBarrierCents',
@@ -3074,6 +3108,7 @@ class TradingBot {
       modelMaxAdverseCents: MODEL_MAX_ADVERSE_CENTS_DEFAULT,
       modelHardAdverseCents: MODEL_HARD_ADVERSE_CENTS_DEFAULT,
       modelMaxLossCents: MODEL_MAX_LOSS_CENTS_DEFAULT,
+      modelHardStopFloorCents: MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT,
       modelRichStopFloorCents: MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT,
       modelMidRichStopFloorCents: MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT,
       modelRichStopEntryMinCents: MODEL_RICH_STOP_ENTRY_MIN_CENTS_DEFAULT,
@@ -3200,6 +3235,8 @@ class TradingBot {
     this._entryMissSessionClose = Object.create(null);
     // Model confirm gate: ticker:side → { seenBelow, armed, crossAsk, peakAsk, lastAsk, closeTime }
     this._modelConfirmGates = Object.create(null);
+    // Per-market direction: wait after a lean flip before bidding (time-left scaled).
+    this._modelSideSwitchGates = Object.create(null);
     // Per-symbol: confirm only after THAT coin completes a MODEL buy+sell opened
     // in this process (leftover settles / other coins must not arm it).
     this._modelConfirmArmedSymbols = new Set();
@@ -3443,6 +3480,7 @@ class TradingBot {
       modelBankGreenCents: this.config.modelBankGreenCents,
       modelMinTpCents: this.config.modelMinTpCents,
       modelMaxLossCents: this.config.modelMaxLossCents,
+      modelHardStopFloorCents: this.config.modelHardStopFloorCents,
       modelRichStopFloorCents: this.config.modelRichStopFloorCents,
       maxOpenPositions: this.config.maxOpenPositions,
       modelConfirmCrossCents: this.config.modelConfirmCrossCents,
@@ -6028,7 +6066,7 @@ class TradingBot {
         underwater && Number.isFinite(entry) ? Math.round(entry - heldSideBidCents) : 0;
       const hardAdverseBase = modelHardAdverseCents(this.config);
       const maxLoss = modelEffectiveMaxLossCents(trade, this.config);
-      // Follow the ticket's effective max loss (~75→60, ≥78→68 floor).
+      // Follow the ticket's effective max loss (hard floor 55 for all, incl. 78+).
       const hardAdverse = Math.max(hardAdverseBase || 0, maxLoss || 0);
       const faded = trade.modelInverted === true;
       const againstLocked =
@@ -7926,6 +7964,81 @@ class TradingBot {
   }
 
   /**
+   * After MODEL lean flips (UP↔DOWN), wait for confirmation before bidding.
+   * Confirm length scales with minutes left — more time → longer wait.
+   * First lean of a window enters immediately (no prior side to switch from).
+   */
+  _checkModelSideSwitchConfirm({
+    ticker,
+    symbol,
+    direction,
+    minutesRemaining,
+    closeTime,
+  } = {}) {
+    const dir = String(direction || '').toUpperCase();
+    if (dir !== 'UP' && dir !== 'DOWN') {
+      return { ok: false, reason: `Waiting: ${symbol} has no usable model lean to confirm.` };
+    }
+    if (!this._modelSideSwitchGates) this._modelSideSwitchGates = Object.create(null);
+    const key = String(ticker || symbol || '');
+    if (!key) return { ok: true };
+    const closeMs = Number(closeTime);
+    let g = this._modelSideSwitchGates[key];
+    if (!g || (Number.isFinite(closeMs) && Number(g.closeTime) !== closeMs)) {
+      g = {
+        direction: null,
+        switching: false,
+        since: null,
+        ticks: 0,
+        closeTime: closeMs,
+      };
+      this._modelSideSwitchGates[key] = g;
+    }
+
+    const needMs = modelSideSwitchConfirmMs(minutesRemaining, this.config);
+    const needTicks = modelSideSwitchConfirmTicks(minutesRemaining, this.config);
+    const now = Date.now();
+
+    if (g.direction == null) {
+      g.direction = dir;
+      g.switching = false;
+      g.since = now;
+      g.ticks = 1;
+      return { ok: true, first: true };
+    }
+
+    if (g.direction !== dir) {
+      g.direction = dir;
+      g.switching = true;
+      g.since = now;
+      g.ticks = 1;
+      const sec = Math.max(1, Math.ceil(needMs / 1000));
+      return {
+        ok: false,
+        reason:
+          `Waiting: ${symbol} switched to ${dir} — confirming direction ` +
+          `(~${sec}s / ${needTicks} ticks; ${Number(minutesRemaining).toFixed(1)}m left) before bid.`,
+      };
+    }
+
+    g.ticks = (Number(g.ticks) || 0) + 1;
+    if (g.switching) {
+      const elapsed = now - (Number(g.since) || now);
+      if (elapsed < needMs || g.ticks < needTicks) {
+        const remainSec = Math.max(1, Math.ceil((needMs - elapsed) / 1000));
+        return {
+          ok: false,
+          reason:
+            `Waiting: ${symbol} ${dir} confirm ${g.ticks}/${needTicks} ticks, ` +
+            `~${remainSec}s left — then bid.`,
+        };
+      }
+      g.switching = false;
+    }
+    return { ok: true };
+  }
+
+  /**
    * Model confirmation gate (optional):
    * Off for a coin until that coin finishes a MODEL buy+sell opened this run.
    * Then, for YES and NO alike:
@@ -8147,6 +8260,17 @@ class TradingBot {
       return null;
     }
     const { window, direction, key: windowKey } = picked;
+    const switchGate = this._checkModelSideSwitchConfirm({
+      ticker: market.ticker,
+      symbol,
+      direction,
+      minutesRemaining,
+      closeTime,
+    });
+    if (!switchGate.ok) {
+      say(switchGate.reason);
+      return null;
+    }
     const minConf = Number.isFinite(Number(this.config.modelMinConfidence))
       ? Number(this.config.modelMinConfidence)
       : MODEL_MIN_CONFIDENCE_DEFAULT;
@@ -9147,14 +9271,18 @@ module.exports = {
   modelHardAdverseCents,
   modelMaxLossCents,
   modelEffectiveMaxLossCents,
+  modelHardStopFloorCents,
   modelRichStopFloorCents,
   modelAdverseExitFillCents,
   modelRichAskCents,
   MODEL_MAX_LOSS_CENTS_DEFAULT,
   MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT,
+  MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT,
   MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT,
   MODEL_RICH_STOP_ENTRY_MIN_CENTS_DEFAULT,
   MODEL_RICH_STOP_MIN_CONFIDENCE_DEFAULT,
+  modelSideSwitchConfirmMs,
+  modelSideSwitchConfirmTicks,
   MODEL_LIVE_LEAN_MARGIN_DEFAULT,
   MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT,
   MODEL_RED_GIVEUP_MS_DEFAULT,

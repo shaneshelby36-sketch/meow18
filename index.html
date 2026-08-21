@@ -368,7 +368,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> — Core setup: BTC/SOL, conf <strong>55%</strong>, live favor <strong>3</strong>, TP <strong>+7¢</strong>, max <strong>2</strong> opens, max loss <strong>8¢</strong>. ~75¢ entries can ride to <strong>60¢</strong>; ≥78¢ use rich floor (default <strong>68¢</strong> — e.g. 80/−12, 85/−17). Soft red holds unless pace → ≤50¢.</p>
+          <p class="settings-hint"><strong>MODEL</strong> — Core: BTC/SOL, conf <strong>55%</strong>, TP <strong>+7¢</strong>, max loss <strong>8¢</strong>, hard floor <strong>55¢</strong> for all entries (incl. 78+/80/85). Side-switch waits to confirm lean (longer early, faster late), then bids. Soft red holds unless pace → ≤55¢.</p>
 
           <div class="model-setups" id="bot-model-setups">
             <h4 class="bot-panel-subhead">Paper setups</h4>
@@ -450,14 +450,21 @@
               <input id="bot-model-max-loss" type="range" min="4" max="20" step="1" />
               <span class="slider-value" id="bot-model-max-loss-value">—</span>
             </div>
-            <span class="field-hint">Hard cliff on normal tickets (default <strong>−8¢</strong>). Rich tickets can widen past this down to the floor below.</span>
+            <span class="field-hint">Base cliff on tickets already near the hard floor (default <strong>−8¢</strong>). Widened by floors below.</span>
+          </label>
+          <label>MODEL hard stop floor (¢)
+            <div class="slider-row">
+              <input id="bot-model-hard-floor" type="range" min="40" max="65" step="1" />
+              <span class="slider-value" id="bot-model-hard-floor-value">—</span>
+            </div>
+            <span class="field-hint">All non-rich tickets can ride down to this bid (default <strong>55</strong>). Soft lean-stop pace also uses this barrier.</span>
           </label>
           <label>MODEL rich stop floor (¢)
             <div class="slider-row">
               <input id="bot-model-rich-floor" type="range" min="0" max="75" step="1" />
               <span class="slider-value" id="bot-model-rich-floor-value">—</span>
             </div>
-            <span class="field-hint">Slider = floor for <strong>≥78¢</strong> entries (default <strong>68</strong> → 80/−12, 85/−17). Separate rule: <strong>72–77¢</strong> entries ride to <strong>60¢</strong>. Normal tickets stay on flat max loss. <strong>0 = off</strong> rich floor only (75-band still uses 60).</span>
+            <span class="field-hint">Optional. Default <strong>off</strong> — everyone (incl. 78+) uses the hard floor. Only matters if set <em>below</em> the hard floor for extra room on rich asks.</span>
           </label>
           <label>MODEL post-exit sit-out (sec)
             <div class="slider-row">
