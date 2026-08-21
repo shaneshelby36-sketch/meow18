@@ -2165,7 +2165,7 @@ async function loadBotConfigIntoForm() {
     const modelLowAskConf = document.getElementById('bot-model-low-ask-conf');
     if (modelLowAskConf) {
       modelLowAskConf.value =
-        c.modelLowAskMinConfidence != null ? c.modelLowAskMinConfidence : 80;
+        c.modelLowAskMinConfidence != null ? c.modelLowAskMinConfidence : 75;
     }
     const modelMaxEntry = document.getElementById('bot-model-max-entry');
     if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 93;
@@ -2427,7 +2427,7 @@ async function saveBotConfig(opts = {}) {
       document.getElementById('bot-model-confirm-ext')?.value || '15'
     ),
     modelMinEntryCents: parseFloat(document.getElementById('bot-model-min-entry')?.value || '65'),
-    modelLowAskMinConfidence: parseFloat(document.getElementById('bot-model-low-ask-conf')?.value || '80'),
+    modelLowAskMinConfidence: parseFloat(document.getElementById('bot-model-low-ask-conf')?.value || '75'),
     modelMaxEntryCents: parseFloat(document.getElementById('bot-model-max-entry')?.value || '93'),
     modelLowPriceMaxCents: 70,
     modelLowPriceStakeQuarters: 2,

@@ -13,7 +13,7 @@ const { buildPredictions } = require('./prediction');
 const { PredictionTracker } = require('./tracker');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
 const { KalshiClient, marketStrikePrice, parseMarketCloseMs } = require('./kalshiClient');
-const { TradingBot, SERIES_BY_SYMBOL, tradeableKalshiSymbols, settleExitTiersForDashboard } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, settleExitTiersForDashboard } = require('./bot');
 const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
 const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir, ARCHIVE_RETENTION_DAYS, writeJsonAtomic } = require('./paths');
 const APP_VERSION = require('./package.json').version;
@@ -316,24 +316,27 @@ function targetFromKalshiMarket(market) {
   };
 }
 
-// Fetches the real, live Kalshi strike price + close time for each symbol's
-// current rolling 15-minute market. This is public market data (no API
-// credentials needed) so it runs regardless of whether the trading bot
-// itself is enabled — it's purely for showing the one real target price
-// the dashboard displays, and for computing probabilities relative to it.
+// Fetches live Kalshi strike + close only for coins we trade (AUTO list /
+// pinned symbol) plus any still-open inventory. Other dashboard coins use
+// fallback 15m clocks — avoids 8-series GET storms / 429s.
 async function fetchKalshiTargets() {
   const targets = {};
-
   const series =
-    SERIES_BY_SYMBOL && typeof SERIES_BY_SYMBOL === "object"
-      ? SERIES_BY_SYMBOL
-      : {
-          BTC: "KXBTC15M",
-          XRP: "KXXRP15M",
-        };
+    SERIES_BY_SYMBOL && typeof SERIES_BY_SYMBOL === 'object' ? SERIES_BY_SYMBOL : {};
+
+  const want = bot
+    ? symbolsNeedingKalshiTargets({
+        config: bot.config,
+        openTrades: bot.openTrades,
+      })
+    : [];
+
+  if (!want.length) return targets;
 
   await Promise.all(
-    Object.entries(series).map(async ([symbol, ticker]) => {
+    want.map(async (symbol) => {
+      const ticker = series[symbol];
+      if (!ticker) return;
       const prev = lastKalshiTargets[symbol];
       // Strike/close don't change mid-window — skip list GETs until rollover.
       if (prev && prev.price != null && Number(prev.closeTime) > Date.now() + 20_000) {

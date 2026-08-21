@@ -166,6 +166,26 @@ function tradeableKalshiSymbols(config = null) {
 }
 
 /**
+ * Symbols that need live Kalshi strike/clock GETs.
+ * Tradeable list + any open inventory (so a held coin still gets a real target
+ * after you remove it from AUTO). Not the full SERIES map — that was 429 fuel.
+ */
+function symbolsNeedingKalshiTargets({ config = null, openTrades = [] } = {}) {
+  const out = new Set();
+  for (const s of tradeableKalshiSymbols(config)) {
+    if (SERIES_BY_SYMBOL[s]) out.add(s);
+  }
+  const pinned = String((config && config.symbol) || '').toUpperCase();
+  if (pinned && pinned !== 'AUTO' && SERIES_BY_SYMBOL[pinned]) out.add(pinned);
+  for (const t of Array.isArray(openTrades) ? openTrades : []) {
+    if (!t || String(t.status || 'open').toLowerCase() !== 'open') continue;
+    const s = String(t.symbol || '').toUpperCase();
+    if (SERIES_BY_SYMBOL[s]) out.add(s);
+  }
+  return Object.keys(SERIES_BY_SYMBOL).filter((s) => out.has(s));
+}
+
+/**
  * Named MODEL paper setups. Apply one from the dashboard instead of guessing knobs.
  * The active setup is the live book; the others run as silent shadow paper books
  * on the same quotes. Scoreboard also shows a what-if on saved fills (not a replay).
@@ -1420,9 +1440,9 @@ function modelLowAskHeldProbMin(config = {}) {
 }
 
 /**
- * Asks ≤69¢ (e.g. 65¢) only when direction is nearly certain:
- * high conf + wide live favor + strong held-side prob.
- * Slider 0 on modelLowAskMinConfidence disables this gate.
+ * Asks ≤69¢ (e.g. 65¢) only when direction is firm enough:
+ * conf ≥ slider (default 75; 0 = off) + live favor ≥4pts + held-side ≥72%.
+ * Stake under 70¢ stays half regardless.
  */
 function modelLowAskConvictionGate({ priceCents, window, signalSide, config = {} } = {}) {
   const confNeed = modelLowAskMinConfidence(config);
@@ -1703,9 +1723,9 @@ const MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS = 65;
 /** Asks at/below this need near-certain direction (under the 70¢ half-stake line). */
 const MODEL_LOW_ASK_CEILING_CENTS_DEFAULT = 69;
 /** Min engine conf for low-ask (≤69¢) entries. 0 = off (use normal min conf only). */
-const MODEL_LOW_ASK_MIN_CONFIDENCE_DEFAULT = 80;
-/** Live favor pts required for low-ask conviction (almost no doubt). */
-const MODEL_LOW_ASK_LIVE_FAVOR_DEFAULT = 12;
+const MODEL_LOW_ASK_MIN_CONFIDENCE_DEFAULT = 75;
+/** Live favor pts required for low-ask conviction (UP ≥ DOWN + N). */
+const MODEL_LOW_ASK_LIVE_FAVOR_DEFAULT = 4;
 /** Held-side live prob % required for low-ask conviction. */
 const MODEL_LOW_ASK_HELD_PROB_DEFAULT = 72;
 /** Don't open Model entries in the last this many minutes. 0 = no late cutoff (off for now). */
@@ -9351,6 +9371,7 @@ module.exports = {
   modelSetupConfigPatch,
   isKalshiTradeEnabled,
   tradeableKalshiSymbols,
+  symbolsNeedingKalshiTargets,
   liquidityPriority,
   LIQUIDITY_PRIORITY_BY_SYMBOL,
   settleEntryBand,
