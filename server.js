@@ -450,7 +450,7 @@ async function main() {
   await recompute();
   setInterval(recompute, COMPUTE_INTERVAL_MS);
 
-  // Settlement watchdog: every 2s, force-close any trade past its own
+  // Settlement watchdog: every 4s, force-close any trade past its own
   // windowCloseTime. Must NOT depend on recomputeInFlight — a hung Coinbase
   // / Kalshi cycle was letting opens "freeze" into the next 15m session.
   if (bot) {
@@ -465,8 +465,8 @@ async function main() {
           console.error('[bot] manage-watchdog error:', err.message);
         });
       }
-    }, 2000);
-    console.log('[startup] settle + manage watchdog every 2s (independent of prediction loop)');
+    }, 4000);
+    console.log('[startup] settle + manage watchdog every 4s (independent of prediction loop)');
   }
 
   const app = express();

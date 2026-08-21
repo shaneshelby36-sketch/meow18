@@ -6038,7 +6038,7 @@ class TradingBot {
       }
       return null;
     }
-    // Align with getMarket cache (~8s) so the 2s manage watchdog usually avoids HTTP.
+    // Align with getMarket cache (~8s) so the 4s manage watchdog usually avoids HTTP.
     const fresh = peek(8000);
     if (fresh) return fresh;
 
@@ -6904,7 +6904,7 @@ class TradingBot {
         }
       }
     }
-    // Shadows settle on the prediction cycle. The 2s watchdog is live-only so
+    // Shadows settle on the prediction cycle. The 4s watchdog is live-only so
     // six shadow books cannot queue getMarket behind a 429 cooldown.
   }
 

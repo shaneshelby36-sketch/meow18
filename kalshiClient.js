@@ -459,7 +459,7 @@ class KalshiClient {
     if (!this._marketByTickerInflight) this._marketByTickerInflight = new Map();
     const now = Date.now();
     const cached = this._marketByTickerCache.get(key);
-    // 8s cache: manage watchdog is 2s — usually hits cache; still fresh enough for exits.
+    // 8s cache: manage watchdog is 4s — usually hits cache; still fresh enough for exits.
     if (cached && now - cached.at < 8000) return cached.market;
     // Never sit on the 429 cooldown — timeouts then pile up and freeze paper.
     if (now < this._cooldownUntil) {
