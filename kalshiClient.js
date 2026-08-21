@@ -647,9 +647,10 @@ class KalshiClient {
     if (cached && now - cached.at < 8000 && marketHasUsableTwoSidedQuote(cached.market)) {
       return cached.market;
     }
-    // Never sit on the 429 cooldown — timeouts then pile up and freeze paper.
-    if (now < this._cooldownUntil) {
-      return cached && marketHasUsableTwoSidedQuote(cached.market) ? cached.market : null;
+    // Cooldown: reuse a good quote, but still hydrate when we have none
+    // (otherwise SOL/BTC entries die as "no two-sided quote" after a 429).
+    if (now < this._cooldownUntil && cached && marketHasUsableTwoSidedQuote(cached.market)) {
+      return cached.market;
     }
 
     const inflight = this._marketByTickerInflight.get(key);
@@ -657,8 +658,12 @@ class KalshiClient {
 
     const work = this._withPublicGate(async () => {
       try {
-        if (Date.now() < this._cooldownUntil) {
-          return cached && marketHasUsableTwoSidedQuote(cached.market) ? cached.market : null;
+        if (
+          Date.now() < this._cooldownUntil &&
+          cached &&
+          marketHasUsableTwoSidedQuote(cached.market)
+        ) {
+          return cached.market;
         }
         const data = await this._request('GET', `/markets/${key}`, { auth: this._preferMarketAuth() });
         const market = normalizeMarketPrices(data.market);

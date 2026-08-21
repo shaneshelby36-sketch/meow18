@@ -21,7 +21,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 58;
+const SETTINGS_DEFAULTS_VERSION = 59;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -1762,6 +1762,66 @@ const MODEL_LOW_ASK_MIN_CONFIDENCE_DEFAULT = 75;
 const MODEL_LOW_ASK_LIVE_FAVOR_DEFAULT = 4;
 /** Held-side live prob % required for low-ask conviction. */
 const MODEL_LOW_ASK_HELD_PROB_DEFAULT = 72;
+/** Min Kalshi ask (¢) that marks a clear market favorite. 0 = off. */
+const MODEL_KALSHI_FAVORITE_CENTS_DEFAULT = 75;
+
+/**
+ * When one Kalshi ask is clearly rich (≥ threshold) and the other is the
+ * cheap complement, that rich side is the market favorite. Engine lean must
+ * not chase the longshot while the book is priced this skewed.
+ */
+function modelKalshiFavoriteCents(config = {}) {
+  const n = Number(config.modelKalshiFavoriteCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_KALSHI_FAVORITE_CENTS_DEFAULT;
+}
+
+function modelKalshiFavoriteSide(market, config = {}) {
+  const floor = modelKalshiFavoriteCents(config);
+  if (!(floor > 0) || !market) return null;
+  const yesAsk = Number(market.yes_ask);
+  let noAsk = Number(market.no_ask);
+  if (!Number.isFinite(noAsk) || noAsk < 1 || noAsk > 99) {
+    const yesBid = Number(market.yes_bid);
+    if (Number.isFinite(yesBid) && yesBid >= 1 && yesBid <= 99) {
+      noAsk = 100 - yesBid;
+    }
+  }
+  const yesOk = Number.isFinite(yesAsk) && yesAsk >= 1 && yesAsk <= 99;
+  const noOk = Number.isFinite(noAsk) && noAsk >= 1 && noAsk <= 99;
+  if (!yesOk && !noOk) return null;
+  const yesRich = yesOk && yesAsk >= floor;
+  const noRich = noOk && noAsk >= floor;
+  // Clear favorite: only one side is rich.
+  if (yesRich && !noRich) return 'yes';
+  if (noRich && !yesRich) return 'no';
+  return null;
+}
+
+/**
+ * Block chasing the cheap longshot while Kalshi clearly prices the other
+ * side ≥ favorite floor (default 75¢).
+ */
+function modelKalshiFavoriteGate({ market, side, priceCents, config = {} } = {}) {
+  const favorite = modelKalshiFavoriteSide(market, config);
+  if (!favorite) return { ok: true, skipped: true };
+  const want = String(side || '').toLowerCase();
+  if (want !== 'yes' && want !== 'no') return { ok: true, skipped: true };
+  if (want === favorite) return { ok: true, favorite };
+  const floor = modelKalshiFavoriteCents(config);
+  const ask = Math.round(Number(priceCents));
+  return {
+    ok: false,
+    favorite,
+    reason:
+      `Kalshi prices ${favorite.toUpperCase()} ≥${floor}¢ favorite — ` +
+      `not chasing ${want.toUpperCase()}` +
+      (Number.isFinite(ask) ? ` @ ${ask}¢` : '') +
+      ' longshot',
+  };
+}
+
 /** Don't open Model entries in the last this many minutes. 0 = no late cutoff (off for now). */
 const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 0;
 /** Confidence required to allow entries below the normal min. */
@@ -2266,6 +2326,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelLowAskCeilingCents',
   'modelLowAskLiveFavorPts',
   'modelLowAskHeldProbMin',
+  'modelKalshiFavoriteCents',
   'modelLowPriceMaxCents',
   'modelLowPriceStakeQuarters',
   'modelConfirmCrossCents',
@@ -3315,6 +3376,7 @@ class TradingBot {
       modelLowAskCeilingCents: MODEL_LOW_ASK_CEILING_CENTS_DEFAULT,
       modelLowAskLiveFavorPts: MODEL_LOW_ASK_LIVE_FAVOR_DEFAULT,
       modelLowAskHeldProbMin: MODEL_LOW_ASK_HELD_PROB_DEFAULT,
+      modelKalshiFavoriteCents: MODEL_KALSHI_FAVORITE_CENTS_DEFAULT,
       modelLowPriceMaxCents: MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT,
       modelLowPriceStakeQuarters: MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT,
       modelConfirmCrossCents: MODEL_CONFIRM_CROSS_CENTS_DEFAULT,
@@ -6069,35 +6131,30 @@ class TradingBot {
     }
     if (found) {
       // Series list often omits bid/ask — hydrate from GET /markets/{ticker} before caching.
-      if (
-        found.ticker &&
-        typeof this.client.getMarket === 'function' &&
-        !(
-          Number.isFinite(Number(found.yes_bid)) &&
-          Number.isFinite(Number(found.yes_ask)) &&
-          Number(found.yes_bid) >= 1 &&
-          Number(found.yes_ask) <= 99 &&
-          Number(found.yes_bid) <= Number(found.yes_ask)
-        )
-      ) {
+      const quotedOk = (m) =>
+        m &&
+        Number.isFinite(Number(m.yes_bid)) &&
+        Number.isFinite(Number(m.yes_ask)) &&
+        Number(m.yes_bid) >= 1 &&
+        Number(m.yes_ask) <= 99 &&
+        Number(m.yes_bid) <= Number(m.yes_ask);
+      if (found.ticker && typeof this.client.getMarket === 'function' && !quotedOk(found)) {
         try {
-          const quoted = await this._getMarketBounded(found.ticker, 2500);
-          if (
-            quoted &&
-            Number.isFinite(Number(quoted.yes_bid)) &&
-            Number.isFinite(Number(quoted.yes_ask)) &&
-            Number(quoted.yes_bid) >= 1 &&
-            Number(quoted.yes_ask) <= 99 &&
-            Number(quoted.yes_bid) <= Number(quoted.yes_ask)
-          ) {
+          const quoted = await this._getMarketBounded(found.ticker, 3500);
+          if (quotedOk(quoted)) {
             found = { ...found, ...quoted };
           }
         } catch (_) {
-          // keep list row; entry path will skip if still quote-less
+          // keep list row
         }
       }
-      this._lastLiveMarket[seriesTicker] = found;
-      this._lastLiveMarketAt[seriesTicker] = Date.now();
+      // Never stick a quote-less row in the bot cache — that locks SOL/BTC
+      // into "no two-sided quote" until the window rolls.
+      if (quotedOk(found)) {
+        this._lastLiveMarket[seriesTicker] = found;
+        this._lastLiveMarketAt[seriesTicker] = Date.now();
+        return found;
+      }
       return found;
     }
     return null;
@@ -8708,10 +8765,38 @@ class TradingBot {
       );
       return null;
     }
-    const yesBid = Number(market.yes_bid);
-    const yesAsk = Number(market.yes_ask);
+    let yesBid = Number(market.yes_bid);
+    let yesAsk = Number(market.yes_ask);
     if (!Number.isFinite(yesBid) || !Number.isFinite(yesAsk) || yesBid < 1 || yesAsk > 99 || yesBid > yesAsk) {
-      this.lastError = `Skipped ${symbol}: Kalshi has no usable two-sided quote yet.`;
+      // One more hydrate — list rows / rate-limit stubs often lack bids.
+      if (market.ticker && typeof this._getMarketBounded === 'function') {
+        try {
+          const quoted = await this._getMarketBounded(market.ticker, 3500);
+          if (
+            quoted &&
+            Number.isFinite(Number(quoted.yes_bid)) &&
+            Number.isFinite(Number(quoted.yes_ask)) &&
+            Number(quoted.yes_bid) >= 1 &&
+            Number(quoted.yes_ask) <= 99 &&
+            Number(quoted.yes_bid) <= Number(quoted.yes_ask)
+          ) {
+            market = { ...market, ...quoted };
+            yesBid = Number(market.yes_bid);
+            yesAsk = Number(market.yes_ask);
+          }
+        } catch (_) {
+          /* fall through */
+        }
+      }
+    }
+    if (!Number.isFinite(yesBid) || !Number.isFinite(yesAsk) || yesBid < 1 || yesAsk > 99 || yesBid > yesAsk) {
+      const limited =
+        this.client &&
+        typeof this.client.isPublicRateLimited === 'function' &&
+        this.client.isPublicRateLimited();
+      this.lastError = limited
+        ? `Waiting: ${symbol} quote hydrate paused (Kalshi rate limit) — retrying shortly.`
+        : `Skipped ${symbol}: Kalshi has no usable two-sided quote yet.`;
       say(this.lastError);
       return null;
     }
@@ -8726,6 +8811,17 @@ class TradingBot {
     if (!Number.isFinite(priceCents) || priceCents < 1 || priceCents > 99) {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
       say(this.lastError);
+      return null;
+    }
+
+    const kalshiFavGate = modelKalshiFavoriteGate({
+      market,
+      side,
+      priceCents,
+      config: this.config,
+    });
+    if (!kalshiFavGate.ok) {
+      say(`Waiting: ${symbol} — ${kalshiFavGate.reason}.`);
       return null;
     }
 
@@ -9680,6 +9776,10 @@ module.exports = {
   modelEngineClearlyWithUs,
   modelPriceAllowed,
   modelLowAskConvictionGate,
+  modelKalshiFavoriteCents,
+  modelKalshiFavoriteSide,
+  modelKalshiFavoriteGate,
+  MODEL_KALSHI_FAVORITE_CENTS_DEFAULT,
   modelLowAskMinConfidence,
   MODEL_MIN_ENTRY_DEFAULT_CENTS,
   MODEL_LOW_ASK_MIN_CONFIDENCE_DEFAULT,
