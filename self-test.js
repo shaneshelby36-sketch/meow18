@@ -714,6 +714,31 @@ async function testKalshiClient() {
 
   {
     const c = new KalshiClient({});
+    // Empty list must not stick for the full 12s TTL.
+    c._openMarketsCache.set('KXBTC15M', { at: Date.now() - 2_000, markets: [] });
+    let n = 0;
+    c._request = async () => {
+      n += 1;
+      return {
+        markets: [
+          {
+            ticker: 'KXBTC15M-NEXT',
+            status: 'open',
+            close_time: new Date(Date.now() + 10 * 60_000).toISOString(),
+            floor_strike: 1,
+            yes_bid: 50,
+            yes_ask: 52,
+          },
+        ],
+      };
+    };
+    const picked = await c.getLiveOpenMarket('KXBTC15M', { minMsLeft: 1500 });
+    check(n >= 1, 'empty open-markets cache is refreshed quickly');
+    checkEq(picked && picked.ticker, 'KXBTC15M-NEXT', 'getLiveOpenMarket finds next window after empty cache');
+  }
+
+  {
+    const c = new KalshiClient({});
     c._cooldownUntil = Date.now() + 20_000;
     let n = 0;
     c._request = async () => {

@@ -624,7 +624,7 @@ const MODEL_PROB_DRIFT_PTS_DEFAULT = 3;
 /** Min hold before fast-red (0 = cut same tick if bid gaps on fill). */
 const MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT = 0;
 /** Max ask−bid spread allowed at entry — blocks absurd gaps, allows thin 15m books. */
-const MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT = 6;
+const MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT = 8;
 /** Red lean-stop barrier: stop if bid ≤ this or pace projects here. */
 const MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT = 50;
 /** Horizon used to project bid pace toward the barrier (ms). */
@@ -864,6 +864,15 @@ function modelMaxEntrySpreadCents(config = {}) {
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return Math.round(n);
   return MODEL_MAX_ENTRY_SPREAD_CENTS_DEFAULT;
+}
+
+/** BNB/SOL books run wider than BTC — allow a couple extra ¢ so they stay usable. */
+function modelMaxEntrySpreadCentsForSymbol(symbol, config = {}) {
+  const base = modelMaxEntrySpreadCents(config);
+  if (!(base > 0)) return base;
+  const sym = String(symbol || '').toUpperCase();
+  if (sym === 'BTC') return base;
+  return Math.min(20, base + 2);
 }
 
 function modelLowPriceMaxCents(_config = {}) {
@@ -5496,7 +5505,10 @@ class TradingBot {
     if (!this._lastLiveMarket) this._lastLiveMarket = Object.create(null);
     const cached = this._lastLiveMarket[seriesTicker];
     const cachedClose = cached ? parseMarketCloseMs(cached) : NaN;
-    if (cached && Number.isFinite(cachedClose) && cachedClose > Date.now() + Math.max(500, minMsLeft)) {
+    // Drop bot-side cache once the window is inside the min-left floor.
+    if (cached && Number.isFinite(cachedClose) && cachedClose <= Date.now() + Math.max(500, minMsLeft)) {
+      delete this._lastLiveMarket[seriesTicker];
+    } else if (cached && Number.isFinite(cachedClose) && cachedClose > Date.now() + Math.max(500, minMsLeft)) {
       const ticker = cached.ticker;
       if (ticker && typeof this.client.getMarket === 'function') {
         try {
@@ -5521,6 +5533,9 @@ class TradingBot {
       }
     }
     if (!found && typeof this.client.getOpenMarkets === 'function') {
+      if (typeof this.client.invalidateOpenMarkets === 'function') {
+        this.client.invalidateOpenMarkets(seriesTicker);
+      }
       const markets = await this.client.getOpenMarkets(seriesTicker, 20);
       found =
         pickLiveOpenMarket(markets, Date.now(), minMsLeft) ||
@@ -5530,8 +5545,18 @@ class TradingBot {
       this._lastLiveMarket[seriesTicker] = found;
       return found;
     }
-    if (cached && Number.isFinite(cachedClose) && cachedClose > Date.now() + 500) return cached;
     return null;
+  }
+
+  _liveMarketWaitReason(symbol) {
+    const limited =
+      this.client &&
+      typeof this.client.isPublicRateLimited === 'function' &&
+      this.client.isPublicRateLimited();
+    if (limited) {
+      return `Waiting: ${symbol} Kalshi market list paused (rate limit) — retrying in a few seconds.`;
+    }
+    return `Waiting: ${symbol} 15m window rolling over (new ticker not listed yet).`;
   }
 
   /**
@@ -7607,7 +7632,7 @@ class TradingBot {
       return null;
     }
     if (!market) {
-      this.lastDecision = `Waiting: ${symbol} 15m window rolling over.`;
+      this.lastDecision = this._liveMarketWaitReason(symbol);
       return null;
     }
     if (this._hasOpenOnTicker(market.ticker)) {
@@ -7888,14 +7913,18 @@ class TradingBot {
    * Model mode: side from active window locked direction (UP→YES, DOWN→NO).
    * No Edge/Settle protection gates — windows + confidence floor only.
    */
-  async _evaluateSymbolForModel(symbol, predictions) {
+  async _evaluateSymbolForModel(symbol, predictions, { quiet = false, onSkip = null } = {}) {
+    const say = (msg) => {
+      if (typeof onSkip === 'function') onSkip(symbol, msg);
+      if (!quiet) this.lastDecision = msg;
+    };
     if (!isKalshiTradeEnabled(symbol, this.config)) {
-      this.lastDecision = `Waiting: ${symbol} is opted out of trading.`;
+      say(`Waiting: ${symbol} is opted out of trading.`);
       return null;
     }
 
     if (this._hasOpenOnSymbol(symbol)) {
-      this.lastDecision = `Waiting: already holding an open ${symbol} position (one open per coin).`;
+      say(`Waiting: already holding an open ${symbol} position (one open per coin).`);
       return null;
     }
 
@@ -7907,19 +7936,19 @@ class TradingBot {
       now: Date.now(),
     });
     if (!cooldown.ok) {
-      this.lastDecision = cooldown.reason;
+      say(cooldown.reason);
       return null;
     }
 
     const assetPrediction = predictions[symbol];
     if (!assetPrediction || !assetPrediction.ready) {
-      this.lastDecision = `Waiting: ${symbol} prediction data is still seeding.`;
+      say(`Waiting: ${symbol} prediction data is still seeding.`);
       return null;
     }
 
     const seriesTicker = SERIES_BY_SYMBOL[symbol];
     if (!seriesTicker) {
-      this.lastDecision = `Waiting: ${symbol} has no supported Kalshi market.`;
+      say(`Waiting: ${symbol} has no supported Kalshi market.`);
       return null;
     }
 
@@ -7929,21 +7958,22 @@ class TradingBot {
     } catch (err) {
       this.lastError = `Failed to fetch Kalshi market for ${seriesTicker}: ${err.message}`;
       console.error('[bot]', this.lastError);
+      say(this.lastError);
       return null;
     }
     if (!market) {
-      this.lastDecision = `Waiting: ${symbol} 15m window rolling over.`;
+      say(this._liveMarketWaitReason(symbol));
       return null;
     }
     if (this._hasOpenOnTicker(market.ticker)) {
-      this.lastDecision = `Waiting: already holding an open position on ${market.ticker}.`;
+      say(`Waiting: already holding an open position on ${market.ticker}.`);
       return null;
     }
 
     const now = Date.now();
     const closeTime = new Date(market.close_time).getTime();
     if (!Number.isFinite(closeTime) || closeTime <= now) {
-      this.lastDecision = `Waiting: the available ${symbol} market is already closed.`;
+      say(`Waiting: the available ${symbol} market is already closed.`);
       return null;
     }
 
@@ -7952,13 +7982,14 @@ class TradingBot {
       ? Number(this.config.modelMinMinutesToOpen)
       : MODEL_MIN_MINUTES_TO_OPEN_DEFAULT;
     if (minMinutesToOpen > 0 && minutesRemaining < minMinutesToOpen) {
-      this.lastDecision =
-        `Waiting: ${symbol} model — only ${minutesRemaining.toFixed(1)} min left (no new entries in last ${minMinutesToOpen}m).`;
+      say(
+        `Waiting: ${symbol} model — only ${minutesRemaining.toFixed(1)} min left (no new entries in last ${minMinutesToOpen}m).`
+      );
       return null;
     }
     const picked = pickModelWindow(assetPrediction, minutesRemaining);
     if (!picked || !picked.window || !picked.direction) {
-      this.lastDecision = `Waiting: ${symbol} has no usable model window lean.`;
+      say(`Waiting: ${symbol} has no usable model window lean.`);
       return null;
     }
     const { window, direction, key: windowKey } = picked;
@@ -7967,22 +7998,28 @@ class TradingBot {
       : MODEL_MIN_CONFIDENCE_DEFAULT;
     if (!Number.isFinite(window.confidence) || window.confidence < minConf) {
       const confidence = Number.isFinite(window.confidence) ? window.confidence : 'unavailable';
-      this.lastDecision =
-        `Waiting: ${symbol} ${windowKey} confidence is ${confidence}% (minimum ${minConf}%).`;
+      say(`Waiting: ${symbol} ${windowKey} confidence is ${confidence}% (minimum ${minConf}%).`);
       return null;
     }
 
     const signalSide = modelSignalSideFromDirection(direction);
     if (!signalSide) {
-      this.lastDecision = `Waiting: ${symbol} has no usable model window lean.`;
+      say(`Waiting: ${symbol} has no usable model window lean.`);
       return null;
     }
     const invert = isModelInvertSide(this.config);
     const side = invert ? flipKalshiSide(signalSide) : signalSide;
+    if (this._hasRecentEntryMiss(symbol, closeTime, side)) {
+      say(
+        `Waiting: ${symbol} ${side.toUpperCase()} fill-miss cool-down (~${Math.round(ENTRY_MISS_COOLDOWN_MS / 1000)}s) — trying other cryptos.`
+      );
+      return null;
+    }
     const yesBid = Number(market.yes_bid);
     const yesAsk = Number(market.yes_ask);
     if (!Number.isFinite(yesBid) || !Number.isFinite(yesAsk) || yesBid < 1 || yesAsk > 99 || yesBid > yesAsk) {
       this.lastError = `Skipped ${symbol}: Kalshi has no usable two-sided quote yet.`;
+      say(this.lastError);
       return null;
     }
 
@@ -7995,12 +8032,13 @@ class TradingBot {
     const priceCents = side === 'yes' ? yesAsk : noAsk;
     if (!Number.isFinite(priceCents) || priceCents < 1 || priceCents > 99) {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
+      say(this.lastError);
       return null;
     }
 
     const noBid = modelActualSideBidCents(market, 'no');
     const heldBid = side === 'yes' ? modelActualSideBidCents(market, 'yes') : noBid;
-    const maxSpreadBase = modelMaxEntrySpreadCents(this.config);
+    const maxSpreadBase = modelMaxEntrySpreadCentsForSymbol(symbol, this.config);
     const richAsk = modelRichAskCents(this.config);
     const isRichAsk = Number.isFinite(priceCents) && priceCents >= richAsk;
     const maxSpread = isRichAsk
@@ -8008,26 +8046,29 @@ class TradingBot {
       : maxSpreadBase;
     if (maxSpread > 0) {
       if (!Number.isFinite(heldBid) || heldBid < 1) {
-        this.lastDecision =
-          `Waiting: ${symbol} ${String(side).toUpperCase()} has no live bid — won't buy blind into the ask.`;
+        say(
+          `Waiting: ${symbol} ${String(side).toUpperCase()} has no live bid — won't buy blind into the ask.`
+        );
         return null;
       }
       const spread = Math.round(priceCents - heldBid);
       if (spread > maxSpread) {
-        this.lastDecision =
+        say(
           `Waiting: ${symbol} ${String(side).toUpperCase()} ask ${priceCents}¢ vs bid ${Math.round(heldBid)}¢ ` +
-          `(gap ${spread}¢) — won't buy into a wide spread` +
-          (isRichAsk ? ' on a rich ask' : '') +
-          '.';
+            `(gap ${spread}¢) — won't buy into a wide spread` +
+            (isRichAsk ? ' on a rich ask' : '') +
+            '.'
+        );
         return null;
       }
     }
     if (isRichAsk) {
       const richConf = Math.max(minConf, modelRichMinConfidence(this.config));
       if (!Number.isFinite(window.confidence) || window.confidence < richConf) {
-        this.lastDecision =
+        say(
           `Waiting: ${symbol} rich ask ${priceCents}¢ needs conf ≥${richConf}% ` +
-          `(have ${Number.isFinite(window.confidence) ? Math.round(window.confidence) : '?'}%).`;
+            `(have ${Number.isFinite(window.confidence) ? Math.round(window.confidence) : '?'}%).`
+        );
         return null;
       }
     }
@@ -8044,7 +8085,7 @@ class TradingBot {
       fade: invert,
     });
     if (dumpRisk.dump) {
-      this.lastDecision = `Waiting: ${symbol} — skip entry, ${dumpRisk.reason}.`;
+      say(`Waiting: ${symbol} — skip entry, ${dumpRisk.reason}.`);
       return null;
     }
     if (
@@ -8057,8 +8098,9 @@ class TradingBot {
         config: this.config,
       })
     ) {
-      this.lastDecision =
-        `Waiting: ${symbol} model lean already turning on ${String(side).toUpperCase()} — no chase entry.`;
+      say(
+        `Waiting: ${symbol} model lean already turning on ${String(side).toUpperCase()} — no chase entry.`
+      );
       return null;
     }
 
@@ -8071,7 +8113,7 @@ class TradingBot {
       closeTime,
     });
     if (!confirmGate.ok) {
-      this.lastDecision = confirmGate.reason;
+      say(confirmGate.reason);
       return null;
     }
 
@@ -8082,16 +8124,17 @@ class TradingBot {
     if (!modelLiveLeanStillFavors(window, signalSide, liveMargin)) {
       const up = Number(window.probabilityUp);
       const down = Number(window.probabilityDown);
-      this.lastDecision =
+      say(
         `Waiting: ${symbol} lock is ${direction} but live lean is ` +
-        `${Number.isFinite(up) ? up.toFixed(0) : '?'}% UP / ${Number.isFinite(down) ? down.toFixed(0) : '?'}% DOWN` +
-        ` (need live favor by ≥${liveMargin}pts).`;
+          `${Number.isFinite(up) ? up.toFixed(0) : '?'}% UP / ${Number.isFinite(down) ? down.toFixed(0) : '?'}% DOWN` +
+          ` (need live favor by ≥${liveMargin}pts).`
+      );
       return null;
     }
 
     const priceGate = modelPriceAllowed(priceCents, window, this.config);
     if (!priceGate.ok) {
-      this.lastDecision = `Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — ${priceGate.reason}.`;
+      say(`Waiting: ${symbol} ${side.toUpperCase()} is ${priceCents}¢ — ${priceGate.reason}.`);
       return null;
     }
 
@@ -8121,14 +8164,35 @@ class TradingBot {
       (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
     );
     if (candidates.length === 0) return [];
+    const skips = [];
     const evaluations = await Promise.all(
-      candidates.map((sym) => this._evaluateSymbolForModel(sym, predictions))
+      candidates.map((sym) =>
+        this._evaluateSymbolForModel(sym, predictions, {
+          quiet: true,
+          onSkip: (_s, msg) => {
+            if (msg) skips.push(msg.replace(/^Waiting:\s*/i, ''));
+          },
+        })
+      )
     );
     const valid = evaluations.filter(Boolean);
     valid.sort((a, b) => {
       if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
       return liquidityPriority(b.symbol) - liquidityPriority(a.symbol);
     });
+    if (valid.length === 0 && skips.length) {
+      const short = skips
+        .map((s) => s.replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .slice(0, 4);
+      this.lastDecision = `Waiting: ${short.join(' · ')}`;
+    } else if (valid.length > 0) {
+      const names = valid.map((o) => o.symbol).join(', ');
+      this.lastDecision =
+        valid.length === 1
+          ? `MODEL: ${names} ready — opening.`
+          : `MODEL: ${names} ready (${valid.length}) — filling free slots.`;
+    }
     return valid;
   }
 
@@ -8253,7 +8317,7 @@ class TradingBot {
       return null;
     }
     if (!market) {
-      say(`Waiting: ${symbol} 15m window rolling over.`);
+      say(this._liveMarketWaitReason(symbol));
       return null;
     }
     if (this._hasOpenOnTicker(market.ticker)) {
@@ -8894,6 +8958,7 @@ module.exports = {
   modelDumpPullbackCents,
   modelFastRedCents,
   modelMaxEntrySpreadCents,
+  modelMaxEntrySpreadCentsForSymbol,
   MODEL_DUMP_PULLBACK_CENTS_DEFAULT,
   MODEL_FAST_RED_CENTS_DEFAULT,
   MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT,

@@ -10,7 +10,7 @@
   "modelMinTpCents": 7,
   "modelMaxLossCents": 8,
   "modelConfirmCrossCents": 0,
-  "modelMaxEntrySpreadCents": 6,
+  "modelMaxEntrySpreadCents": 8,
   "maxOpenPositions": 2,
   "stakeDollars": 3,
   "skimMode": "insurance",

@@ -366,7 +366,12 @@ class KalshiClient {
     const cacheKey = String(seriesTicker || '');
     const now = Date.now();
     const cached = this._openMarketsCache.get(cacheKey);
-    if (cached && now - cached.at < 12_000) return cached.markets;
+    // Empty lists go stale fast — a real rollover must not look "rolling over" for 12s+.
+    if (cached) {
+      const n = Array.isArray(cached.markets) ? cached.markets.length : 0;
+      const ttl = n > 0 ? 12_000 : 1_500;
+      if (now - cached.at < ttl) return cached.markets;
+    }
 
     const inflight = this._openMarketsInflight.get(cacheKey);
     if (inflight) return inflight;
@@ -403,12 +408,22 @@ class KalshiClient {
     return work;
   }
 
+  /** Drop cached series list so the next getOpenMarkets hits the network. */
+  invalidateOpenMarkets(seriesTicker) {
+    if (!this._openMarketsCache) return;
+    this._openMarketsCache.delete(String(seriesTicker || ''));
+  }
+
+  isPublicRateLimited() {
+    return Date.now() < (Number(this._cooldownUntil) || 0);
+  }
+
   /**
    * Current tradeable 15m market for a series (soonest close still live).
+   * If the first pick misses (stale/empty cache during rollover), bust cache once and retry.
    */
   async getLiveOpenMarket(seriesTicker, { minMsLeft = 1500, limit = 20 } = {}) {
-    const markets = await this.getOpenMarkets(seriesTicker, limit);
-    const pick = (floorMs) => {
+    const pickFrom = (markets, floorMs) => {
       const nowMs = Date.now();
       const live = (Array.isArray(markets) ? markets : [])
         .map((m) => ({ m, closeMs: parseMarketCloseMs(m) }))
@@ -417,7 +432,12 @@ class KalshiClient {
       live.sort((a, b) => a.closeMs - b.closeMs);
       return live[0].m;
     };
-    return pick(minMsLeft) || pick(0);
+    const attempt = async (force) => {
+      if (force) this.invalidateOpenMarkets(seriesTicker);
+      const markets = await this.getOpenMarkets(seriesTicker, limit);
+      return pickFrom(markets, minMsLeft) || pickFrom(markets, 0);
+    };
+    return (await attempt(false)) || (await attempt(true));
   }
 
   async getMarket(ticker) {
