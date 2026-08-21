@@ -368,7 +368,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> — Core setup: BTC/SOL, conf <strong>55%</strong>, live favor <strong>3</strong>, TP <strong>+7¢</strong>, max <strong>2</strong> opens, max loss <strong>8¢</strong> (rich ~75¢ tickets can ride toward a <strong>60¢</strong> floor). Soft red holds unless pace → ≤50¢.</p>
+          <p class="settings-hint"><strong>MODEL</strong> — Core setup: BTC/SOL, conf <strong>55%</strong>, live favor <strong>3</strong>, TP <strong>+7¢</strong>, max <strong>2</strong> opens, max loss <strong>8¢</strong>. ~75¢ entries can ride to <strong>60¢</strong>; ≥78¢ use rich floor (default <strong>68¢</strong> — e.g. 80/−12, 85/−17). Soft red holds unless pace → ≤50¢.</p>
 
           <div class="model-setups" id="bot-model-setups">
             <h4 class="bot-panel-subhead">Paper setups</h4>
@@ -457,7 +457,7 @@
               <input id="bot-model-rich-floor" type="range" min="0" max="75" step="1" />
               <span class="slider-value" id="bot-model-rich-floor-value">—</span>
             </div>
-            <span class="field-hint">When entry is ~75¢+ (or high conf), allow drawdown down to this bid before the hard cliff — e.g. <strong>75→60</strong> = −15¢. Normal tickets stay on flat max loss. <strong>0 = off</strong>.</span>
+            <span class="field-hint">Slider = floor for <strong>≥78¢</strong> entries (default <strong>68</strong> → 80/−12, 85/−17). Separate rule: <strong>72–77¢</strong> entries ride to <strong>60¢</strong>. Normal tickets stay on flat max loss. <strong>0 = off</strong> rich floor only (75-band still uses 60).</span>
           </label>
           <label>MODEL post-exit sit-out (sec)
             <div class="slider-row">

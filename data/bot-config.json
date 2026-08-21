@@ -9,7 +9,7 @@
   "modelBankGreenCents": 7,
   "modelMinTpCents": 7,
   "modelMaxLossCents": 8,
-  "modelRichStopFloorCents": 60,
+  "modelRichStopFloorCents": 68,
   "modelConfirmCrossCents": 0,
   "modelMaxEntrySpreadCents": 8,
   "maxOpenPositions": 2,

@@ -969,6 +969,13 @@ function modelRichStopFloorCents(config = {}) {
   return MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT;
 }
 
+function modelMidRichStopFloorCents(config = {}) {
+  const n = Number(config.modelMidRichStopFloorCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT;
+}
+
 function modelRichStopEntryMinCents(config = {}) {
   const n = Number(config.modelRichStopEntryMinCents);
   if (Number.isFinite(n) && n > 0) return Math.round(n);
@@ -982,25 +989,47 @@ function modelRichStopMinConfidence(config = {}) {
 }
 
 /**
- * Hard max-loss for this ticket. Base −N¢, but rich ~75¢+ holds can ride down
- * toward ~60¢ (entry − floor) — more room when the market already prices a favorite.
+ * Absolute bid floor for this entry: ~75¢ band → 60¢; ≥78¢ → rich floor (default 68).
+ * 0 = no widen (flat max loss).
+ */
+function modelStopFloorForEntryCents(entryCents, config = {}) {
+  const entry = Number(entryCents);
+  if (!Number.isFinite(entry)) return 0;
+  const midFloor = modelMidRichStopFloorCents(config);
+  const midMin = MODEL_MID_RICH_ENTRY_MIN_CENTS_DEFAULT;
+  const midMax = MODEL_MID_RICH_ENTRY_MAX_CENTS_DEFAULT;
+  if (midFloor > 0 && entry >= midMin && entry <= midMax) return midFloor;
+
+  const richFloor = modelRichStopFloorCents(config);
+  const richMin = modelRichStopEntryMinCents(config);
+  if (richFloor > 0 && entry >= richMin) return richFloor;
+  return 0;
+}
+
+/**
+ * Hard max-loss for this ticket. Base −N¢ on normal entries.
+ * ~75¢: ride to 60 (−15). ≥78¢: ride to rich floor (default 68 → 80/−12, 85/−17).
  */
 function modelEffectiveMaxLossCents(trade, config = {}) {
   const base = modelMaxLossCents(config);
   if (!(base > 0)) return 0;
   const entry = Number(trade && trade.entryPriceCents);
-  const floor = modelRichStopFloorCents(config);
-  if (!(floor > 0) || !Number.isFinite(entry) || entry <= floor) return base;
+  if (!Number.isFinite(entry)) return base;
 
-  const minEntry = modelRichStopEntryMinCents(config);
-  const minConf = modelRichStopMinConfidence(config);
-  const conf = Number(trade && trade.engineConfidence);
-  const richEntry = entry >= minEntry;
-  const highConf = Number.isFinite(conf) && conf >= minConf;
-  if (!richEntry && !highConf) return base;
-  // High-conf but cheap ticket: only widen if there's real room to the floor.
-  if (!richEntry && entry < floor + base) return base;
-
+  let floor = modelStopFloorForEntryCents(entry, config);
+  if (!(floor > 0)) {
+    // High-conf ticket just under rich band: still allow rich floor if conf qualifies.
+    const minConf = modelRichStopMinConfidence(config);
+    const conf = Number(trade && trade.engineConfidence);
+    const richFloor = modelRichStopFloorCents(config);
+    const highConf = Number.isFinite(conf) && conf >= minConf;
+    if (highConf && richFloor > 0 && entry > richFloor && entry >= MODEL_MID_RICH_ENTRY_MIN_CENTS_DEFAULT) {
+      floor = richFloor;
+    } else {
+      return base;
+    }
+  }
+  if (entry <= floor) return base;
   const room = Math.max(0, Math.round(entry - floor));
   return Math.max(base, room);
 }
@@ -1514,12 +1543,16 @@ const MODEL_HARD_ADVERSE_CENTS_DEFAULT = 8;
 /** Alias / paper fill ceiling: never book more than this many ¢ loss from entry on adverse exits. */
 const MODEL_MAX_LOSS_CENTS_DEFAULT = 8;
 /**
- * Rich / high-prob tickets (entry ~75¢+): allow drawdown down to this absolute bid
- * before the hard max-loss cliff — e.g. 75→60 = −15¢. Normal tickets keep flat −8¢.
+ * Rich tickets (entry ≥78¢): drawdown floor before hard cliff — 80→68 (−12), 85→68 (−17).
+ * Mid-rich ~75¢ band uses a separate lower floor (see MID_RICH).
  */
-const MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT = 60;
-/** Only widen max-loss toward the rich floor once entry is at least this. */
-const MODEL_RICH_STOP_ENTRY_MIN_CENTS_DEFAULT = 72;
+const MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT = 68;
+/** ~75¢ band (72–77¢ entry): allow ride down to this bid — 75→60 (−15). */
+const MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT = 60;
+const MODEL_MID_RICH_ENTRY_MIN_CENTS_DEFAULT = 72;
+const MODEL_MID_RICH_ENTRY_MAX_CENTS_DEFAULT = 77;
+/** Rich (68¢) floor applies once entry is at least this. */
+const MODEL_RICH_STOP_ENTRY_MIN_CENTS_DEFAULT = 78;
 /** Prefer rich-floor widen when engine conf is at least this (or entry already rich). */
 const MODEL_RICH_STOP_MIN_CONFIDENCE_DEFAULT = 70;
 /** Asks at/above this → tighter spread + higher conf (rich tickets gap hard). */
@@ -2012,6 +2045,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelHardAdverseCents',
   'modelMaxLossCents',
   'modelRichStopFloorCents',
+  'modelMidRichStopFloorCents',
   'modelRichStopEntryMinCents',
   'modelRichStopMinConfidence',
   'modelDumpPullbackCents',
@@ -3041,6 +3075,7 @@ class TradingBot {
       modelHardAdverseCents: MODEL_HARD_ADVERSE_CENTS_DEFAULT,
       modelMaxLossCents: MODEL_MAX_LOSS_CENTS_DEFAULT,
       modelRichStopFloorCents: MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT,
+      modelMidRichStopFloorCents: MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT,
       modelRichStopEntryMinCents: MODEL_RICH_STOP_ENTRY_MIN_CENTS_DEFAULT,
       modelRichStopMinConfidence: MODEL_RICH_STOP_MIN_CONFIDENCE_DEFAULT,
       modelRichAskCents: MODEL_RICH_ASK_CENTS_DEFAULT,
@@ -5993,7 +6028,7 @@ class TradingBot {
         underwater && Number.isFinite(entry) ? Math.round(entry - heldSideBidCents) : 0;
       const hardAdverseBase = modelHardAdverseCents(this.config);
       const maxLoss = modelEffectiveMaxLossCents(trade, this.config);
-      // Follow the ticket's effective max loss (rich ~75¢ holds → ~60¢ floor).
+      // Follow the ticket's effective max loss (~75→60, ≥78→68 floor).
       const hardAdverse = Math.max(hardAdverseBase || 0, maxLoss || 0);
       const faded = trade.modelInverted === true;
       const againstLocked =
@@ -9117,6 +9152,7 @@ module.exports = {
   modelRichAskCents,
   MODEL_MAX_LOSS_CENTS_DEFAULT,
   MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT,
+  MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT,
   MODEL_RICH_STOP_ENTRY_MIN_CENTS_DEFAULT,
   MODEL_RICH_STOP_MIN_CONFIDENCE_DEFAULT,
   MODEL_LIVE_LEAN_MARGIN_DEFAULT,
