@@ -314,20 +314,20 @@ class KalshiClient {
   // ---------- public market data (no auth needed) ----------
 
   _noteRateLimit() {
-    this._cooldownUntil = Date.now() + 20_000;
+    this._cooldownUntil = Date.now() + 45_000;
     if (Date.now() - this._429LogAt > 10_000) {
       this._429LogAt = Date.now();
-      console.warn('[kalshi] rate limited (429) — pausing public GETs ~20s and using cached markets');
+      console.warn('[kalshi] rate limited (429) — pausing public GETs ~45s and using cached markets');
     }
   }
 
   async _withPublicGate(fn) {
     const run = this._publicGate.then(async () => {
-      // ~400ms spacing cuts 429 storms; 20s cooldown after a 429 is the real freeze.
+      // ~900ms spacing cuts 429 storms; 45s cooldown after a 429 is the real freeze.
       const wait = Math.max(
         0,
         this._cooldownUntil - Date.now(),
-        this._lastPublicAt + 400 - Date.now()
+        this._lastPublicAt + 900 - Date.now()
       );
       if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
       this._lastPublicAt = Date.now();
@@ -370,7 +370,7 @@ class KalshiClient {
     // Empty lists go stale fast — a real rollover must not look "rolling over" for 12s+.
     if (cached) {
       const n = Array.isArray(cached.markets) ? cached.markets.length : 0;
-      const ttl = n > 0 ? 12_000 : 1_500;
+      const ttl = n > 0 ? 20_000 : 1_500;
       if (now - cached.at < ttl) return cached.markets;
     }
 
@@ -390,6 +390,14 @@ class KalshiClient {
         }
         const markets = await this._listOpenMarketsUncached(seriesTicker, limit);
         this._openMarketsCache.set(cacheKey, { at: Date.now(), markets });
+        // Seed per-ticker cache so manage/entry can skip immediate GET /markets/{ticker}.
+        if (!this._marketByTickerCache) this._marketByTickerCache = new Map();
+        const stamped = Date.now();
+        for (const m of markets) {
+          if (m && m.ticker) {
+            this._marketByTickerCache.set(String(m.ticker), { at: stamped, market: m });
+          }
+        }
         return markets;
       } catch (err) {
         if (err && err.status === 429) {
@@ -451,8 +459,8 @@ class KalshiClient {
     if (!this._marketByTickerInflight) this._marketByTickerInflight = new Map();
     const now = Date.now();
     const cached = this._marketByTickerCache.get(key);
-    // 2.5s cache: manage watchdog is 2s — usually hits cache, still fresh for TP/stops.
-    if (cached && now - cached.at < 2500) return cached.market;
+    // 8s cache: manage watchdog is 2s — usually hits cache; still fresh enough for exits.
+    if (cached && now - cached.at < 8000) return cached.market;
     // Never sit on the 429 cooldown — timeouts then pile up and freeze paper.
     if (now < this._cooldownUntil) {
       return cached ? cached.market : null;

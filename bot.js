@@ -5896,18 +5896,26 @@ class TradingBot {
       return cached || null;
     }
     if (!this._lastLiveMarket) this._lastLiveMarket = Object.create(null);
+    if (!this._lastLiveMarketAt) this._lastLiveMarketAt = Object.create(null);
+    const limited =
+      typeof this.client.isPublicRateLimited === 'function' && this.client.isPublicRateLimited();
     const cached = this._lastLiveMarket[seriesTicker];
     const cachedClose = cached ? parseMarketCloseMs(cached) : NaN;
+    const cacheAge = Date.now() - (Number(this._lastLiveMarketAt[seriesTicker]) || 0);
     // Drop bot-side cache once the window is inside the min-left floor.
     if (cached && Number.isFinite(cachedClose) && cachedClose <= Date.now() + Math.max(500, minMsLeft)) {
       delete this._lastLiveMarket[seriesTicker];
+      delete this._lastLiveMarketAt[seriesTicker];
     } else if (cached && Number.isFinite(cachedClose) && cachedClose > Date.now() + Math.max(500, minMsLeft)) {
+      // While rate-limited or recently refreshed, reuse — don't burn GET /markets/{ticker}.
+      if (limited || cacheAge < 8_000) return cached;
       const ticker = cached.ticker;
       if (ticker && typeof this.client.getMarket === 'function') {
         try {
           const fresh = await this._getMarketBounded(ticker, 2000);
           if (fresh) {
             this._lastLiveMarket[seriesTicker] = fresh;
+            this._lastLiveMarketAt[seriesTicker] = Date.now();
             return fresh;
           }
         } catch (_) {
@@ -5916,6 +5924,8 @@ class TradingBot {
       }
       return cached;
     }
+
+    if (limited) return cached || null;
 
     let found = null;
     if (typeof this.client.getLiveOpenMarket === 'function') {
@@ -5936,6 +5946,7 @@ class TradingBot {
     }
     if (found) {
       this._lastLiveMarket[seriesTicker] = found;
+      this._lastLiveMarketAt[seriesTicker] = Date.now();
       return found;
     }
     return null;
@@ -6022,8 +6033,8 @@ class TradingBot {
       }
       return null;
     }
-    // Align with getMarket cache (~2.5s) so the 2s manage watchdog usually avoids HTTP.
-    const fresh = peek(2500);
+    // Align with getMarket cache (~8s) so the 2s manage watchdog usually avoids HTTP.
+    const fresh = peek(8000);
     if (fresh) return fresh;
 
     let timer = null;
@@ -8672,18 +8683,34 @@ class TradingBot {
       (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
     );
     if (candidates.length === 0) return [];
+    if (
+      this.client &&
+      typeof this.client.isPublicRateLimited === 'function' &&
+      this.client.isPublicRateLimited()
+    ) {
+      this.lastDecision =
+        'Waiting: Kalshi public GETs paused (rate limit) — holding opens from cache; new entries resume after cooldown.';
+      return [];
+    }
     const skips = [];
-    const evaluations = await Promise.all(
-      candidates.map((sym) =>
-        this._evaluateSymbolForModel(sym, predictions, {
-          quiet: true,
-          onSkip: (_s, msg) => {
-            if (msg) skips.push(msg.replace(/^Waiting:\s*/i, ''));
-          },
-        })
-      )
-    );
-    const valid = evaluations.filter(Boolean);
+    // Serial — parallel AUTO scans were bursting list GETs and tripping 429.
+    const valid = [];
+    for (const sym of candidates) {
+      const opp = await this._evaluateSymbolForModel(sym, predictions, {
+        quiet: true,
+        onSkip: (_s, msg) => {
+          if (msg) skips.push(msg.replace(/^Waiting:\s*/i, ''));
+        },
+      });
+      if (opp) valid.push(opp);
+      if (
+        this.client &&
+        typeof this.client.isPublicRateLimited === 'function' &&
+        this.client.isPublicRateLimited()
+      ) {
+        break;
+      }
+    }
     valid.sort((a, b) => {
       if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
       return liquidityPriority(b.symbol) - liquidityPriority(a.symbol);
@@ -9091,9 +9118,10 @@ class TradingBot {
       if (/no open Kalshi/i.test(m)) return 'no Kalshi market';
       return m.replace(/^Waiting:\s*/i, '').slice(0, 64);
     };
-    const evaluations = await Promise.all(
-      candidates.map((sym) =>
-        this._evaluateSymbolForSettle(sym, predictions, {
+    const evaluations = [];
+    for (const sym of candidates) {
+      evaluations.push(
+        await this._evaluateSymbolForSettle(sym, predictions, {
           quiet: true,
           onSkip: (s, msg) => {
             if (skips.length < 12) skips.push({ symbol: s, why: shortSkip(msg) });
@@ -9102,8 +9130,15 @@ class TradingBot {
             if (quoteSnaps.length < 16) quoteSnaps.push(q);
           },
         })
-      )
-    );
+      );
+      if (
+        this.client &&
+        typeof this.client.isPublicRateLimited === 'function' &&
+        this.client.isPublicRateLimited()
+      ) {
+        break;
+      }
+    }
     const valid = evaluations.filter(Boolean);
     const skipLine = skips.length
       ? skips.map((s) => `${s.symbol} (${s.why})`).join('; ')
@@ -9234,9 +9269,17 @@ class TradingBot {
       }
       return null;
     }
-    const evaluations = await Promise.all(
-      candidates.map((sym) => this._evaluateSymbolForEdge(sym, predictions))
-    );
+    const evaluations = [];
+    for (const sym of candidates) {
+      evaluations.push(await this._evaluateSymbolForEdge(sym, predictions));
+      if (
+        this.client &&
+        typeof this.client.isPublicRateLimited === 'function' &&
+        this.client.isPublicRateLimited()
+      ) {
+        break;
+      }
+    }
     const valid = evaluations.filter(Boolean);
     if (valid.length === 0) return null;
     valid.sort((a, b) => {
