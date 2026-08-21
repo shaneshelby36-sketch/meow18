@@ -19,6 +19,7 @@
   "insuranceOverflowDollars": 15,
   "paperStartingBalanceDollars": 100,
   "modelAutoSwitchSetup": "off",
+  "modelShadowBooks": "off",
   "halfStakeNear": "on",
   "secondOpenRequiresGreen": "on",
   "stakingStrategy": "fixed",

@@ -906,7 +906,7 @@ async function refreshBotStatus() {
     restoreLogScroll('bot-trade-log-list', tradeScroll, 'top');
     bindActivityLogUi();
     bindTradeLogUi();
-    renderModelSetups(data.modelSetups);
+    renderModelSetups(data.modelSetups, data.modelShadowBooks);
     renderModelAutoSwitchNote(data.modelAutoSwitch);
     renderBotDashboard(data);
   } catch (err) {
@@ -993,7 +993,7 @@ function renderBotDashboard(data) {
   if (overlayToggle) overlayToggle.textContent = toggle.textContent;
   bindTradeLogUi();
   bindActivityLogUi();
-  renderModelSetups(data.modelSetups);
+  renderModelSetups(data.modelSetups, data.modelShadowBooks);
   renderModelAutoSwitchNote(data.modelAutoSwitch);
 }
 
@@ -1621,8 +1621,8 @@ function formatSetupCapital(capital, { prefix = '' } = {}) {
   return prefix ? `${prefix} · ${line}` : line;
 }
 
-function formatShadowScore(shadow) {
-  if (!shadow) return '';
+function formatShadowScore(shadow, { paused = false } = {}) {
+  if (!shadow) return paused ? 'shadow · paused' : '';
   const pnl = Number(shadow.pnlCents) || 0;
   const dollars = `${pnl >= 0 ? '+' : '−'}$${(Math.abs(pnl) / 100).toFixed(2)}`;
   const fills = Number(shadow.trades) || 0;
@@ -1631,8 +1631,9 @@ function formatShadowScore(shadow) {
   const cap = formatSetupCapital(shadow);
   const capBit = cap ? ` · ${cap}` : '';
   const openBit = open ? ` · ${open} open${shadow.openSymbols ? ` ${shadow.openSymbols}` : ''}` : '';
-  if (!fills && !open) return `shadow · waiting${capBit}`;
-  return `shadow ${dollars} · ${fills} fill${fills === 1 ? '' : 's'}${wr}${capBit}${openBit}`;
+  const pauseBit = paused ? ' · paused' : '';
+  if (!fills && !open) return `shadow · waiting${capBit}${pauseBit}`;
+  return `shadow ${dollars} · ${fills} fill${fills === 1 ? '' : 's'}${wr}${capBit}${openBit}${pauseBit}`;
 }
 
 function formatLiveBook(live, availDeltaCents = null) {
@@ -1657,9 +1658,10 @@ function renderModelAutoSwitchNote(autoSwitch) {
   el.style.color = autoSwitch.note && /Auto-switched/i.test(autoSwitch.note) ? 'var(--up)' : '';
 }
 
-function renderModelSetups(setups) {
+function renderModelSetups(setups, shadowBooks = null) {
   const list = document.getElementById('bot-model-setups-list');
   if (!list) return;
+  const shadowsPaused = !(shadowBooks && shadowBooks.enabled);
   const rows = Array.isArray(setups) ? setups.filter((s) => s.id !== 'all-logged' || (s.score && s.score.trades)) : [];
   if (!rows.length) {
     list.innerHTML = '<p class="settings-hint">Setups load with bot status.</p>';
@@ -1686,7 +1688,13 @@ function renderModelSetups(setups) {
       const liveOrShadow = s.active
         ? `<span class="setup-shadow live">${escapeHtml(formatLiveBook(s.live, s.availDeltaCents))}</span>`
         : shadow
-          ? `<span class="setup-shadow ${shadowTone}">${escapeHtml(formatShadowScore(shadow))}${s.availDeltaCents != null && s.availDeltaCents > 0 ? ` · +$${(s.availDeltaCents / 100).toFixed(2)}` : ''}</span>`
+          ? `<span class="setup-shadow ${shadowTone}">${escapeHtml(
+              formatShadowScore(shadow, { paused: shadowsPaused })
+            )}${
+              !shadowsPaused && s.availDeltaCents != null && s.availDeltaCents > 0
+                ? ` · +$${(s.availDeltaCents / 100).toFixed(2)}`
+                : ''
+            }</span>`
           : '';
       const knobs = formatSetupKnobs(s);
       return `<button type="button" class="model-setup-card${active}" data-setup-id="${escapeHtml(s.id)}">
@@ -2070,6 +2078,15 @@ async function loadBotConfigIntoForm() {
         c.modelAutoSwitchSetup === 'true';
       modelAutoSwitch.value = on ? 'on' : 'off';
     }
+    const modelShadowBooks = document.getElementById('bot-model-shadow-books');
+    if (modelShadowBooks) {
+      const on =
+        c.modelShadowBooks === true ||
+        c.modelShadowBooks === 1 ||
+        c.modelShadowBooks === 'on' ||
+        c.modelShadowBooks === 'true';
+      modelShadowBooks.value = on ? 'on' : 'off';
+    }
     const modelConf = document.getElementById('bot-model-confidence');
     if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 55;
     const modelLiveFavor = document.getElementById('bot-model-live-favor');
@@ -2319,6 +2336,7 @@ async function saveBotConfig(opts = {}) {
     minEntryCents: parseFloat(document.getElementById('bot-minentries').value),
     modelInvertSide: document.getElementById('bot-model-invert')?.value || 'off',
     modelAutoSwitchSetup: document.getElementById('bot-model-auto-switch')?.value || 'off',
+    modelShadowBooks: document.getElementById('bot-model-shadow-books')?.value || 'off',
     modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '55'),
     modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '3'),
     modelConfirmCrossCents: parseFloat(document.getElementById('bot-model-confirm-cross')?.value || '0'),

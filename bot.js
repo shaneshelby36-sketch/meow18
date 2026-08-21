@@ -2591,6 +2591,8 @@ const EDITABLE_STRING_FIELDS = {
   },
   modelInvertSide: (v) => parseOnOffField(v, false),
   modelAutoSwitchSetup: (v) => parseOnOffField(v, false),
+  // Silent paper books for non-live setups. Off = freeze (knobs / what-if stay).
+  modelShadowBooks: (v) => parseOnOffField(v, false),
   skimMode: (v) => (['insurance', 'percent', 'fixed', 'off'].includes(v) ? v : null),
   stakingStrategy: (v) => (['fixed', 'halve-after-win'].includes(v) ? v : null),
 };
@@ -3036,6 +3038,7 @@ class TradingBot {
       autoTradeSymbols: DEFAULT_AUTO_TRADE_SYMBOLS.join(','),
       activeSetupId: 'core',
       modelAutoSwitchSetup: 'off',
+      modelShadowBooks: 'off',
       modelAutoSwitchLowAvailDollars: MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT,
       modelAutoSwitchMinLeadDollars: MODEL_AUTO_SWITCH_MIN_LEAD_DEFAULT,
       modelAutoSwitchCooldownMinutes: MODEL_AUTO_SWITCH_COOLDOWN_MINUTES_DEFAULT,
@@ -3330,8 +3333,24 @@ class TradingBot {
     const start = Number.isFinite(startingDollars) && startingDollars > 0 ? startingDollars : 100;
     const liveCapital = this._capitalStatus();
     const skimSettings = this.config;
+    // Live card knobs must match Decision — catalog defaults lie if env/slider drifted.
+    const liveKnobOverlay = {
+      autoTradeSymbols: this.config.autoTradeSymbols,
+      modelMinConfidence: this.config.modelMinConfidence,
+      modelEntryLiveLeanMarginPct: this.config.modelEntryLiveLeanMarginPct,
+      modelBankGreenCents: this.config.modelBankGreenCents,
+      modelMinTpCents: this.config.modelMinTpCents,
+      modelMaxLossCents: this.config.modelMaxLossCents,
+      maxOpenPositions: this.config.maxOpenPositions,
+      modelConfirmCrossCents: this.config.modelConfirmCrossCents,
+      modelDumpPullbackCents: this.config.modelDumpPullbackCents,
+      modelFastRedCents: this.config.modelFastRedCents,
+      modelMinEntryCents: this.config.modelMinEntryCents,
+      modelLeanStopBarrierCents: this.config.modelLeanStopBarrierCents,
+    };
     return scoreModelSetupsAgainstLog(log).map((row) => {
       const live = row.id === active;
+      const display = live ? { ...row, ...liveKnobOverlay } : row;
       const book = !live && row.id !== 'all-logged' && this._shadowBooks
         ? this._shadowBooks[row.id]
         : null;
@@ -3365,7 +3384,7 @@ class TradingBot {
           ? cap.paperAvailableCents - prevAvail
           : null;
       return {
-        ...row,
+        ...display,
         active: live,
         shadow,
         live: liveBook,
@@ -3387,6 +3406,11 @@ class TradingBot {
 
   _modelAutoSwitchEnabled() {
     const v = String(this.config.modelAutoSwitchSetup == null ? 'off' : this.config.modelAutoSwitchSetup).toLowerCase();
+    return !(v === 'off' || v === 'false' || v === '0' || v === 'no');
+  }
+
+  _modelShadowBooksEnabled() {
+    const v = String(this.config.modelShadowBooks == null ? 'off' : this.config.modelShadowBooks).toLowerCase();
     return !(v === 'off' || v === 'false' || v === '0' || v === 'no');
   }
 
@@ -3975,6 +3999,7 @@ class TradingBot {
   async _runShadowBooks(predictions, { openNew = false } = {}) {
     if (this._inShadow) return;
     if (!isModelStrategyMode(this.config)) return;
+    if (!this._modelShadowBooksEnabled()) return;
     const active = String(this.config.activeSetupId || 'core');
     for (const setup of MODEL_SETUPS) {
       if (!setup || setup.id === active) continue;
@@ -4006,13 +4031,15 @@ class TradingBot {
   async _finishModelShadowCycle(predictions) {
     if (this._inShadow) return;
     if (!isModelStrategyMode(this.config)) return;
-    await this._withTradeLock(() =>
-      this._runShadowBooks(predictions, { openNew: this.isRunning && !!predictions })
-    );
-    if (!this._setupAvailSnapshots || !Object.keys(this._setupAvailSnapshots).length) {
-      this._snapshotSetupAvails(this._modelSetupScoreboard());
+    if (this._modelShadowBooksEnabled()) {
+      await this._withTradeLock(() =>
+        this._runShadowBooks(predictions, { openNew: this.isRunning && !!predictions })
+      );
+      if (!this._setupAvailSnapshots || !Object.keys(this._setupAvailSnapshots).length) {
+        this._snapshotSetupAvails(this._modelSetupScoreboard());
+      }
+      this._maybeAutoSwitchModelSetup();
     }
-    this._maybeAutoSwitchModelSetup();
   }
 
   /**
@@ -8752,6 +8779,9 @@ class TradingBot {
       tradeLogTotal: permanentLog.length,
       hourlyPnl,
       modelSetups: this._modelSetupScoreboard(),
+      modelShadowBooks: {
+        enabled: this._modelShadowBooksEnabled(),
+      },
       modelAutoSwitch: {
         enabled: this._modelAutoSwitchEnabled(),
         lowAvailDollars:

@@ -372,7 +372,13 @@
 
           <div class="model-setups" id="bot-model-setups">
             <h4 class="bot-panel-subhead">Paper setups</h4>
-            <p class="settings-hint">Tap one to make it the <strong>live</strong> book — that <strong>brings its shadow bankroll</strong> (avail / wallet / ins) with it, and parks the previous live book as a shadow. Each setup has its own paper capital. Shadows still assume perfect fills (optimistic vs live IOC misses). <strong>What-if</strong> is raw PnL on saved fills only.</p>
+            <p class="settings-hint">Tap one to make it the <strong>live</strong> book — that <strong>brings its bankroll</strong> (avail / wallet / ins) with it, and parks the previous live book. Knobs stay either way. Shadow paper books are optional (off freezes them; what-if still uses saved fills). <strong>What-if</strong> is raw PnL on saved fills only.</p>
+            <label>Shadow paper books
+              <select id="bot-model-shadow-books">
+                <option value="off">Off — freeze shadows (default)</option>
+                <option value="on">On — silent paper books for every other setup</option>
+              </select>
+            </label>
             <label>Auto-switch live setup
               <select id="bot-model-auto-switch">
                 <option value="off">Off — manual only (default)</option>
