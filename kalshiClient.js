@@ -85,6 +85,20 @@ function normalizeMarketPrices(market) {
   };
 }
 
+/** List payloads often omit quotes — entry needs a real two-sided book. */
+function marketHasUsableTwoSidedQuote(market) {
+  if (!market || typeof market !== 'object') return false;
+  const yesBid = Number(market.yes_bid);
+  const yesAsk = Number(market.yes_ask);
+  return (
+    Number.isFinite(yesBid) &&
+    Number.isFinite(yesAsk) &&
+    yesBid >= 1 &&
+    yesAsk <= 99 &&
+    yesBid <= yesAsk
+  );
+}
+
 /**
  * Map legacy (action, side) to V2 book_side.
  * bid ≡ yes exposure, ask ≡ no exposure (Kalshi single-book convention).
@@ -335,7 +349,10 @@ class KalshiClient {
 
   /** Prefer signed market GETs when keyed — they use the paced account read bucket. */
   _preferMarketAuth() {
-    return this.hasCredentials;
+    // Market lists/tickers are public. Keep them unauthenticated so we don't burn
+    // the account read bucket (or depend on signed responses that omit quotes).
+    // Auth + token budget still apply to portfolio / order writes.
+    return false;
   }
 
   getCachedMarket(ticker, maxAgeMs = Infinity) {
@@ -515,11 +532,12 @@ class KalshiClient {
         }
         const markets = await this._listOpenMarketsUncached(seriesTicker, limit);
         this._openMarketsCache.set(cacheKey, { at: Date.now(), markets });
-        // Seed per-ticker cache so manage/entry can skip immediate GET /markets/{ticker}.
+        // Only seed ticker cache when list rows include a real two-sided quote.
+        // Incomplete list rows previously poisoned getMarket's 8s cache.
         if (!this._marketByTickerCache) this._marketByTickerCache = new Map();
         const stamped = Date.now();
         for (const m of markets) {
-          if (m && m.ticker) {
+          if (m && m.ticker && marketHasUsableTwoSidedQuote(m)) {
             this._marketByTickerCache.set(String(m.ticker), { at: stamped, market: m });
           }
         }
@@ -584,11 +602,13 @@ class KalshiClient {
     if (!this._marketByTickerInflight) this._marketByTickerInflight = new Map();
     const now = Date.now();
     const cached = this._marketByTickerCache.get(key);
-    // 8s cache: manage watchdog is 4s — usually hits cache; still fresh enough for exits.
-    if (cached && now - cached.at < 8000) return cached.market;
+    // 8s cache only when quotes are usable — never serve a quote-less list stub.
+    if (cached && now - cached.at < 8000 && marketHasUsableTwoSidedQuote(cached.market)) {
+      return cached.market;
+    }
     // Never sit on the 429 cooldown — timeouts then pile up and freeze paper.
     if (now < this._cooldownUntil) {
-      return cached ? cached.market : null;
+      return cached && marketHasUsableTwoSidedQuote(cached.market) ? cached.market : null;
     }
 
     const inflight = this._marketByTickerInflight.get(key);
@@ -597,15 +617,17 @@ class KalshiClient {
     const work = this._withPublicGate(async () => {
       try {
         if (Date.now() < this._cooldownUntil) {
-          return cached ? cached.market : null;
+          return cached && marketHasUsableTwoSidedQuote(cached.market) ? cached.market : null;
         }
         const data = await this._request('GET', `/markets/${key}`, { auth: this._preferMarketAuth() });
         const market = normalizeMarketPrices(data.market);
-        this._marketByTickerCache.set(key, { at: Date.now(), market });
+        if (marketHasUsableTwoSidedQuote(market)) {
+          this._marketByTickerCache.set(key, { at: Date.now(), market });
+        }
         return market;
       } catch (err) {
         if (err && err.status === 429) this._noteRateLimit();
-        if (cached) return cached.market;
+        if (cached && marketHasUsableTwoSidedQuote(cached.market)) return cached.market;
         throw err;
       } finally {
         this._marketByTickerInflight.delete(key);
@@ -665,6 +687,7 @@ class KalshiClient {
 module.exports = {
   KalshiClient,
   normalizeMarketPrices,
+  marketHasUsableTwoSidedQuote,
   priceInCents,
   marketStrikePrice,
   parseMarketCloseMs,

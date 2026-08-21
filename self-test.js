@@ -601,6 +601,17 @@ async function testKalshiClient() {
     check(c._writeBudget.refillPerSec === 85, 'write paced at 85% of Basic 100');
   }
 
+  {
+    const { marketHasUsableTwoSidedQuote, normalizeMarketPrices } = require('./kalshiClient');
+    checkEq(marketHasUsableTwoSidedQuote({ yes_bid: 40, yes_ask: 42 }), true, 'usable quote ok');
+    checkEq(marketHasUsableTwoSidedQuote({ yes_bid: null, yes_ask: 42 }), false, 'missing bid not usable');
+    checkEq(
+      marketHasUsableTwoSidedQuote(normalizeMarketPrices({ yes_bid_dollars: '0.41', yes_ask_dollars: '0.43' })),
+      true,
+      'dollar quotes normalize to usable'
+    );
+  }
+
   // Create Order V2 mapping (legacy action/side → book bid/ask + dollar price)
   checkEq(bookSideFromLegacy('yes', 'buy'), 'bid', 'buy YES → bid');
   checkEq(bookSideFromLegacy('yes', 'sell'), 'ask', 'sell YES → ask');

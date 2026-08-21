@@ -5971,22 +5971,30 @@ class TradingBot {
       delete this._lastLiveMarket[seriesTicker];
       delete this._lastLiveMarketAt[seriesTicker];
     } else if (cached && Number.isFinite(cachedClose) && cachedClose > Date.now() + Math.max(500, minMsLeft)) {
-      // While rate-limited or recently refreshed, reuse — don't burn GET /markets/{ticker}.
-      if (limited || cacheAge < 8_000) return cached;
+      const cachedQuoted =
+        Number.isFinite(Number(cached.yes_bid)) &&
+        Number.isFinite(Number(cached.yes_ask)) &&
+        Number(cached.yes_bid) >= 1 &&
+        Number(cached.yes_ask) <= 99 &&
+        Number(cached.yes_bid) <= Number(cached.yes_ask);
+      // While rate-limited or recently refreshed with real quotes, reuse.
+      if (cachedQuoted && (limited || cacheAge < 8_000)) return cached;
       const ticker = cached.ticker;
       if (ticker && typeof this.client.getMarket === 'function') {
         try {
           const fresh = await this._getMarketBounded(ticker, 2000);
           if (fresh) {
-            this._lastLiveMarket[seriesTicker] = fresh;
+            const merged = { ...cached, ...fresh };
+            this._lastLiveMarket[seriesTicker] = merged;
             this._lastLiveMarketAt[seriesTicker] = Date.now();
-            return fresh;
+            return merged;
           }
         } catch (_) {
           // keep cached window rather than re-list the whole series
         }
       }
-      return cached;
+      if (cachedQuoted) return cached;
+      // Quote-less cache — fall through to re-list / hydrate.
     }
 
     if (limited) return cached || null;
@@ -6009,6 +6017,34 @@ class TradingBot {
         pickLiveOpenMarket(markets, Date.now(), 0);
     }
     if (found) {
+      // Series list often omits bid/ask — hydrate from GET /markets/{ticker} before caching.
+      if (
+        found.ticker &&
+        typeof this.client.getMarket === 'function' &&
+        !(
+          Number.isFinite(Number(found.yes_bid)) &&
+          Number.isFinite(Number(found.yes_ask)) &&
+          Number(found.yes_bid) >= 1 &&
+          Number(found.yes_ask) <= 99 &&
+          Number(found.yes_bid) <= Number(found.yes_ask)
+        )
+      ) {
+        try {
+          const quoted = await this._getMarketBounded(found.ticker, 2500);
+          if (
+            quoted &&
+            Number.isFinite(Number(quoted.yes_bid)) &&
+            Number.isFinite(Number(quoted.yes_ask)) &&
+            Number(quoted.yes_bid) >= 1 &&
+            Number(quoted.yes_ask) <= 99 &&
+            Number(quoted.yes_bid) <= Number(quoted.yes_ask)
+          ) {
+            found = { ...found, ...quoted };
+          }
+        } catch (_) {
+          // keep list row; entry path will skip if still quote-less
+        }
+      }
       this._lastLiveMarket[seriesTicker] = found;
       this._lastLiveMarketAt[seriesTicker] = Date.now();
       return found;
