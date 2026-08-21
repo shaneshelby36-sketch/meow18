@@ -97,6 +97,47 @@ function bookSideFromLegacy(side, action) {
   throw new Error(`Invalid Kalshi order direction: action=${action} side=${side}`);
 }
 
+/** Default Kalshi endpoint cost (tokens). See GET /account/endpoint_costs for overrides. */
+const DEFAULT_TOKEN_COST = 10;
+
+/**
+ * Client-side token bucket matching Kalshi's rate-limit model.
+ * Basic tier: Read 200 tok/s (capacity 2s), Write 100 tok/s (capacity 1s).
+ * We pace at ~85% of budget so we stay under the ceiling instead of 429-retrying.
+ */
+function createTokenBucket(refillPerSec, capacity) {
+  return {
+    refillPerSec: Math.max(1, Number(refillPerSec) || 1),
+    capacity: Math.max(1, Number(capacity) || 1),
+    tokens: Math.max(1, Number(capacity) || 1),
+    updatedAt: Date.now(),
+    refill() {
+      const now = Date.now();
+      const elapsed = (now - this.updatedAt) / 1000;
+      if (!(elapsed > 0)) return;
+      this.updatedAt = now;
+      this.tokens = Math.min(this.capacity, this.tokens + elapsed * this.refillPerSec);
+    },
+    async take(cost) {
+      const need = Math.max(1, Number(cost) || DEFAULT_TOKEN_COST);
+      for (;;) {
+        this.refill();
+        if (this.tokens >= need) {
+          this.tokens -= need;
+          return;
+        }
+        const deficit = need - this.tokens;
+        const waitMs = Math.ceil((deficit / this.refillPerSec) * 1000) + 5;
+        await new Promise((r) => setTimeout(r, Math.min(Math.max(waitMs, 5), 2500)));
+      }
+    },
+  };
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 /**
  * Build Create Order V2 body (POST /portfolio/events/orders).
  *
@@ -232,6 +273,69 @@ class KalshiClient {
     this._lastPublicAt = 0;
     this._cooldownUntil = 0;
     this._429LogAt = 0;
+    // Basic-tier defaults at ~85% headroom (200 read / 100 write).
+    this._readBudget = createTokenBucket(170, 340);
+    this._writeBudget = createTokenBucket(85, 85);
+    this._defaultTokenCost = DEFAULT_TOKEN_COST;
+    this._limitsSyncedAt = 0;
+    this._usageTier = 'basic';
+  }
+
+  /**
+   * Apply live limits from GET /account/limits (or manual override).
+   * Uses ~85% of refill/capacity so we stay under Kalshi's ceiling.
+   */
+  applyAccountLimits(limits = {}) {
+    const read = limits.read || {};
+    const write = limits.write || {};
+    const readRate = Number(read.refill_rate);
+    const readCap = Number(read.bucket_capacity);
+    const writeRate = Number(write.refill_rate);
+    const writeCap = Number(write.bucket_capacity);
+    const headroom = 0.85;
+    if (Number.isFinite(readRate) && readRate > 0) {
+      const cap = Number.isFinite(readCap) && readCap > 0 ? readCap : readRate * 2;
+      this._readBudget = createTokenBucket(readRate * headroom, cap * headroom);
+    }
+    if (Number.isFinite(writeRate) && writeRate > 0) {
+      const cap = Number.isFinite(writeCap) && writeCap > 0 ? writeCap : writeRate;
+      this._writeBudget = createTokenBucket(writeRate * headroom, cap * headroom);
+    }
+    if (limits.usage_tier) this._usageTier = String(limits.usage_tier);
+    this._limitsSyncedAt = Date.now();
+  }
+
+  /** Fetch GET /account/limits and tune local buckets (authenticated). */
+  async syncAccountLimits({ force = false } = {}) {
+    if (!this.hasCredentials) return null;
+    if (!force && this._limitsSyncedAt && Date.now() - this._limitsSyncedAt < 10 * 60_000) {
+      return { usage_tier: this._usageTier, cached: true };
+    }
+    try {
+      const data = await this._request('GET', '/account/limits', { auth: true });
+      this.applyAccountLimits(data || {});
+      return data;
+    } catch (err) {
+      console.warn('[kalshi] syncAccountLimits failed:', err && err.message ? err.message : err);
+      return null;
+    }
+  }
+
+  _isWriteMethod(method) {
+    const m = String(method || '').toUpperCase();
+    return m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE';
+  }
+
+  async _acquireBudget(method, opts = {}) {
+    if (opts.skipBudget) return;
+    const cost = Math.max(1, Number(opts.tokenCost) || this._defaultTokenCost);
+    const bucket = this._isWriteMethod(method) ? this._writeBudget : this._readBudget;
+    await bucket.take(cost);
+  }
+
+  /** Prefer signed market GETs when keyed — they use the paced account read bucket. */
+  _preferMarketAuth() {
+    return this.hasCredentials;
   }
 
   getCachedMarket(ticker, maxAgeMs = Infinity) {
@@ -277,6 +381,7 @@ class KalshiClient {
 
   async _request(method, path, opts = {}) {
     const { query, body, auth = true } = opts;
+    await this._acquireBudget(method, opts);
     const qs = query
       ? '?' + new URLSearchParams(Object.entries(query).filter(([, v]) => v != null)).toString()
       : '';
@@ -290,46 +395,65 @@ class KalshiClient {
       if (!this.hasCredentials) throw new Error('Kalshi credentials not configured for an authenticated request');
       Object.assign(headers, this._sign(method, path));
     }
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const text = await res.text();
-    let json;
-    try {
-      json = text ? JSON.parse(text) : {};
-    } catch {
-      json = { raw: text };
+    const maxAttempts = opts.retryOn429 === false ? 1 : 3;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const res = await fetch(url, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const text = await res.text();
+      let json;
+      try {
+        json = text ? JSON.parse(text) : {};
+      } catch {
+        json = { raw: text };
+      }
+      if (res.status === 429) {
+        this._noteRateLimit();
+        lastErr = new Error(`Kalshi API ${method} ${path} -> HTTP 429: ${JSON.stringify(json)}`);
+        lastErr.status = 429;
+        lastErr.body = json;
+        // Docs: no Retry-After; bucket keeps refilling. Wait ~one default cost at our write/read rate.
+        const bucket = this._isWriteMethod(method) ? this._writeBudget : this._readBudget;
+        const cost = Math.max(1, Number(opts.tokenCost) || this._defaultTokenCost);
+        const waitMs = Math.min(2000, Math.ceil((cost / Math.max(1, bucket.refillPerSec)) * 1000) * attempt + 50);
+        await sleep(waitMs);
+        // Re-acquire so we don't stampede the empty bucket.
+        await this._acquireBudget(method, opts);
+        continue;
+      }
+      if (!res.ok) {
+        const err = new Error(`Kalshi API ${method} ${path} -> HTTP ${res.status}: ${JSON.stringify(json)}`);
+        err.status = res.status;
+        err.body = json;
+        throw err;
+      }
+      return json;
     }
-    if (!res.ok) {
-      const err = new Error(`Kalshi API ${method} ${path} -> HTTP ${res.status}: ${JSON.stringify(json)}`);
-      err.status = res.status;
-      err.body = json;
-      throw err;
-    }
-    return json;
+    throw lastErr || new Error(`Kalshi API ${method} ${path} -> HTTP 429`);
   }
 
   // ---------- public market data (no auth needed) ----------
 
   _noteRateLimit() {
-    this._cooldownUntil = Date.now() + 45_000;
+    // Prefer cache briefly; Kalshi has no 429 penalty beyond empty buckets.
+    this._cooldownUntil = Date.now() + 3_000;
     if (Date.now() - this._429LogAt > 10_000) {
       this._429LogAt = Date.now();
-      console.warn('[kalshi] rate limited (429) — pausing public GETs ~45s and using cached markets');
+      console.warn('[kalshi] rate limited (429) — pacing on token budget and preferring cached markets');
     }
   }
 
   async _withPublicGate(fn) {
     const run = this._publicGate.then(async () => {
-      // ~900ms spacing cuts 429 storms; 45s cooldown after a 429 is the real freeze.
-      const wait = Math.max(
-        0,
-        this._cooldownUntil - Date.now(),
-        this._lastPublicAt + 900 - Date.now()
-      );
-      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      const cooldownWait = Math.max(0, this._cooldownUntil - Date.now());
+      // Unauth/IP traffic: keep a small gap. Authed GETs are already token-bucket paced.
+      const spacingMs = this._preferMarketAuth() ? 0 : 250;
+      const spacingWait = Math.max(0, this._lastPublicAt + spacingMs - Date.now());
+      const wait = Math.max(cooldownWait, spacingWait);
+      if (wait > 0) await sleep(wait);
       this._lastPublicAt = Date.now();
       return fn();
     });
@@ -341,10 +465,11 @@ class KalshiClient {
   }
 
   async _listOpenMarketsUncached(seriesTicker, limit) {
+    const useAuth = this._preferMarketAuth();
     const fetchList = async (query) => {
       const data = await this._request('GET', '/markets', {
         query: { series_ticker: seriesTicker, limit, ...query },
-        auth: false,
+        auth: useAuth,
       });
       return (data.markets || []).map(normalizeMarketPrices);
     };
@@ -474,7 +599,7 @@ class KalshiClient {
         if (Date.now() < this._cooldownUntil) {
           return cached ? cached.market : null;
         }
-        const data = await this._request('GET', `/markets/${key}`, { auth: false });
+        const data = await this._request('GET', `/markets/${key}`, { auth: this._preferMarketAuth() });
         const market = normalizeMarketPrices(data.market);
         this._marketByTickerCache.set(key, { at: Date.now(), market });
         return market;
@@ -491,7 +616,7 @@ class KalshiClient {
   }
 
   async getOrderbook(ticker) {
-    return this._request('GET', `/markets/${ticker}/orderbook`, { auth: false });
+    return this._request('GET', `/markets/${ticker}/orderbook`, { auth: this._preferMarketAuth() });
   }
 
   // ---------- authenticated trading endpoints ----------
@@ -546,4 +671,6 @@ module.exports = {
   bookSideFromLegacy,
   buildCreateOrderV2Body,
   normalizeCreateOrderResponse,
+  createTokenBucket,
+  DEFAULT_TOKEN_COST,
 };

@@ -574,6 +574,33 @@ async function testKalshiClient() {
   client.setCredentials({ keyId: 'abc', privateKeyPem: 'not-a-real-key' });
   checkEq(client.hasCredentials, true, 'credentials flag after set');
 
+  {
+    const { createTokenBucket } = require('./kalshiClient');
+    const bucket = createTokenBucket(100, 100);
+    let took = 0;
+    const t0 = Date.now();
+    await bucket.take(50);
+    await bucket.take(50);
+    took = Date.now() - t0;
+    check(took < 80, `full capacity take is immediate (got ${took}ms)`);
+    const t1 = Date.now();
+    await bucket.take(10);
+    const waited = Date.now() - t1;
+    check(waited >= 80, `refill wait for 10 tokens at 100/s (~100ms, got ${waited}ms)`);
+  }
+
+  {
+    const c = new KalshiClient({});
+    c.applyAccountLimits({
+      usage_tier: 'basic',
+      read: { refill_rate: 200, bucket_capacity: 400 },
+      write: { refill_rate: 100, bucket_capacity: 100 },
+    });
+    checkEq(c._usageTier, 'basic', 'applyAccountLimits stores tier');
+    check(c._readBudget.refillPerSec === 170, 'read paced at 85% of Basic 200');
+    check(c._writeBudget.refillPerSec === 85, 'write paced at 85% of Basic 100');
+  }
+
   // Create Order V2 mapping (legacy action/side → book bid/ask + dollar price)
   checkEq(bookSideFromLegacy('yes', 'buy'), 'bid', 'buy YES → bid');
   checkEq(bookSideFromLegacy('yes', 'sell'), 'ask', 'sell YES → ask');

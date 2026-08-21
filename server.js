@@ -65,6 +65,12 @@ function loadSavedCredentials() {
 }
 loadSavedCredentials();
 
+if (kalshiClient.hasCredentials) {
+  kalshiClient.syncAccountLimits({ force: true }).catch((err) => {
+    console.warn('[kalshi] account limits sync deferred:', err && err.message ? err.message : err);
+  });
+}
+
 function saveCredentials({ keyId, privateKeyPem }) {
   fs.mkdirSync(path.dirname(CREDENTIALS_PATH), { recursive: true });
   fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify({ keyId, privateKeyPem }, null, 2));
@@ -606,6 +612,9 @@ app.get("/", (req, res) => {
     try {
       kalshiClient.setCredentials({ keyId, privateKeyPem });
       saveCredentials({ keyId: keyId || kalshiClient.keyId, privateKeyPem: privateKeyPem || kalshiClient.privateKey });
+      if (kalshiClient.hasCredentials) {
+        kalshiClient.syncAccountLimits({ force: true }).catch(() => undefined);
+      }
       res.json({ ok: true, configured: kalshiClient.hasCredentials });
     } catch (err) {
       res.status(500).json({ error: err.message });
