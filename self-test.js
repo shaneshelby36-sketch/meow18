@@ -3501,6 +3501,31 @@ async function testBotTradingFlow() {
     check(coreShadow.paperAvailableCents < afterLiveAvail, 'parked core shadow keeps scarred avail');
   }
 
+  {
+    const rotBot = makeBot(mockClient({}), {
+      strategyMode: 'model',
+      paperStartingBalanceDollars: 100,
+      skimMode: 'insurance',
+      insuranceCapDollars: 10,
+      insuranceFloorDollars: 6,
+      insuranceOverflowDollars: 15,
+    });
+    rotBot.ledger.trades = [
+      { id: 'w1', status: 'closed', pnlCents: 1000, closedAt: 1 },
+      { id: 'w2', status: 'closed', pnlCents: 500, closedAt: 2 },
+    ];
+    rotBot.ledger.reserveCents = 600;
+    rotBot.ledger.insuranceCents = 300;
+    rotBot.ledger.retainedClosedPnlCents = 0;
+    rotBot.ledger.periodStartTime = Date.now() - 13 * 60 * 60 * 1000;
+    const before = rotBot._capitalStatus().paperAvailableCents;
+    rotBot._maybeRotateLedger(Date.now());
+    checkEq(rotBot.ledger.trades.length, 0, 'rotation clears closed trades from live ledger');
+    checkEq(rotBot.ledger.retainedClosedPnlCents, 1500, 'rotation keeps closed PnL in retained');
+    const after = rotBot._capitalStatus().paperAvailableCents;
+    checkEq(after, before, 'Available unchanged across 12h rotation');
+  }
+
   // Live: official Kalshi result books 0/100 with NO sell order
   let liveOrders = 0;
   let getOrderCalls = 0;

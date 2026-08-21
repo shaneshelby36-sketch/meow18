@@ -2679,6 +2679,7 @@ function loadLedger() {
       if (data.insuranceCents == null) data.insuranceCents = 0;
       if (data.insuranceReady == null) data.insuranceReady = false;
       if (data.insuranceDepositedCents == null) data.insuranceDepositedCents = 0;
+      if (data.retainedClosedPnlCents == null) data.retainedClosedPnlCents = 0;
       if (data.periodStartTime == null) data.periodStartTime = Date.now();
       if (!Array.isArray(data.activityLog)) data.activityLog = [];
       return data;
@@ -2692,6 +2693,7 @@ function loadLedger() {
     insuranceCents: 0,
     insuranceReady: false,
     insuranceDepositedCents: 0,
+    retainedClosedPnlCents: 0,
     periodStartTime: Date.now(),
     activityLog: [],
   };
@@ -2743,6 +2745,7 @@ function emptyShadowLedger() {
     insuranceCents: 0,
     insuranceReady: false,
     insuranceDepositedCents: 0,
+    retainedClosedPnlCents: 0,
     periodStartTime: Date.now(),
     activityLog: [],
   };
@@ -3121,6 +3124,7 @@ class TradingBot {
     this._inRunCycle = false;
     this._removeInvalidPaperTrades();
     this._seedTradeLogFromLedger();
+    this._repairRetainedClosedPnlFromTradeLog();
     // Always flush the effective settings so a reboot reloads exactly what
     // this process is running (env defaults and/or last dashboard save).
     saveConfigOverrides(collectConfigOverrides(this.config));
@@ -3566,6 +3570,7 @@ class TradingBot {
       insuranceCents: 0,
       insuranceReady: false,
       insuranceDepositedCents: 0,
+      retainedClosedPnlCents: 0,
       periodStartTime: Date.now(),
       activityLog: [],
     };
@@ -3745,19 +3750,24 @@ class TradingBot {
     const closedPnlCents = this.ledger.trades
       .filter((trade) => trade.status === 'closed')
       .reduce((sum, trade) => sum + (Number(trade.pnlCents) || 0), 0);
+    // PnL from closed trades archived by 12h rotation — must stay in the bankroll
+    // or Available collapses while Wallet/Insurance skim from those wins remains.
+    const retainedClosedPnlCents = Number(this.ledger.retainedClosedPnlCents) || 0;
     const openExposureCents = this._openExposureCents();
     const startingCents = Math.round(this.config.paperStartingBalanceDollars * 100);
     const reserveCents = this.ledger.reserveCents || 0;
     const insuranceCents = this.ledger.insuranceCents || 0;
     const insuranceDepositedCents = this.ledger.insuranceDepositedCents || 0;
     // External insurance seeds expand total capital so Available is not diluted.
-    const paperTotalCents = startingCents + closedPnlCents + insuranceDepositedCents;
+    const paperTotalCents =
+      startingCents + retainedClosedPnlCents + closedPnlCents + insuranceDepositedCents;
     return {
       startingCents,
       paperTotalCents,
       reserveCents,
       insuranceCents,
       insuranceDepositedCents,
+      retainedClosedPnlCents,
       insuranceCapCents: insuranceArmFloorCents(this.config).armCents,
       insuranceFloorCents: insuranceArmFloorCents(this.config).floorCents,
       insuranceOverflowCents: insuranceOverflowCents(this.config),
@@ -4012,10 +4022,9 @@ class TradingBot {
    * rather than growing forever — while the prior 12 hours of trade
    * history stays available in the archive file.
    *
-   * Deliberately never touches: any still-OPEN trade (kept in the live
-   * ledger untouched regardless of rotation), or the running reserveCents
-   * total (that represents real money you've chosen to set aside — it
-   * keeps accumulating across rotations rather than resetting to zero).
+   * Deliberately never touches: any still-OPEN trade, reserveCents, or
+   * insuranceCents. Closed PnL is folded into retainedClosedPnlCents so
+   * Available/Wallet math stays correct after the trades leave the ledger.
    */
   _maybeRotateLedger(now) {
     if (this._inShadow) return;
@@ -4025,12 +4034,17 @@ class TradingBot {
     const stillOpen = this.ledger.trades.filter((t) => t.status === 'open');
 
     if (closedTrades.length > 0) {
+      const archivedPnl = closedTrades.reduce((sum, t) => sum + (Number(t.pnlCents) || 0), 0);
+      this.ledger.retainedClosedPnlCents =
+        (Number(this.ledger.retainedClosedPnlCents) || 0) + archivedPnl;
       try {
         fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
         const archive = {
           periodStart: new Date(this.ledger.periodStartTime).toISOString(),
           periodEnd: new Date(now).toISOString(),
           reserveCentsAtRotation: this.ledger.reserveCents,
+          insuranceCentsAtRotation: this.ledger.insuranceCents,
+          retainedClosedPnlCentsAfter: this.ledger.retainedClosedPnlCents,
           trades: closedTrades,
         };
         const fileName = `bot-ledger-${new Date(this.ledger.periodStartTime).toISOString().replace(/[:.]/g, '-')}.json`;
@@ -4045,6 +4059,42 @@ class TradingBot {
     this.ledger.trades = stillOpen; // keep any still-open trade, drop settled history
     this.ledger.periodStartTime = now;
     this._persist();
+  }
+
+  /**
+   * Repair bankrolls that already rotated: Wallet/Insurance kept skim from
+   * wiped trades, but closed PnL was dropped — Available looked artificially low.
+   * Rebuild retained from permanent trade log minus what's still on the ledger.
+   */
+  _repairRetainedClosedPnlFromTradeLog() {
+    if (this._inShadow) return false;
+    const existing = Number(this.ledger.retainedClosedPnlCents);
+    if (Number.isFinite(existing) && existing !== 0) return false;
+    const reserve = Number(this.ledger.reserveCents) || 0;
+    const insurance = Number(this.ledger.insuranceCents) || 0;
+    if (reserve <= 0 && insurance <= 0) return false;
+
+    const log = loadTradeLog();
+    if (!log.length) return false;
+    const onLedger = new Set(
+      (this.ledger.trades || []).filter((t) => t && t.id).map((t) => String(t.id))
+    );
+    let logClosedPnl = 0;
+    let archivedPnl = 0;
+    for (const t of log) {
+      if (!t || String(t.status) !== 'closed') continue;
+      const pnl = Number(t.pnlCents) || 0;
+      logClosedPnl += pnl;
+      if (!onLedger.has(String(t.id))) archivedPnl += pnl;
+    }
+    if (archivedPnl === 0) return false;
+    this.ledger.retainedClosedPnlCents = archivedPnl;
+    console.log(
+      `[bot] repaired retainedClosedPnlCents=$${(archivedPnl / 100).toFixed(2)} ` +
+        `(trade-log closed $${(logClosedPnl / 100).toFixed(2)}; was missing after ledger rotation)`
+    );
+    this._persist();
+    return true;
   }
 
   // Picks whichever engine window most closely matches the time actually
