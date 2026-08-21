@@ -6968,7 +6968,7 @@ async function testModelStrategy() {
     checkEq(trade.exitReason, 'take_profit', 'green +3¢ + lean against banks immediately');
   }
 
-  // Soft red, not on pace to 50 → hold (don't lean-stop)
+  // Soft red, not on pace to 55 → hold (don't lean-stop)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7002,10 +7002,53 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.status, 'open', 'soft red not on pace to 50 → hold');
+    checkEq(trade.status, 'open', 'soft red not on pace to 55 → hold');
   }
 
-  // Fast dump pace toward 50 → lean-stop
+  // 84→79 noise must NOT lean-stop (pace would falsely project under 55)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 79,
+        no_bid: 21,
+      }),
+      { strategyMode: 'model', modelMinHoldSeconds: 0 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 84,
+      modelEntryBidCents: 82,
+      modelEntrySpreadCents: 2,
+      peakHeldBidCents: 82,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 11_000,
+      modelEntryHeldProb: 70,
+      engineConfidence: 70,
+    });
+    checkEq(
+      modelShouldLeanStopRed(trade, 79, 11_000, {}),
+      false,
+      '84→79 in 11s is not lean-stop threat'
+    );
+    await bot._manageOpenTrade(trade, {
+      BTC: {
+        ready: true,
+        price: 60000,
+        windows: {
+          w5: { ...win(50, 60), tracking: { predictedDirection: 'UP' } },
+          w10: win(50, 60),
+          w15: win(50, 60),
+        },
+      },
+    });
+    checkEq(trade.status, 'open', '84→79 stays open toward hard floor 55');
+  }
+
+  // Fast dump pace toward 55 after meaningful adverse → lean-stop
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7025,7 +7068,7 @@ async function testModelStrategy() {
       modelEntrySpreadCents: 2,
       peakHeldBidCents: 68,
       windowCloseTime: now + 12 * 60 * 1000,
-      openedAt: now - 5_000,
+      openedAt: now - 12_000,
       modelEntryHeldProb: 70,
     });
     await bot._manageOpenTrade(trade, {
@@ -7039,7 +7082,7 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'model_lean_stop', 'fast dump pace toward 50 → lean-stop');
+    checkEq(trade.exitReason, 'model_lean_stop', 'fast dump pace toward 55 → lean-stop');
   }
 
   // Already ≤55 → lean-stop

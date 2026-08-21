@@ -630,7 +630,12 @@ const MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT = 55;
 /** Horizon used to project bid pace toward the barrier (ms). */
 const MODEL_LEAN_STOP_PACE_HORIZON_MS_DEFAULT = 90_000;
 /** Need at least this long of red sample before trusting pace. */
-const MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT = 2_000;
+const MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT = 8_000;
+/**
+ * Pace lean-stop only after this much ¢ adverse (or ~35% of room to hard floor).
+ * Stops 84→79 noise from projecting under 55 over a 90s horizon.
+ */
+const MODEL_LEAN_STOP_MIN_ADVERSE_CENTS_DEFAULT = 8;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /** Final barrier (minutes left). 0 = off (no forced late exits). */
@@ -721,9 +726,9 @@ function modelLeanStopPaceHorizonMs(config = {}) {
 }
 
 /**
- * After buy goes red: only lean-stop if bid is already ≤ barrier (default 50)
- * or linear pace from entry bid projects ≤ barrier within the horizon.
- * Soft red that isn't heading to 50 → hold.
+ * After buy goes red: only lean-stop if bid is already ≤ barrier (default 55)
+ * or linear pace from entry bid projects ≤ barrier — but only after a real
+ * drawdown (not a 3–5¢ wick that extrapolates to the floor).
  */
 function modelOnPaceBelowBarrier({
   fromBid,
@@ -739,7 +744,9 @@ function modelOnPaceBelowBarrier({
   const barrier = Number(barrierCents);
   if (!Number.isFinite(cur)) return false;
   if (Number.isFinite(barrier) && cur <= barrier) return true;
-  const minSample = Number.isFinite(Number(minSampleMs)) ? Math.max(0, Number(minSampleMs)) : 2000;
+  const minSample = Number.isFinite(Number(minSampleMs))
+    ? Math.max(0, Number(minSampleMs))
+    : MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT;
   if (!Number.isFinite(from) || !Number.isFinite(elapsed) || elapsed < minSample) return false;
   const drop = from - cur;
   if (!(drop > 0)) return false;
@@ -751,6 +758,29 @@ function modelOnPaceBelowBarrier({
   return projected <= barrier;
 }
 
+function modelLeanStopPaceMinSampleMs(config = {}) {
+  const n = Number(config.modelLeanStopPaceMinSampleMs);
+  if (Number.isFinite(n) && n >= 0) return Math.round(n);
+  const sec = Number(config.modelLeanStopPaceMinSampleSeconds);
+  if (Number.isFinite(sec) && sec >= 0) return Math.round(sec * 1000);
+  return MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT;
+}
+
+/** ¢ adverse required before pace-to-floor can lean-stop (absolute barrier still instant). */
+function modelLeanStopMinAdverseCents(trade, config = {}) {
+  const configured = Number(config.modelLeanStopMinAdverseCents);
+  if (Number.isFinite(configured) && configured >= 0) return Math.round(configured);
+  const barrier = modelLeanStopBarrierCents(config);
+  const entry = Number(trade && trade.entryPriceCents);
+  if (!Number.isFinite(entry) || !(barrier > 0) || entry <= barrier) {
+    return MODEL_LEAN_STOP_MIN_ADVERSE_CENTS_DEFAULT;
+  }
+  return Math.max(
+    MODEL_LEAN_STOP_MIN_ADVERSE_CENTS_DEFAULT,
+    Math.round((entry - barrier) * 0.35)
+  );
+}
+
 function modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, config = {}) {
   const barrier = modelLeanStopBarrierCents(config);
   const cur = Number(heldSideBidCents);
@@ -758,12 +788,19 @@ function modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, config = {}) {
   const entryBid = Number(trade && trade.modelEntryBidCents);
   const entry = Number(trade && trade.entryPriceCents);
   const from = Number.isFinite(entryBid) ? entryBid : entry;
+  if (!Number.isFinite(entry) || !Number.isFinite(cur)) return false;
+  const adverse = Math.round(entry - cur);
+  const minAdv = modelLeanStopMinAdverseCents(trade, config);
+  // 84→79 style noise: pace would project under 55, but we haven't burned
+  // enough of the hard-floor room yet — hold.
+  if (!(adverse >= minAdv)) return false;
   return modelOnPaceBelowBarrier({
     fromBid: from,
     currentBid: cur,
     elapsedMs: heldMs,
     barrierCents: barrier,
     horizonMs: modelLeanStopPaceHorizonMs(config),
+    minSampleMs: modelLeanStopPaceMinSampleMs(config),
   });
 }
 
@@ -6219,8 +6256,8 @@ class TradingBot {
         return;
       }
 
-      // Model-native preemptive exit: lean soft/turning.
-      // Flat / spread haircut → BE. Real red → lean-stop only if pace → ≤50 (or already ≤50).
+      // Flat / spread haircut → BE. Real red → lean-stop only if bid ≤ hard
+      // floor (55) or pace→floor after a meaningful drawdown (not 84→79 noise).
       const redDumpThreat = modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, this.config);
       if (!faded && bidOk && leanExit) {
         if (econUnderwater) {
@@ -6230,7 +6267,7 @@ class TradingBot {
             });
             return;
           }
-          // Soft red, not on pace to 50 — hold; don't scratch.
+          // Soft red, not on pace to hard floor — hold; don't scratch.
         } else if (exactlyFlat || flatOrGreen || underwater) {
           // Underwater only by entry spread haircut → treat as BE scratch if lean soft.
           if (exactlyFlat || greenCents <= 0 || underwater) {
