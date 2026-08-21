@@ -1610,6 +1610,8 @@ function formatSetupKnobs(s) {
   if (s.modelEntryLiveLeanMarginPct != null) bits.push(`favor ${s.modelEntryLiveLeanMarginPct}`);
   if (s.modelMinTpCents != null) bits.push(`TP +${s.modelMinTpCents}¢`);
   if (s.modelMaxLossCents != null) bits.push(`max −${s.modelMaxLossCents}¢`);
+  if (s.modelRichStopFloorCents != null) bits.push(`rich→${s.modelRichStopFloorCents}¢`);
+  else bits.push('rich→68¢');
   if (s.maxOpenPositions != null) {
     bits.push(`${s.maxOpenPositions} slot${Number(s.maxOpenPositions) === 1 ? '' : 's'}`);
   }
