@@ -647,7 +647,7 @@ const MODEL_MIN_TP_CENTS_DEFAULT = 7;
 /** Unconditional bank once this many ¢ green (don't wait for a stall). */
 const MODEL_BANK_GREEN_CENTS_DEFAULT = 7;
 /** Start trailing / allow stall-TP once at least this many ¢ green. */
-const MODEL_TRAIL_ARM_CENTS_DEFAULT = 3;
+const MODEL_TRAIL_ARM_CENTS_DEFAULT = 5;
 /** Held bid at/above this → bank immediately (don't sit 96→100). */
 const MODEL_RICH_BANK_CENTS_DEFAULT = 96;
 /** Still red after this long, even if lean is with us → only stop if pace → ≤50. */
@@ -691,9 +691,9 @@ const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 0;
 /** Confidence required to extend a hold into/through the final 5-minute barrier. */
 const MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT = 78;
 /** After trail is armed, TP if bid sits at peak this long without a new high (ms). */
-const MODEL_MOMENTUM_STALL_MS_DEFAULT = 3_000;
+const MODEL_MOMENTUM_STALL_MS_DEFAULT = 8_000;
 /** After trail arm, TP if bid pulls back this many ¢ from peak. */
-const MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT = 1;
+const MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT = 2;
 /** Model entries below this ask always use half stake. Hard cutoff — not a slider. */
 const MODEL_HALF_STAKE_UNDER_CENTS = 70;
 /** Kept for saved configs / UI remnants; sizing ignores this and always uses ½ under 70¢. */
@@ -6592,8 +6592,8 @@ class TradingBot {
         return;
       }
 
-      // Follow the bid from a small green (+2–3¢). Bank when it stalls even
-      // a little (1¢ off peak, or ~3s flat). Never TP if the ticket is red.
+      // Follow the bid from a solid green (+5¢). Bank when it stalls
+      // (2¢ off peak, or ~8s flat). Never TP if the ticket is red.
       const armCents = modelTrailArmCents(this.config);
       const armed = flatOrGreen && greenCents >= armCents;
       const priceStalled =

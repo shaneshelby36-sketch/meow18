@@ -13,6 +13,8 @@
   "modelSignalDominanceMin": 0,
   "modelBankGreenCents": 7,
   "modelMinTpCents": 7,
+  "modelMomentumStallSeconds": 8,
+  "modelMomentumPullbackCents": 2,
   "modelMaxLossCents": 8,
   "modelHardStopFloorCents": 55,
   "modelLeanStopBarrierCents": 55,
