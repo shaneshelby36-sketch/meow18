@@ -1532,6 +1532,8 @@ const SLIDER_UNITS = {
   'bot-model-min-entry': (v) => `${Math.round(v)}¢`,
   'bot-model-max-entry': (v) => `${Math.round(v)}¢`,
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
+  'bot-model-max-loss': (v) => `−${Math.round(v)}¢`,
+  'bot-model-rich-floor': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}¢ floor`),
   'bot-model-sitout': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-settle-min': (v) => `${Math.round(v)}¢`,
   'bot-settle-max': (v) => `${Math.round(v)}¢`,
@@ -1610,8 +1612,13 @@ function formatSetupKnobs(s) {
   if (s.modelEntryLiveLeanMarginPct != null) bits.push(`favor ${s.modelEntryLiveLeanMarginPct}`);
   if (s.modelMinTpCents != null) bits.push(`TP +${s.modelMinTpCents}¢`);
   if (s.modelMaxLossCents != null) bits.push(`max −${s.modelMaxLossCents}¢`);
-  if (s.modelRichStopFloorCents != null) bits.push(`rich→${s.modelRichStopFloorCents}¢`);
-  else bits.push('rich→68¢');
+  if (s.modelRichStopFloorCents != null && Number(s.modelRichStopFloorCents) > 0) {
+    bits.push(`rich→${s.modelRichStopFloorCents}¢`);
+  } else if (s.modelRichStopFloorCents === 0) {
+    bits.push('rich floor off');
+  } else {
+    bits.push('rich→60¢');
+  }
   if (s.maxOpenPositions != null) {
     bits.push(`${s.maxOpenPositions} slot${Number(s.maxOpenPositions) === 1 ? '' : 's'}`);
   }
@@ -1904,6 +1911,8 @@ function wireSliderDisplays() {
     'bot-model-min-entry',
     'bot-model-max-entry',
     'bot-model-bank-green',
+    'bot-model-max-loss',
+    'bot-model-rich-floor',
     'bot-model-late-extend-conf',
     'bot-settle-min',
     'bot-settle-max',
@@ -2132,6 +2141,13 @@ async function loadBotConfigIntoForm() {
     if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 93;
     const modelBankGreen = document.getElementById('bot-model-bank-green');
     if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 7;
+    const modelMaxLoss = document.getElementById('bot-model-max-loss');
+    if (modelMaxLoss) modelMaxLoss.value = c.modelMaxLossCents != null ? c.modelMaxLossCents : 8;
+    const modelRichFloor = document.getElementById('bot-model-rich-floor');
+    if (modelRichFloor) {
+      modelRichFloor.value =
+        c.modelRichStopFloorCents != null ? c.modelRichStopFloorCents : 60;
+    }
     const modelSitout = document.getElementById('bot-model-sitout');
     if (modelSitout) {
       const mins =
@@ -2210,6 +2226,8 @@ async function loadBotConfigIntoForm() {
       'bot-model-min-entry',
       'bot-model-max-entry',
       'bot-model-bank-green',
+      'bot-model-max-loss',
+      'bot-model-rich-floor',
       'bot-model-sitout',
       'bot-settle-min',
       'bot-settle-max',
@@ -2371,6 +2389,9 @@ async function saveBotConfig(opts = {}) {
     modelLowPriceStakeQuarters: 2,
     modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
     modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
+    modelMaxLossCents: parseFloat(document.getElementById('bot-model-max-loss')?.value || '8'),
+    modelHardAdverseCents: parseFloat(document.getElementById('bot-model-max-loss')?.value || '8'),
+    modelRichStopFloorCents: parseFloat(document.getElementById('bot-model-rich-floor')?.value || '60'),
     modelPostExitCooldownMinutes:
       Number.isFinite(modelSitoutSec) && modelSitoutSec > 0 ? modelSitoutSec / 60 : 0,
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '80'),

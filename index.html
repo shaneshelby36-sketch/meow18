@@ -368,7 +368,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> — Core setup: BTC/SOL, conf <strong>55%</strong>, live favor <strong>3</strong>, TP <strong>+7¢</strong>, max <strong>2</strong> opens, max loss <strong>8¢</strong> (rich ~75¢+ tickets ride toward a <strong>68¢</strong> floor). Soft red holds unless pace → ≤50¢.</p>
+          <p class="settings-hint"><strong>MODEL</strong> — Core setup: BTC/SOL, conf <strong>55%</strong>, live favor <strong>3</strong>, TP <strong>+7¢</strong>, max <strong>2</strong> opens, max loss <strong>8¢</strong> (rich ~75¢ tickets can ride toward a <strong>60¢</strong> floor). Soft red holds unless pace → ≤50¢.</p>
 
           <div class="model-setups" id="bot-model-setups">
             <h4 class="bot-panel-subhead">Paper setups</h4>
@@ -444,6 +444,20 @@
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
             <span class="field-hint">Trail from ~+3¢; bank on 1¢ stall / ~3s flat, or <strong>immediately at this green</strong> (default <strong>+7¢</strong>). If model turns, sells immediately (BE or lean-stop).</span>
+          </label>
+          <label>MODEL max loss (¢ below entry)
+            <div class="slider-row">
+              <input id="bot-model-max-loss" type="range" min="4" max="20" step="1" />
+              <span class="slider-value" id="bot-model-max-loss-value">—</span>
+            </div>
+            <span class="field-hint">Hard cliff on normal tickets (default <strong>−8¢</strong>). Rich tickets can widen past this down to the floor below.</span>
+          </label>
+          <label>MODEL rich stop floor (¢)
+            <div class="slider-row">
+              <input id="bot-model-rich-floor" type="range" min="0" max="75" step="1" />
+              <span class="slider-value" id="bot-model-rich-floor-value">—</span>
+            </div>
+            <span class="field-hint">When entry is ~75¢+ (or high conf), allow drawdown down to this bid before the hard cliff — e.g. <strong>75→60</strong> = −15¢. Normal tickets stay on flat max loss. <strong>0 = off</strong>.</span>
           </label>
           <label>MODEL post-exit sit-out (sec)
             <div class="slider-row">

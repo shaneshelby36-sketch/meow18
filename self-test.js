@@ -7487,9 +7487,9 @@ async function testModelStrategy() {
     checkEq(modelAdverseExitFillCents({ entryPriceCents: 83 }, 60, {}, 'paper'), 75, 'adverse fill helper caps paper');
   }
 
-  // Rich ~75¢+ tickets: widen hard stop down toward ~68¢ floor
+  // Rich ~75¢+ tickets: widen hard stop down toward ~60¢ floor
   {
-    checkEq(MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, 68, 'rich stop floor 68¢');
+    checkEq(MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, 60, 'rich stop floor 60¢');
     checkEq(
       modelEffectiveMaxLossCents({ entryPriceCents: 60, engineConfidence: 80 }, {}),
       8,
@@ -7497,23 +7497,23 @@ async function testModelStrategy() {
     );
     checkEq(
       modelEffectiveMaxLossCents({ entryPriceCents: 75, engineConfidence: 80 }, {}),
-      8,
-      '75¢ entry: room to 68 is 7¢ → still base −8¢'
+      15,
+      '75¢ entry: ride to 60¢ floor (−15¢)'
     );
     checkEq(
       modelEffectiveMaxLossCents({ entryPriceCents: 80, engineConfidence: 75 }, {}),
-      12,
-      '80¢ entry: ride to 68¢ floor (−12¢)'
+      20,
+      '80¢ entry: ride to 60¢ floor (−20¢)'
     );
     checkEq(
       modelEffectiveMaxLossCents({ entryPriceCents: 85, engineConfidence: 72 }, {}),
-      17,
-      '85¢ entry: ride to 68¢ floor (−17¢)'
+      25,
+      '85¢ entry: ride to 60¢ floor (−25¢)'
     );
     checkEq(
-      modelAdverseExitFillCents({ entryPriceCents: 82, engineConfidence: 78 }, 60, {}, 'paper'),
-      68,
-      'paper rich gap books floor 68 not entry−8'
+      modelAdverseExitFillCents({ entryPriceCents: 75, engineConfidence: 78 }, 50, {}, 'paper'),
+      60,
+      'paper 75¢ gap books floor 60 not entry−8'
     );
   }
 

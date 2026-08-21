@@ -983,7 +983,7 @@ function modelRichStopMinConfidence(config = {}) {
 
 /**
  * Hard max-loss for this ticket. Base −N¢, but rich ~75¢+ holds can ride down
- * toward ~68¢ (entry − floor) — more room when the market already prices a favorite.
+ * toward ~60¢ (entry − floor) — more room when the market already prices a favorite.
  */
 function modelEffectiveMaxLossCents(trade, config = {}) {
   const base = modelMaxLossCents(config);
@@ -1515,9 +1515,9 @@ const MODEL_HARD_ADVERSE_CENTS_DEFAULT = 8;
 const MODEL_MAX_LOSS_CENTS_DEFAULT = 8;
 /**
  * Rich / high-prob tickets (entry ~75¢+): allow drawdown down to this absolute bid
- * before the hard max-loss cliff — more room than a flat −8¢ when entry is richer.
+ * before the hard max-loss cliff — e.g. 75→60 = −15¢. Normal tickets keep flat −8¢.
  */
-const MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT = 68;
+const MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT = 60;
 /** Only widen max-loss toward the rich floor once entry is at least this. */
 const MODEL_RICH_STOP_ENTRY_MIN_CENTS_DEFAULT = 72;
 /** Prefer rich-floor widen when engine conf is at least this (or entry already rich). */
@@ -5993,7 +5993,7 @@ class TradingBot {
         underwater && Number.isFinite(entry) ? Math.round(entry - heldSideBidCents) : 0;
       const hardAdverseBase = modelHardAdverseCents(this.config);
       const maxLoss = modelEffectiveMaxLossCents(trade, this.config);
-      // Follow the ticket's effective max loss (rich ~75¢ holds → ~68¢ floor).
+      // Follow the ticket's effective max loss (rich ~75¢ holds → ~60¢ floor).
       const hardAdverse = Math.max(hardAdverseBase || 0, maxLoss || 0);
       const faded = trade.modelInverted === true;
       const againstLocked =
