@@ -4148,6 +4148,65 @@ class TradingBot {
     };
   }
 
+  /**
+   * Cash the bot may spend on a *new* entry: Available only (never Wallet /
+   * Insurance). Live also caps at Kalshi cash so we don't overdraft the API.
+   * Insurance may still absorb *losses* when armed — that is separate.
+   */
+  _tradingSpendableCents() {
+    const capital = this._capitalStatus();
+    const available = Math.max(0, Math.round(Number(capital.paperAvailableCents) || 0));
+    if (this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents)) {
+      return Math.max(0, Math.min(available, Math.round(this.liveBalanceCents)));
+    }
+    return available;
+  }
+
+  /** Pause new entries permanently until the user starts the bot again. */
+  _haltTrading(reason) {
+    if (this._inShadow) return false;
+    const msg = String(reason || 'Bot stopped.');
+    this.lastError = msg;
+    this.lastDecision = msg;
+    if (!this.isRunning) {
+      this._persist();
+      return true;
+    }
+    this.isRunning = false;
+    this.runningSince = null;
+    saveRunState({ isRunning: false, runningSince: null });
+    this._logActivity(msg, { kind: 'halt' });
+    this._persist();
+    return true;
+  }
+
+  /**
+   * New entries must fit in Available. If not, stop the bot — do not spend
+   * Personal Wallet or Insurance Fund on positions.
+   */
+  _assertEntryFundedFromAvailable(entryCostCents, label = '') {
+    const cost = Math.round(Number(entryCostCents) || 0);
+    if (!(cost > 0)) return true;
+    const capital = this._capitalStatus();
+    const available = Math.max(0, Math.round(Number(capital.paperAvailableCents) || 0));
+    const spendable = this._tradingSpendableCents();
+    if (cost <= spendable) return true;
+    const wallet = Math.max(0, Math.round(Number(capital.reserveCents) || 0));
+    const insurance = Math.max(0, Math.round(Number(capital.insuranceCents) || 0));
+    const liveBit =
+      this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents)
+        ? ` · Kalshi cash $${(this.liveBalanceCents / 100).toFixed(2)}`
+        : '';
+    this._haltTrading(
+      `STOPPED: need $${(cost / 100).toFixed(2)} from Available ` +
+        `(have $${(available / 100).toFixed(2)}${liveBit}). ` +
+        `Wallet $${(wallet / 100).toFixed(2)} + Insurance $${(insurance / 100).toFixed(2)} stay locked` +
+        (label ? ` — ${label}` : '') +
+        '. Bot stopped; open positions still managed.'
+    );
+    return false;
+  }
+
   _removeInvalidPaperTrades() {
     const initialCount = this.ledger.trades.length;
     this.ledger.trades = this.ledger.trades.filter((trade) => {
@@ -7134,13 +7193,12 @@ class TradingBot {
     });
     const contracts = Math.max(1, Math.floor((stakeDollars * 100) / priceCents));
     const entryCostCents = contracts * priceCents;
-    const capital = this._capitalStatus();
-    if (this.config.mode === 'paper' && entryCostCents > capital.paperAvailableCents) {
-      this.lastDecision = `Insufficient paper funds: $${(capital.paperAvailableCents / 100).toFixed(2)} is spendable after the reserved skim.`;
-      return false;
-    }
-    if (this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents) && entryCostCents > this.liveBalanceCents) {
-      this.lastDecision = `Insufficient live balance: $${(this.liveBalanceCents / 100).toFixed(2)} is available on Kalshi.`;
+    if (
+      !this._assertEntryFundedFromAvailable(
+        entryCostCents,
+        `${symbol} ${String(side || '').toUpperCase()} @ ${priceCents}¢`
+      )
+    ) {
       return false;
     }
     const trade = {
@@ -7304,9 +7362,7 @@ class TradingBot {
           attemptContracts = Math.max(1, Math.floor(bookAskSize));
         }
         const attemptCost = attemptContracts * workingPrice;
-        if (Number.isFinite(this.liveBalanceCents) && attemptCost > this.liveBalanceCents) {
-          this.lastDecision =
-            `Insufficient live balance: need $${(attemptCost / 100).toFixed(2)}, have $${(this.liveBalanceCents / 100).toFixed(2)}.`;
+        if (!this._assertEntryFundedFromAvailable(attemptCost, `${symbol} live entry @ ${workingPrice}¢`)) {
           return false;
         }
         trade.contracts = attemptContracts;
@@ -7444,15 +7500,23 @@ class TradingBot {
           return false;
         }
       }
-      if (this.config.mode === 'paper') {
+      if (this.config.mode === 'paper' || this.config.mode === 'live') {
         const cost = Math.round(Number(trade.stakeDollars) * 100);
-        const capital = this._capitalStatus();
-        if (cost > capital.paperAvailableCents) {
-          this.lastDecision =
-            `Insufficient paper funds at commit: $${(capital.paperAvailableCents / 100).toFixed(2)} spendable.`;
-          return false;
+        if (
+          !this._assertEntryFundedFromAvailable(
+            cost,
+            `${symbol} commit`
+          )
+        ) {
+          if (trade.liveOrderId) {
+            console.warn(
+              `[bot] live fill on ${symbol} but Available cannot fund — ledgering anyway to avoid orphan`
+            );
+          } else {
+            return false;
+          }
+        }
       }
-    }
 
     this.ledger.trades.unshift(trade);
     if (this.ledger.trades.length > 200) this.ledger.trades.length = 200;
@@ -7705,6 +7769,24 @@ class TradingBot {
     if (!this.isRunning) {
       this.lastDecision = 'Bot is stopped; it will continue monitoring any already-open positions but will not open new ones.';
       return;
+    }
+    // Don't burn Kalshi GETs or open risk if Available can't fund even one contract.
+    {
+      const minEntry = isModelStrategyMode(this.config)
+        ? Number(this.config.modelMinEntryCents) || MODEL_MIN_ENTRY_DEFAULT_CENTS
+        : Number(this.config.minEntryCents) || 40;
+      const floorCents = Math.max(1, Math.round(minEntry) || 65);
+      if (this._tradingSpendableCents() < floorCents) {
+        const capital = this._capitalStatus();
+        this._haltTrading(
+          `STOPPED: Available $${((Number(capital.paperAvailableCents) || 0) / 100).toFixed(2)} ` +
+            `can't fund a new contract (need ≥${floorCents}¢). ` +
+            `Wallet $${((Number(capital.reserveCents) || 0) / 100).toFixed(2)} + ` +
+            `Insurance $${((Number(capital.insuranceCents) || 0) / 100).toFixed(2)} stay locked. ` +
+            `Bot stopped; open positions still managed.`
+        );
+        return;
+      }
     }
     if (this.openTrades.length >= this._effectiveMaxOpenPositions()) return;
     if (!predictions) return;

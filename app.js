@@ -1470,7 +1470,7 @@ function buildCapitalLedgerHtml(capital, opts = {}) {
       <div class="capital-divider"></div>
       <div class="capital-row capital-total"><span>Total Equity</span><span>${formatMoneyCents(totalEquity)}</span></div>
       <div class="capital-row capital-pnl"><span>Net P&amp;L <em>(fee-net)</em></span><span class="${pnlClass}">${formatMoneyCents(netPnl, { signed: true })}</span></div>
-      <p class="capital-formula">Closed P&amp;L is fee-net so Available tracks Kalshi cash closer (gross − fees). Insurance: every win is 20% Insurance / 40% Wallet / 40% Available. Arms at ${formatMoneyCents(insuranceCap)}; stays usable down to ${formatMoneyCents(insuranceFloor)}. Soft fill ceiling ${formatMoneyCents(insuranceOverflow)} — excess 20% skim → Available (fund stays as cushion). Below the floor, Available takes losses until re-armed. Manual Add seeds without touching Available.</p>
+      <p class="capital-formula">Closed P&amp;L is fee-net so Available tracks Kalshi cash closer (gross − fees). Insurance: every win is 20% Insurance / 40% Wallet / 40% Available. Arms at ${formatMoneyCents(insuranceCap)}; stays usable down to ${formatMoneyCents(insuranceFloor)}. Soft fill ceiling ${formatMoneyCents(insuranceOverflow)} — excess 20% skim → Available (fund stays as cushion). Below the floor, Available takes losses until re-armed. New entries spend <strong>Available only</strong> — if a trade would need Wallet/Insurance cash, the bot <strong>stops</strong>. Insurance still absorbs losses when armed. Manual Add seeds without touching Available.</p>
     </div>`;
 }
 

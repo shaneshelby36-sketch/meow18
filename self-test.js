@@ -3465,6 +3465,52 @@ async function testBotTradingFlow() {
     );
   }
 
+  // Available-only funding: stop bot instead of spending Wallet / Insurance
+  {
+    const haltBot = makeBot(
+      mockClient({
+        ticker: 'KXETH15M-HALT',
+        status: 'open',
+        floor_strike: 3000,
+        close_time: new Date(Date.now() + 12 * 60 * 1000).toISOString(),
+        yes_bid: 70,
+        yes_ask: 72,
+        no_bid: 28,
+        no_ask: 30,
+      }),
+      {
+        strategyMode: 'model',
+        stakeDollars: 10,
+        paperStartingBalanceDollars: 20,
+        modelMinConfidence: 50,
+        modelMinEntryCents: 65,
+      }
+    );
+    haltBot.setRunning(true);
+    haltBot.ledger.reserveCents = 1500; // $15 Wallet
+    haltBot.ledger.insuranceCents = 400; // $4 Insurance
+    // Total $20 − $15 − $4 = $1 Available — can't fund ~$5–10 stake
+    const avail = haltBot._capitalStatus().paperAvailableCents;
+    check(avail > 0 && avail < 500, 'fixture has tiny Available under stake');
+    const opened = await haltBot._openPosition({
+      symbol: 'ETH',
+      ticker: 'KXETH15M-HALT',
+      side: 'yes',
+      priceCents: 72,
+      floorStrike: 3000,
+      closeTime: Date.now() + 12 * 60 * 1000,
+      engineProbability: 70,
+      engineConfidence: 70,
+      strategy: 'model',
+      modelWindowKey: 'w5',
+      modelDirection: 'UP',
+    });
+    checkEq(opened, false, 'refuses entry that would spend Wallet/Insurance');
+    checkEq(haltBot.isRunning, false, 'bot hard-stops when Available cannot fund');
+    check(/STOPPED/i.test(haltBot.lastDecision || ''), 'decision explains Available halt');
+    checkEq(haltBot.openTrades.length, 0, 'no position opened on halt');
+  }
+
   {
     const skimSettings = { skimMode: 'insurance', insuranceCapDollars: 10, insuranceFloorDollars: 6, insuranceOverflowDollars: 15 };
     const ledger = {
