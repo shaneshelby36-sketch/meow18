@@ -3,7 +3,7 @@
   "symbol": "AUTO",
   "strategyMode": "model",
   "activeSetupId": "core",
-  "autoTradeSymbols": "BTC,BNB,SOL",
+  "autoTradeSymbols": "BTC,SOL",
   "modelMinConfidence": 55,
   "modelEntryLiveLeanMarginPct": 3,
   "modelBankGreenCents": 7,

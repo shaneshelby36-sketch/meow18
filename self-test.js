@@ -4700,14 +4700,19 @@ async function testBotTradingFlow() {
   check(Object.keys(SERIES_BY_SYMBOL).includes('HYPE'), 'HYPE series kept for exit management');
   check(Object.keys(SERIES_BY_SYMBOL).includes('NEAR'), 'NEAR series kept for exit management');
   check(isKalshiTradeEnabled('BTC'), 'BTC tradeable by default');
-  check(isKalshiTradeEnabled('BNB'), 'BNB tradeable by default');
+  check(!isKalshiTradeEnabled('BNB'), 'BNB opted out by default (rate-limit trim)');
   check(isKalshiTradeEnabled('SOL'), 'SOL tradeable by default');
   check(!isKalshiTradeEnabled('ETH'), 'ETH opted out by default');
   check(!isKalshiTradeEnabled('DOGE'), 'DOGE opted out by default');
   check(!isKalshiTradeEnabled('NEAR'), 'NEAR opted out by default');
   check(!isKalshiTradeEnabled('HYPE'), 'HYPE opted out by default');
   check(!tradeableKalshiSymbols().includes('ETH'), 'AUTO excludes ETH by default');
-  check(tradeableKalshiSymbols().includes('BNB'), 'AUTO includes BNB');
+  check(!tradeableKalshiSymbols().includes('BNB'), 'AUTO excludes BNB by default');
+  check(tradeableKalshiSymbols().includes('SOL'), 'AUTO includes SOL');
+  check(
+    isKalshiTradeEnabled('BNB', { autoTradeSymbols: 'BTC,BNB,SOL' }),
+    'BNB tradeable when listed in autoTradeSymbols'
+  );
   check(
     isKalshiTradeEnabled('ETH', { autoTradeSymbols: 'BTC,ETH,SOL' }),
     'ETH tradeable when listed in autoTradeSymbols'

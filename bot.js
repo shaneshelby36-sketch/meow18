@@ -99,8 +99,8 @@ function pickLiveOpenMarket(markets, nowMs = Date.now(), minMsLeft = 5000) {
 // Opt-in coins historically: DOGE / NEAR. Now every coin is gated by autoTradeSymbols.
 const OPTIONAL_TRADE_SYMBOLS = new Set(['DOGE', 'NEAR']);
 
-/** Default AUTO universe — BTC / BNB / SOL only (edit in settings). */
-const DEFAULT_AUTO_TRADE_SYMBOLS = ['BTC', 'BNB', 'SOL'];
+/** Default AUTO universe — BTC / SOL (fewer Kalshi GETs; add BNB back when 429s calm). */
+const DEFAULT_AUTO_TRADE_SYMBOLS = ['BTC', 'SOL'];
 
 /** Default opt-outs when config knobs are unset (export for tests / legacy). */
 const DISABLED_TRADE_SYMBOLS = new Set(
@@ -174,9 +174,9 @@ const MODEL_SETUPS = [
   {
     id: 'core',
     recommended: true,
-    label: 'Core BTC / BNB / SOL',
-    why: 'Best mix from recent PnL: keep the coins that actually bank, drop ETH/DOGE/XRP bleed. 2 slots so correlated dumps don’t stack.',
-    autoTradeSymbols: 'BTC,BNB,SOL',
+    label: 'Core BTC / SOL',
+    why: 'BTC + SOL only for now — fewer Kalshi GETs / 429s. Add BNB back when rate limits calm.',
+    autoTradeSymbols: 'BTC,SOL',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
     modelBankGreenCents: 7,
@@ -5618,7 +5618,8 @@ class TradingBot {
       typeof this.client.getCachedMarket === 'function'
         ? this.client.getCachedMarket(ticker, maxAgeMs)
         : null;
-    const fresh = peek(1500);
+    // Align with getMarket cache (~2.5s) so the 2s manage watchdog usually avoids HTTP.
+    const fresh = peek(2500);
     if (fresh) return fresh;
 
     let timer = null;

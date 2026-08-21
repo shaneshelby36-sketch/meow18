@@ -323,10 +323,11 @@ class KalshiClient {
 
   async _withPublicGate(fn) {
     const run = this._publicGate.then(async () => {
+      // ~400ms spacing cuts 429 storms; 20s cooldown after a 429 is the real freeze.
       const wait = Math.max(
         0,
         this._cooldownUntil - Date.now(),
-        this._lastPublicAt + 350 - Date.now()
+        this._lastPublicAt + 400 - Date.now()
       );
       if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
       this._lastPublicAt = Date.now();
@@ -420,7 +421,7 @@ class KalshiClient {
 
   /**
    * Current tradeable 15m market for a series (soonest close still live).
-   * If the first pick misses (stale/empty cache during rollover), bust cache once and retry.
+   * Bust+retry once on miss — but not while rate-limited (cache already empty/useless).
    */
   async getLiveOpenMarket(seriesTicker, { minMsLeft = 1500, limit = 20 } = {}) {
     const pickFrom = (markets, floorMs) => {
@@ -437,7 +438,10 @@ class KalshiClient {
       const markets = await this.getOpenMarkets(seriesTicker, limit);
       return pickFrom(markets, minMsLeft) || pickFrom(markets, 0);
     };
-    return (await attempt(false)) || (await attempt(true));
+    const first = await attempt(false);
+    if (first) return first;
+    if (this.isPublicRateLimited()) return null;
+    return attempt(true);
   }
 
   async getMarket(ticker) {
@@ -447,7 +451,8 @@ class KalshiClient {
     if (!this._marketByTickerInflight) this._marketByTickerInflight = new Map();
     const now = Date.now();
     const cached = this._marketByTickerCache.get(key);
-    if (cached && now - cached.at < 1500) return cached.market;
+    // 2.5s cache: manage watchdog is 2s — usually hits cache, still fresh for TP/stops.
+    if (cached && now - cached.at < 2500) return cached.market;
     // Never sit on the 429 cooldown — timeouts then pile up and freeze paper.
     if (now < this._cooldownUntil) {
       return cached ? cached.market : null;

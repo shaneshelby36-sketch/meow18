@@ -484,9 +484,17 @@ async function main() {
       bot.forceSettleOverdue(latestPrediction).catch((err) => {
         console.error('[bot] settle-watchdog error:', err.message);
       });
-      bot.manageOpenPositions(latestPrediction).catch((err) => {
-        console.error('[bot] manage-watchdog error:', err.message);
-      });
+      // Always manage opens (TP/stops). Cache absorbs most GETs; skip only when
+      // rate-limited AND flat (no inventory / no forced exit) to stop 429 thrash.
+      const opens = Array.isArray(bot.openTrades) ? bot.openTrades : [];
+      const needsManage =
+        opens.length > 0 ||
+        !(bot.client && typeof bot.client.isPublicRateLimited === 'function' && bot.client.isPublicRateLimited());
+      if (needsManage) {
+        bot.manageOpenPositions(latestPrediction).catch((err) => {
+          console.error('[bot] manage-watchdog error:', err.message);
+        });
+      }
     }, 2000);
     console.log('[startup] settle + manage watchdog every 2s (independent of prediction loop)');
   }
