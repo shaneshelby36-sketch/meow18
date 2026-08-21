@@ -5,6 +5,8 @@
   "activeSetupId": "core",
   "autoTradeSymbols": "BTC,SOL",
   "modelMinConfidence": 55,
+  "modelMinEntryCents": 65,
+  "modelLowAskMinConfidence": 80,
   "modelEntryLiveLeanMarginPct": 3,
   "modelSignalDominanceMin": 0,
   "modelBankGreenCents": 7,

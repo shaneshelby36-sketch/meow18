@@ -1349,7 +1349,7 @@ function modelEntryDumpRisk({
 }
 
 /**
- * Normal entries need ≥ modelMinEntry (default 60¢). Below that only if confidence + lean
+ * Normal entries need ≥ modelMinEntry (default 65¢). Below that only if confidence + lean
  * are especially strong, and never below the perfect floor.
  */
 function modelPriceAllowed(priceCents, window, config = {}) {
@@ -1392,6 +1392,81 @@ function modelPriceAllowed(priceCents, window, config = {}) {
     ok: false,
     reason: `below ${minEntry}¢ (need conf≥${needConf}% and lean≥${needLean}pts for exception)`,
   };
+}
+
+function modelLowAskCeilingCents(config = {}) {
+  const n = Number(config.modelLowAskCeilingCents);
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_LOW_ASK_CEILING_CENTS_DEFAULT;
+}
+
+function modelLowAskMinConfidence(config = {}) {
+  const n = Number(config.modelLowAskMinConfidence);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_LOW_ASK_MIN_CONFIDENCE_DEFAULT;
+}
+
+function modelLowAskLiveFavorPts(config = {}) {
+  const n = Number(config.modelLowAskLiveFavorPts);
+  if (Number.isFinite(n) && n >= 0) return n;
+  return MODEL_LOW_ASK_LIVE_FAVOR_DEFAULT;
+}
+
+function modelLowAskHeldProbMin(config = {}) {
+  const n = Number(config.modelLowAskHeldProbMin);
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_LOW_ASK_HELD_PROB_DEFAULT;
+}
+
+/**
+ * Asks ≤69¢ (e.g. 65¢) only when direction is nearly certain:
+ * high conf + wide live favor + strong held-side prob.
+ * Slider 0 on modelLowAskMinConfidence disables this gate.
+ */
+function modelLowAskConvictionGate({ priceCents, window, signalSide, config = {} } = {}) {
+  const confNeed = modelLowAskMinConfidence(config);
+  if (!(confNeed > 0)) return { ok: true, skipped: true };
+  const ask = Math.round(Number(priceCents));
+  const ceiling = modelLowAskCeilingCents(config);
+  if (!Number.isFinite(ask) || ask < 1 || ask > ceiling) return { ok: true, skipped: true };
+  if (!window) {
+    return { ok: false, reason: `${ask}¢ low-ask needs a live model window` };
+  }
+  const conf = Number(window.confidence);
+  if (!Number.isFinite(conf) || conf < confNeed) {
+    return {
+      ok: false,
+      reason:
+        `${ask}¢ needs near-certain direction (conf ≥${confNeed}%, have ` +
+        `${Number.isFinite(conf) ? Math.round(conf) : '?'}%)`,
+    };
+  }
+  const favorNeed = modelLowAskLiveFavorPts(config);
+  const side = String(signalSide || '').toLowerCase();
+  if (!modelLiveLeanStillFavors(window, side, favorNeed)) {
+    const up = Number(window.probabilityUp);
+    const down = Number(window.probabilityDown);
+    return {
+      ok: false,
+      reason:
+        `${ask}¢ needs live favor ≥${favorNeed}pts ` +
+        `(have ${Number.isFinite(up) ? up.toFixed(0) : '?'}% UP / ${
+          Number.isFinite(down) ? down.toFixed(0) : '?'
+        }% DOWN)`,
+    };
+  }
+  const heldNeed = modelLowAskHeldProbMin(config);
+  const held = side === 'yes' ? Number(window.probabilityUp) : Number(window.probabilityDown);
+  if (!Number.isFinite(held) || held < heldNeed) {
+    return {
+      ok: false,
+      reason:
+        `${ask}¢ needs held-side live ≥${heldNeed}% ` +
+        `(have ${Number.isFinite(held) ? held.toFixed(0) : '?'}%)`,
+    };
+  }
+  return { ok: true, conviction: true };
 }
 
 /**
@@ -1621,10 +1696,18 @@ const STRATEGY_RETRO_MID_CEILING_MINUTES = 8.5;
 const EDGE_MAX_ENTRY_DEFAULT_CENTS = 95;
 /** Model: never buy richer than this (leaves a little room to 100). */
 const MODEL_MAX_ENTRY_DEFAULT_CENTS = 93;
-/** Model: never buy cheaper than this (normal floor). */
-const MODEL_MIN_ENTRY_DEFAULT_CENTS = 60;
-/** Absolute floor even when the call is “perfect.” (matches min — no sub-60 longshots). */
-const MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS = 60;
+/** Model: never buy cheaper than this (normal floor). 65¢ OK only with low-ask conviction. */
+const MODEL_MIN_ENTRY_DEFAULT_CENTS = 65;
+/** Absolute floor even when the call is “perfect.” */
+const MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS = 65;
+/** Asks at/below this need near-certain direction (under the 70¢ half-stake line). */
+const MODEL_LOW_ASK_CEILING_CENTS_DEFAULT = 69;
+/** Min engine conf for low-ask (≤69¢) entries. 0 = off (use normal min conf only). */
+const MODEL_LOW_ASK_MIN_CONFIDENCE_DEFAULT = 80;
+/** Live favor pts required for low-ask conviction (almost no doubt). */
+const MODEL_LOW_ASK_LIVE_FAVOR_DEFAULT = 12;
+/** Held-side live prob % required for low-ask conviction. */
+const MODEL_LOW_ASK_HELD_PROB_DEFAULT = 72;
 /** Don't open Model entries in the last this many minutes. 0 = no late cutoff (off for now). */
 const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 0;
 /** Confidence required to allow entries below the normal min. */
@@ -2125,6 +2208,10 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMinConfidence',
   'modelMaxEntryCents',
   'modelMinEntryCents',
+  'modelLowAskMinConfidence',
+  'modelLowAskCeilingCents',
+  'modelLowAskLiveFavorPts',
+  'modelLowAskHeldProbMin',
   'modelLowPriceMaxCents',
   'modelLowPriceStakeQuarters',
   'modelConfirmCrossCents',
@@ -3158,6 +3245,10 @@ class TradingBot {
       modelMinConfidence: MODEL_MIN_CONFIDENCE_DEFAULT,
       modelMaxEntryCents: MODEL_MAX_ENTRY_DEFAULT_CENTS,
       modelMinEntryCents: MODEL_MIN_ENTRY_DEFAULT_CENTS,
+      modelLowAskMinConfidence: MODEL_LOW_ASK_MIN_CONFIDENCE_DEFAULT,
+      modelLowAskCeilingCents: MODEL_LOW_ASK_CEILING_CENTS_DEFAULT,
+      modelLowAskLiveFavorPts: MODEL_LOW_ASK_LIVE_FAVOR_DEFAULT,
+      modelLowAskHeldProbMin: MODEL_LOW_ASK_HELD_PROB_DEFAULT,
       modelLowPriceMaxCents: MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT,
       modelLowPriceStakeQuarters: MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT,
       modelConfirmCrossCents: MODEL_CONFIRM_CROSS_CENTS_DEFAULT,
@@ -5204,13 +5295,13 @@ class TradingBot {
     try {
       const entryPx = Number(trade.entryPriceCents);
       if (
-        reason === 'take_profit' &&
+        (reason === 'take_profit' || reason === 'breakeven') &&
         Number.isFinite(entryPx) &&
         Number.isFinite(bookedExit) &&
         bookedExit < entryPx
       ) {
         this.lastDecision =
-          `Blocked fake TP on ${trade.symbol}: bid ${Math.round(bookedExit)}¢ is below entry ${Math.round(entryPx)}¢ — holding.`;
+          `Blocked fake ${reason} on ${trade.symbol}: bid ${Math.round(bookedExit)}¢ is below entry ${Math.round(entryPx)}¢ — holding.`;
         return false;
       }
       const isLive = this._isLiveTrade(trade);
@@ -6116,8 +6207,9 @@ class TradingBot {
     }
 
     // Model: no price stops. Follow from ~+3¢ green; TP on a 1¢ stall.
-    // Lean exits only bank ≥7¢ green or flat BE — no micro TPs.
-    // Underwater lean against → hold (no red lean-flip).
+    // Lean exits bank ≥ minTp green or exact flat BE after min-hold —
+    // never scratch ask→bid haircut / soft red as "breakeven".
+    // Underwater lean → hold until hard floor / pace threat.
     // Final 5m: high possibility may extend; low possibility exits immediately.
     if (isModelTrade(trade)) {
       const picked = assetPred ? pickModelWindow(assetPred, minutesRemaining) : null;
@@ -6295,52 +6387,39 @@ class TradingBot {
         return;
       }
 
-      // Flat / spread haircut → BE. Real red → lean-stop only if bid ≤ hard
-      // floor (55) or pace→floor after a meaningful drawdown (not 84→79 noise).
+      // Any bid < entry (incl. ask→bid haircut): hold unless near hard floor.
+      // Never label 89→82 as "breakeven" — that was the early-sell bug.
+      // Flat/green lean banks later (min-hold + bankable / exact flat).
       const redDumpThreat = modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, this.config);
-      if (!faded && bidOk && leanExit) {
-        if (econUnderwater) {
+      if (!faded && bidOk && leanExit && (underwater || econUnderwater)) {
+        if (redDumpThreat) {
+          await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
+            liveSellPriceCents: heldSideBidCents,
+          });
+          return;
+        }
+        // Soft red / haircut — hold through lean soft; don't scratch.
+      }
+
+      // Bid-led dump cut (backup when model probs lag Kalshi). Peak is entry bid, not ask.
+      const dumpPullback = modelDumpPullbackCents(this.config);
+      if (!faded && bidOk && dumpPullback > 0 && pullback >= dumpPullback) {
+        if (underwater || econUnderwater) {
           if (redDumpThreat) {
             await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
               liveSellPriceCents: heldSideBidCents,
             });
             return;
           }
-          // Soft red, not on pace to hard floor — hold; don't scratch.
-        } else if (exactlyFlat || flatOrGreen || underwater) {
-          // Underwater only by entry spread haircut → treat as BE scratch if lean soft.
-          if (exactlyFlat || greenCents <= 0 || underwater) {
-            const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
-            await this._closePosition(trade, beFill, 'breakeven', {
-              liveSellPriceCents: heldSideBidCents,
-            });
-          } else {
-            await this._closePosition(trade, heldSideBidCents, 'take_profit', {
-              liveSellPriceCents: heldSideBidCents,
-            });
-          }
+          // Dump while still above hard-floor pace — hold (no haircut BE).
+        } else if (isBankableGreen && heldForBank) {
+          await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+            liveSellPriceCents: heldSideBidCents,
+          });
           return;
-        }
-      }
-
-      // Bid-led dump cut (backup when model probs lag Kalshi). Peak is entry bid, not ask.
-      const dumpPullback = modelDumpPullbackCents(this.config);
-      if (!faded && bidOk && dumpPullback > 0 && pullback >= dumpPullback) {
-        if (flatOrGreen || !econUnderwater) {
-          if (exactlyFlat || greenCents <= 0 || (underwater && !econUnderwater)) {
-            const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
-            await this._closePosition(trade, beFill, 'breakeven', {
-              liveSellPriceCents: heldSideBidCents,
-            });
-          } else {
-            await this._closePosition(trade, heldSideBidCents, 'take_profit', {
-              liveSellPriceCents: heldSideBidCents,
-            });
-          }
-          return;
-        }
-        if (redDumpThreat) {
-          await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
+        } else if (exactlyFlat && heldLongEnough) {
+          const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
+          await this._closePosition(trade, beFill, 'breakeven', {
             liveSellPriceCents: heldSideBidCents,
           });
           return;
@@ -8492,6 +8571,17 @@ class TradingBot {
       return null;
     }
 
+    const lowAskGate = modelLowAskConvictionGate({
+      priceCents,
+      window,
+      signalSide,
+      config: this.config,
+    });
+    if (!lowAskGate.ok) {
+      say(`Waiting: ${symbol} ${side.toUpperCase()} @ ${priceCents}¢ — ${lowAskGate.reason}.`);
+      return null;
+    }
+
     const leanStrength = Math.abs(Number(window.probabilityUp) - 50) || 1;
     const uncertain = modelIsHalfStakeAsk(priceCents);
     return {
@@ -9295,6 +9385,13 @@ module.exports = {
   modelEntryDumpRisk,
   modelEngineClearlyWithUs,
   modelPriceAllowed,
+  modelLowAskConvictionGate,
+  modelLowAskMinConfidence,
+  MODEL_MIN_ENTRY_DEFAULT_CENTS,
+  MODEL_LOW_ASK_MIN_CONFIDENCE_DEFAULT,
+  MODEL_LOW_ASK_CEILING_CENTS_DEFAULT,
+  MODEL_LOW_ASK_LIVE_FAVOR_DEFAULT,
+  MODEL_LOW_ASK_HELD_PROB_DEFAULT,
   checkModelPostExitCooldown,
   modelMinHoldMs,
   modelPostExitCooldownMs,

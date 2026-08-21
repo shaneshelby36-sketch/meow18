@@ -1535,6 +1535,7 @@ const SLIDER_UNITS = {
   'bot-model-confirm-cross': (v) => (Number(v) <= 0 ? 'off' : `cross ${Math.round(v)}¢`),
   'bot-model-confirm-ext': (v) => `+${Math.round(v)}¢ max`,
   'bot-model-min-entry': (v) => `${Math.round(v)}¢`,
+  'bot-model-low-ask-conf': (v) => (Number(v) <= 0 ? 'off' : `≤69¢ need ≥${Math.round(v)}%`),
   'bot-model-max-entry': (v) => `${Math.round(v)}¢`,
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
   'bot-model-max-loss': (v) => `−${Math.round(v)}¢`,
@@ -1921,6 +1922,7 @@ function wireSliderDisplays() {
     'bot-model-confirm-cross',
     'bot-model-confirm-ext',
     'bot-model-min-entry',
+    'bot-model-low-ask-conf',
     'bot-model-max-entry',
     'bot-model-bank-green',
     'bot-model-max-loss',
@@ -2035,9 +2037,11 @@ function wireBotConfigAutoSave() {
     'bot-minentries',
     'bot-model-confidence',
     'bot-model-live-favor',
+    'bot-model-signal-dom',
     'bot-model-confirm-cross',
     'bot-model-confirm-ext',
     'bot-model-min-entry',
+    'bot-model-low-ask-conf',
     'bot-model-max-entry',
     'bot-model-bank-green',
     'bot-model-sitout',
@@ -2157,7 +2161,12 @@ async function loadBotConfigIntoForm() {
         c.modelConfirmMaxExtensionCents != null ? c.modelConfirmMaxExtensionCents : 15;
     }
     const modelMinEntry = document.getElementById('bot-model-min-entry');
-    if (modelMinEntry) modelMinEntry.value = c.modelMinEntryCents != null ? c.modelMinEntryCents : 60;
+    if (modelMinEntry) modelMinEntry.value = c.modelMinEntryCents != null ? c.modelMinEntryCents : 65;
+    const modelLowAskConf = document.getElementById('bot-model-low-ask-conf');
+    if (modelLowAskConf) {
+      modelLowAskConf.value =
+        c.modelLowAskMinConfidence != null ? c.modelLowAskMinConfidence : 80;
+    }
     const modelMaxEntry = document.getElementById('bot-model-max-entry');
     if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 93;
     const modelBankGreen = document.getElementById('bot-model-bank-green');
@@ -2251,6 +2260,7 @@ async function loadBotConfigIntoForm() {
       'bot-model-confirm-cross',
       'bot-model-confirm-ext',
       'bot-model-min-entry',
+      'bot-model-low-ask-conf',
       'bot-model-max-entry',
       'bot-model-bank-green',
       'bot-model-max-loss',
@@ -2416,7 +2426,8 @@ async function saveBotConfig(opts = {}) {
     modelConfirmMaxExtensionCents: parseFloat(
       document.getElementById('bot-model-confirm-ext')?.value || '15'
     ),
-    modelMinEntryCents: parseFloat(document.getElementById('bot-model-min-entry')?.value || '60'),
+    modelMinEntryCents: parseFloat(document.getElementById('bot-model-min-entry')?.value || '65'),
+    modelLowAskMinConfidence: parseFloat(document.getElementById('bot-model-low-ask-conf')?.value || '80'),
     modelMaxEntryCents: parseFloat(document.getElementById('bot-model-max-entry')?.value || '93'),
     modelLowPriceMaxCents: 70,
     modelLowPriceStakeQuarters: 2,

@@ -435,6 +435,14 @@
               <input id="bot-model-min-entry" type="range" min="40" max="85" step="1" />
               <span class="slider-value" id="bot-model-min-entry-value">—</span>
             </div>
+            <span class="field-hint">Default <strong>65¢</strong>. Floor for any MODEL buy.</span>
+          </label>
+          <label>MODEL low-ask conviction (conf %)
+            <div class="slider-row">
+              <input id="bot-model-low-ask-conf" type="range" min="0" max="95" step="1" />
+              <span class="slider-value" id="bot-model-low-ask-conf-value">—</span>
+            </div>
+            <span class="field-hint"><strong>0 = off</strong>. Asks ≤69¢ (e.g. <strong>65¢</strong>) only when direction is nearly certain: conf ≥ this (default <strong>80</strong>), live favor ≥12pts, held-side ≥72%. ≥70¢ uses normal conf.</span>
           </label>
           <label>MODEL max entry (¢)
             <div class="slider-row">
