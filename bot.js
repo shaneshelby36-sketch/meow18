@@ -179,8 +179,8 @@ const MODEL_SETUPS = [
     autoTradeSymbols: 'BTC,BNB,SOL',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
-    modelBankGreenCents: 10,
-    modelMinTpCents: 10,
+    modelBankGreenCents: 7,
+    modelMinTpCents: 7,
     maxOpenPositions: 2,
     modelConfirmCrossCents: 0,
     modelMaxLossCents: 8,
@@ -192,8 +192,8 @@ const MODEL_SETUPS = [
     autoTradeSymbols: 'BTC,SOL',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
-    modelBankGreenCents: 10,
-    modelMinTpCents: 10,
+    modelBankGreenCents: 7,
+    modelMinTpCents: 7,
     maxOpenPositions: 2,
     modelConfirmCrossCents: 0,
     modelMaxLossCents: 8,
@@ -205,8 +205,8 @@ const MODEL_SETUPS = [
     autoTradeSymbols: 'BTC,BNB,SOL',
     modelMinConfidence: 66,
     modelEntryLiveLeanMarginPct: 5,
-    modelBankGreenCents: 10,
-    modelMinTpCents: 10,
+    modelBankGreenCents: 7,
+    modelMinTpCents: 7,
     maxOpenPositions: 1,
     modelConfirmCrossCents: 0,
     modelMaxLossCents: 8,
@@ -221,8 +221,8 @@ const MODEL_SETUPS = [
     autoTradeSymbols: 'BTC,BNB,SOL,ETH',
     modelMinConfidence: 62,
     modelEntryLiveLeanMarginPct: 4,
-    modelBankGreenCents: 10,
-    modelMinTpCents: 10,
+    modelBankGreenCents: 7,
+    modelMinTpCents: 7,
     maxOpenPositions: 2,
     modelConfirmCrossCents: 0,
     modelMaxLossCents: 8,
@@ -234,8 +234,8 @@ const MODEL_SETUPS = [
     autoTradeSymbols: 'BTC,BNB,SOL',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
-    modelBankGreenCents: 8,
-    modelMinTpCents: 8,
+    modelBankGreenCents: 6,
+    modelMinTpCents: 6,
     maxOpenPositions: 3,
     modelConfirmCrossCents: 0,
     modelMaxLossCents: 8,
@@ -248,8 +248,8 @@ const MODEL_SETUPS = [
     autoTradeSymbols: 'BTC,BNB,SOL',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
-    modelBankGreenCents: 10,
-    modelMinTpCents: 10,
+    modelBankGreenCents: 7,
+    modelMinTpCents: 7,
     maxOpenPositions: 2,
     modelConfirmCrossCents: 0,
     modelMaxLossCents: 6,
@@ -264,8 +264,8 @@ const MODEL_SETUPS = [
     autoTradeSymbols: 'BTC,BNB,SOL',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
-    modelBankGreenCents: 10,
-    modelMinTpCents: 10,
+    modelBankGreenCents: 7,
+    modelMinTpCents: 7,
     maxOpenPositions: 2,
     modelConfirmCrossCents: 0,
     modelMaxLossCents: 8,
@@ -604,11 +604,11 @@ const MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT = 120_000;
 /** First N ms after open: only hard lean-turning exits (ignore soft + ask/bid haircut). */
 const MODEL_OPEN_GRACE_MS_DEFAULT = 8_000;
 /** Lean-exit / momentum TP floor — no micro-banks under this. */
-const MODEL_MIN_TP_CENTS_DEFAULT = 10;
-/** Arm momentum run once this many ¢ green; then hold until stall. */
-const MODEL_BANK_GREEN_CENTS_DEFAULT = 10;
-/** Start trailing / allow stall-TP once at least this many ¢ green (don't wait for +7). */
-const MODEL_TRAIL_ARM_CENTS_DEFAULT = 5;
+const MODEL_MIN_TP_CENTS_DEFAULT = 7;
+/** Unconditional bank once this many ¢ green (don't wait for a stall). */
+const MODEL_BANK_GREEN_CENTS_DEFAULT = 7;
+/** Start trailing / allow stall-TP once at least this many ¢ green. */
+const MODEL_TRAIL_ARM_CENTS_DEFAULT = 3;
 /** Held bid at/above this → bank immediately (don't sit 96→100). */
 const MODEL_RICH_BANK_CENTS_DEFAULT = 96;
 /** Still red after this long, even if lean is with us → only stop if pace → ≤50. */
@@ -640,8 +640,8 @@ const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 0;
 /** Confidence required to extend a hold into/through the final 5-minute barrier. */
 const MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT = 78;
 /** After trail is armed, TP if bid sits at peak this long without a new high (ms). */
-const MODEL_MOMENTUM_STALL_MS_DEFAULT = 4_000;
-/** After +bank green, TP if bid pulls back this many ¢ from peak. */
+const MODEL_MOMENTUM_STALL_MS_DEFAULT = 3_000;
+/** After trail arm, TP if bid pulls back this many ¢ from peak. */
 const MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT = 1;
 /** Model entries below this ask always use half stake. Hard cutoff — not a slider. */
 const MODEL_HALF_STAKE_UNDER_CENTS = 70;
@@ -780,7 +780,7 @@ function modelBankGreenCents(config = {}) {
   return MODEL_BANK_GREEN_CENTS_DEFAULT;
 }
 
-/** ¢ green before we trail and TP on a tiny stall. Caps at 3 so +7 slider doesn't skip 52→55. */
+/** ¢ green before we trail and TP on a tiny stall. Caps at trail-arm default. */
 function modelTrailArmCents(config = {}) {
   const bank = modelBankGreenCents(config);
   if (!(bank > 0)) return MODEL_TRAIL_ARM_CENTS_DEFAULT;
@@ -6147,8 +6147,17 @@ class TradingBot {
         }
       }
 
+      // Unconditional bank at the slider green — was missing: trail hold returned
+      // early while still climbing, so +10 never fired and greens gave it back.
+      if (bidOk && isDecentGreen && heldForBank) {
+        await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+
       // Follow the bid from a small green (+2–3¢). Bank when it stalls even
-      // a little (1¢ off peak, or ~4s flat). Never TP if the ticket is red.
+      // a little (1¢ off peak, or ~3s flat). Never TP if the ticket is red.
       const armCents = modelTrailArmCents(this.config);
       const armed = flatOrGreen && greenCents >= armCents;
       const priceStalled =
@@ -6162,7 +6171,7 @@ class TradingBot {
       }
       if (bidOk && armed && !priceStalled) {
         const holdMsg =
-          `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — following, TP on a small stall.`;
+          `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — following, TP on a small stall or at +${bankGreen}¢.`;
         trade.holdReason = holdMsg;
         this.lastDecision = holdMsg;
         return;
@@ -8928,6 +8937,7 @@ module.exports = {
   MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT,
   MODEL_MIN_TP_CENTS_DEFAULT,
   MODEL_BANK_GREEN_CENTS_DEFAULT,
+  MODEL_TRAIL_ARM_CENTS_DEFAULT,
   MODEL_SETTLE_CLOSE_MINUTES_DEFAULT,
   MODEL_LATE_BARRIER_MINUTES_DEFAULT,
   MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT,

@@ -2109,7 +2109,7 @@ async function loadBotConfigIntoForm() {
     const modelMaxEntry = document.getElementById('bot-model-max-entry');
     if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 93;
     const modelBankGreen = document.getElementById('bot-model-bank-green');
-    if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 10;
+    if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 7;
     const modelSitout = document.getElementById('bot-model-sitout');
     if (modelSitout) {
       const mins =
@@ -2347,8 +2347,8 @@ async function saveBotConfig(opts = {}) {
     modelMaxEntryCents: parseFloat(document.getElementById('bot-model-max-entry')?.value || '93'),
     modelLowPriceMaxCents: 70,
     modelLowPriceStakeQuarters: 2,
-    modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '10'),
-    modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '10'),
+    modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
+    modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
     modelPostExitCooldownMinutes:
       Number.isFinite(modelSitoutSec) && modelSitoutSec > 0 ? modelSitoutSec / 60 : 0,
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '80'),
