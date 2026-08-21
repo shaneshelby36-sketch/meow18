@@ -7048,7 +7048,46 @@ async function testModelStrategy() {
     checkEq(trade.status, 'open', '84→79 stays open toward hard floor 55');
   }
 
-  // Fast dump pace toward 55 after meaningful adverse → lean-stop
+  // 78→67 must NOT lean-stop — still far above hard floor 55
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 67,
+        no_bid: 33,
+      }),
+      { strategyMode: 'model', modelMinHoldSeconds: 0 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 78,
+      modelEntryBidCents: 76,
+      modelEntrySpreadCents: 2,
+      peakHeldBidCents: 76,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 30_000,
+      modelEntryHeldProb: 78,
+      engineConfidence: 78,
+    });
+    checkEq(modelShouldLeanStopRed(trade, 67, 30_000, {}), false, '78→67 is not near floor');
+    await bot._manageOpenTrade(trade, {
+      BTC: {
+        ready: true,
+        price: 60000,
+        windows: {
+          w5: { ...win(48, 55), tracking: { predictedDirection: 'UP' } },
+          w10: win(48, 55),
+          w15: win(48, 55),
+        },
+      },
+    });
+    checkEq(trade.status, 'open', '78→67 stays open toward hard floor 55');
+  }
+
+  // Fast dump pace toward 55 after bid is near floor → lean-stop
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7082,7 +7121,7 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'model_lean_stop', 'fast dump pace toward 55 → lean-stop');
+    checkEq(trade.exitReason, 'model_lean_stop', 'fast dump near floor → lean-stop');
   }
 
   // Already ≤55 → lean-stop

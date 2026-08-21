@@ -632,10 +632,15 @@ const MODEL_LEAN_STOP_PACE_HORIZON_MS_DEFAULT = 90_000;
 /** Need at least this long of red sample before trusting pace. */
 const MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT = 8_000;
 /**
- * Pace lean-stop only after this much ¢ adverse (or ~35% of room to hard floor).
- * Stops 84→79 noise from projecting under 55 over a 90s horizon.
+ * Pace lean-stop only after this much ¢ adverse (or ~55% of room to hard floor).
+ * Stops mid-ticket cuts like 78→67 while the hard floor is still 55.
  */
 const MODEL_LEAN_STOP_MIN_ADVERSE_CENTS_DEFAULT = 8;
+/**
+ * Pace projection only arms once bid is within this many ¢ of the hard floor.
+ * Absolute hit (bid ≤ floor) still stops immediately. Default 8 → arm at ≤63 when floor=55.
+ */
+const MODEL_LEAN_STOP_PACE_ARM_CENTS_DEFAULT = 8;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /** Final barrier (minutes left). 0 = off (no forced late exits). */
@@ -775,10 +780,17 @@ function modelLeanStopMinAdverseCents(trade, config = {}) {
   if (!Number.isFinite(entry) || !(barrier > 0) || entry <= barrier) {
     return MODEL_LEAN_STOP_MIN_ADVERSE_CENTS_DEFAULT;
   }
+  // Need most of the ride toward the hard floor before pace can cut.
   return Math.max(
     MODEL_LEAN_STOP_MIN_ADVERSE_CENTS_DEFAULT,
-    Math.round((entry - barrier) * 0.35)
+    Math.round((entry - barrier) * 0.55)
   );
+}
+
+function modelLeanStopPaceArmCents(config = {}) {
+  const n = Number(config.modelLeanStopPaceArmCents);
+  if (Number.isFinite(n) && n >= 0) return Math.round(n);
+  return MODEL_LEAN_STOP_PACE_ARM_CENTS_DEFAULT;
 }
 
 function modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, config = {}) {
@@ -789,10 +801,14 @@ function modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, config = {}) {
   const entry = Number(trade && trade.entryPriceCents);
   const from = Number.isFinite(entryBid) ? entryBid : entry;
   if (!Number.isFinite(entry) || !Number.isFinite(cur)) return false;
+
+  // Do not lean-stop in the middle of the ride (78→67). Pace only once the
+  // bid is already near the hard floor (default ≤ floor+8).
+  const arm = modelLeanStopPaceArmCents(config);
+  if (!(cur <= barrier + arm)) return false;
+
   const adverse = Math.round(entry - cur);
   const minAdv = modelLeanStopMinAdverseCents(trade, config);
-  // 84→79 style noise: pace would project under 55, but we haven't burned
-  // enough of the hard-floor room yet — hold.
   if (!(adverse >= minAdv)) return false;
   return modelOnPaceBelowBarrier({
     fromBid: from,
