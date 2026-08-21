@@ -619,6 +619,8 @@ const MODEL_SOFT_BANK_MS_DEFAULT = 0;
 const MODEL_DUMP_PULLBACK_CENTS_DEFAULT = 3;
 /** Underwater this many ¢ → candidate for stop only if also on pace toward ≤50. */
 const MODEL_FAST_RED_CENTS_DEFAULT = 2;
+/** Min |netDominance| when trend is weakening before signalScore counts as turning. 0 = off. */
+const MODEL_SIGNAL_DOMINANCE_MIN_DEFAULT = 0;
 /** Min drop in held-side live prob (pts) from entry before model exit fires. */
 const MODEL_PROB_DRIFT_PTS_DEFAULT = 3;
 /** Min hold before fast-red (0 = cut same tick if bid gaps on fill). */
@@ -1176,18 +1178,32 @@ function modelLiveProbNotWithUs(window, side) {
 }
 
 /** Accumulated signalScore turning against the held side (weakening / dominance flip). */
-function modelSignalTurningAgainst(window, side) {
+function modelSignalDominanceMin(config = {}) {
+  const n = Number(config.modelSignalDominanceMin);
+  // 0 / negative / unset-off → feature off (ignore signalScore for turn/dump).
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return n;
+  return MODEL_SIGNAL_DOMINANCE_MIN_DEFAULT;
+}
+
+function modelSignalScoreEnabled(config = {}) {
+  return modelSignalDominanceMin(config) > 0;
+}
+
+function modelSignalTurningAgainst(window, side, config = {}) {
+  if (!modelSignalScoreEnabled(config)) return false;
   const ss = window && window.signalScore;
   if (!ss) return false;
   const nd = Number(ss.netDominance);
   const trend = ss.trend;
   if (!Number.isFinite(nd)) return false;
+  const minDom = modelSignalDominanceMin(config);
   if (side === 'yes') {
     if (nd <= 0) return true;
-    if (trend === 'weakening' && nd < 1) return true;
+    if (trend === 'weakening' && nd < minDom) return true;
   } else if (side === 'no') {
     if (nd >= 0) return true;
-    if (trend === 'weakening' && nd > -1) return true;
+    if (trend === 'weakening' && nd > -minDom) return true;
   }
   return false;
 }
@@ -1227,7 +1243,7 @@ function modelEngineTurningAgainst({
   if (direction && modelDirectionAgainstHeld(direction, side)) return true;
   if (modelLiveLeanAgainstHeld(window, side, modelLiveLeanMarginPct(config))) return true;
   if (modelLiveProbNotWithUs(window, side)) return true;
-  if (modelSignalTurningAgainst(window, side)) return true;
+  if (modelSignalTurningAgainst(window, side, config)) return true;
   if (modelProbDriftAgainst(window, side, entryHeldProb, modelProbDriftPts(config))) return true;
   const conf = Number(window.confidence);
   if (Number.isFinite(minConf) && Number.isFinite(conf) && conf < minConf) return true;
@@ -1240,7 +1256,7 @@ function modelEngineClearlyWithUs({ window, direction, side, entryHeldProb, conf
   if (direction && modelDirectionAgainstHeld(direction, side)) return false;
   if (modelLiveLeanAgainstHeld(window, side, modelLiveLeanMarginPct(config))) return false;
   if (modelLiveProbNotWithUs(window, side)) return false;
-  if (modelSignalTurningAgainst(window, side)) return false;
+  if (modelSignalTurningAgainst(window, side, config)) return false;
   if (modelProbDriftAgainst(window, side, entryHeldProb, modelProbDriftPts(config))) return false;
   if (
     !modelLiveLeanStillFavors(window, side, modelLiveLeanMarginPct(config))
@@ -1248,7 +1264,12 @@ function modelEngineClearlyWithUs({ window, direction, side, entryHeldProb, conf
     return false;
   }
   const ss = window.signalScore;
-  if (ss && ss.trend === 'weakening') return false;
+  if (ss && ss.trend === 'weakening' && modelSignalScoreEnabled(config)) {
+    const nd = Number(ss.netDominance);
+    const minDom = modelSignalDominanceMin(config);
+    if (side === 'yes' && (!Number.isFinite(nd) || nd < minDom)) return false;
+    if (side === 'no' && (!Number.isFinite(nd) || nd > -minDom)) return false;
+  }
   return true;
 }
 
@@ -1281,12 +1302,11 @@ function modelEntryDumpRisk({
     return { dump: true, reason: `confidence ${Math.round(conf)}% under ${minConf}%` };
   }
 
-  // Weakening = expect dump. Steady / strengthening / missing score are fine.
-  if (ss && ss.trend === 'weakening') {
-    return { dump: true, reason: 'signalScore trend weakening — expect dump' };
-  }
+  // Signal-score weakening is exit-only (slider). Do not block entries here —
+  // it was skipping more good tickets than it saved from dumps.
+  // Mid-trade turn still uses modelSignalTurningAgainst when the slider is on.
 
-  // Fade buys the underdog on purpose — only conf + weakening above.
+  // Fade buys the underdog on purpose — conf check above; signalScore is exit-only.
   if (fade) return { dump: false };
 
   if (!Number.isFinite(heldProb)) {
@@ -1316,8 +1336,8 @@ function modelEntryDumpRisk({
   if (modelLiveProbNotWithUs(window, side) || modelLiveLeanAgainstHeld(window, side, entryMargin)) {
     return { dump: true, reason: `live lean against ${String(side).toUpperCase()}` };
   }
-  // Dominance flipped against the ticket (not merely soft).
-  if (Number.isFinite(nd)) {
+  // Dominance flipped against the ticket — only when signal-score slider is on.
+  if (modelSignalScoreEnabled(config) && Number.isFinite(nd)) {
     if (side === 'yes' && nd < -0.15) {
       return { dump: true, reason: `netDominance ${nd.toFixed(2)} against YES` };
     }
@@ -2124,6 +2144,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelLiveLeanMarginPct',
   'modelEntryLiveLeanMarginPct',
   'modelSoftLeanMarginPct',
+  'modelSignalDominanceMin',
   'modelTrailCents',
   'modelMaxAdverseCents',
   'modelHardAdverseCents',
@@ -3157,6 +3178,7 @@ class TradingBot {
       modelLiveLeanMarginPct: MODEL_LIVE_LEAN_MARGIN_DEFAULT,
       modelEntryLiveLeanMarginPct: MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT,
       modelSoftLeanMarginPct: MODEL_SOFT_LEAN_MARGIN_DEFAULT,
+      modelSignalDominanceMin: MODEL_SIGNAL_DOMINANCE_MIN_DEFAULT,
       modelTrailCents: MODEL_TRAIL_CENTS_DEFAULT,
       modelMaxAdverseCents: MODEL_MAX_ADVERSE_CENTS_DEFAULT,
       modelHardAdverseCents: MODEL_HARD_ADVERSE_CENTS_DEFAULT,
@@ -3530,6 +3552,7 @@ class TradingBot {
       autoTradeSymbols: this.config.autoTradeSymbols,
       modelMinConfidence: this.config.modelMinConfidence,
       modelEntryLiveLeanMarginPct: this.config.modelEntryLiveLeanMarginPct,
+      modelSignalDominanceMin: this.config.modelSignalDominanceMin,
       modelBankGreenCents: this.config.modelBankGreenCents,
       modelMinTpCents: this.config.modelMinTpCents,
       modelMaxLossCents: this.config.modelMaxLossCents,
@@ -9263,6 +9286,9 @@ module.exports = {
   modelLiveLeanStillFavors,
   modelLiveProbNotWithUs,
   modelSignalTurningAgainst,
+  modelSignalDominanceMin,
+  modelSignalScoreEnabled,
+  MODEL_SIGNAL_DOMINANCE_MIN_DEFAULT,
   modelProbDriftAgainst,
   modelProbDriftPts,
   modelEngineTurningAgainst,

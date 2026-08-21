@@ -6216,7 +6216,7 @@ async function testModelStrategy() {
     check(risk.dump === false, 'steady signalScore allows entry when lean is good');
   }
 
-  // Pre-entry dump: signalScore weakening even if lock still DOWN
+  // Pre-entry: signalScore weakening no longer blocks entries (exit-only when slider on)
   {
     const risk = modelEntryDumpRisk({
       window: {
@@ -6228,9 +6228,9 @@ async function testModelStrategy() {
       side: 'no',
       priceCents: 61,
       minConf: 44,
+      config: { modelSignalDominanceMin: 1 },
     });
-    check(risk.dump === true, 'weakening signalScore is dump risk');
-    check(/weakening/i.test(risk.reason || ''), 'dump reason cites weakening');
+    check(risk.dump === false, 'weakening signalScore does not block entry');
   }
 
   // +7¢+ green → TP immediately (no momentum ride / stall wait)

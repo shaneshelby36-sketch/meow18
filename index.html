@@ -410,6 +410,13 @@
             </div>
             <span class="field-hint">Live UP vs DOWN must lead by this many pts to enter. Default <strong>3</strong>. <strong>0</strong> = any lead.</span>
           </label>
+          <label>MODEL signal score strength
+            <div class="slider-row">
+              <input id="bot-model-signal-dom" type="range" min="0" max="30" step="1" />
+              <span class="slider-value" id="bot-model-signal-dom-value">—</span>
+            </div>
+            <span class="field-hint"><strong>0 = off</strong> (default). When on: exit-only — min |netDominance| while <em>weakening</em> to treat as a turn (does <strong>not</strong> block new entries). Higher = more patient.</span>
+          </label>
           <label>MODEL confirm cross (¢)
             <div class="slider-row">
               <input id="bot-model-confirm-cross" type="range" min="0" max="65" step="1" />

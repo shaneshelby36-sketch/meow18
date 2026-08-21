@@ -6,6 +6,7 @@
   "autoTradeSymbols": "BTC,SOL",
   "modelMinConfidence": 55,
   "modelEntryLiveLeanMarginPct": 3,
+  "modelSignalDominanceMin": 0,
   "modelBankGreenCents": 7,
   "modelMinTpCents": 7,
   "modelMaxLossCents": 8,

@@ -1527,6 +1527,11 @@ const SLIDER_UNITS = {
   'bot-minentries': (v) => `${Math.round(v)}¢`,
   'bot-model-confidence': (v) => `${Math.round(v)}%`,
   'bot-model-live-favor': (v) => (Number(v) <= 0 ? 'any lead' : `≥${Math.round(v)} pts`),
+  'bot-model-signal-dom': (v) => {
+    const n = Number(v);
+    if (!(n > 0)) return 'off';
+    return `on ≥${(n / 10).toFixed(1)}`;
+  },
   'bot-model-confirm-cross': (v) => (Number(v) <= 0 ? 'off' : `cross ${Math.round(v)}¢`),
   'bot-model-confirm-ext': (v) => `+${Math.round(v)}¢ max`,
   'bot-model-min-entry': (v) => `${Math.round(v)}¢`,
@@ -1611,6 +1616,13 @@ function formatSetupKnobs(s) {
   const bits = [];
   if (s.modelMinConfidence != null) bits.push(`conf ${s.modelMinConfidence}`);
   if (s.modelEntryLiveLeanMarginPct != null) bits.push(`favor ${s.modelEntryLiveLeanMarginPct}`);
+  if (s.modelSignalDominanceMin != null) {
+    bits.push(
+      Number(s.modelSignalDominanceMin) > 0
+        ? `sig≥${s.modelSignalDominanceMin}`
+        : 'sig off'
+    );
+  }
   if (s.modelMinTpCents != null) bits.push(`TP +${s.modelMinTpCents}¢`);
   if (s.modelMaxLossCents != null) bits.push(`max −${s.modelMaxLossCents}¢`);
   if (s.modelHardStopFloorCents != null) bits.push(`floor ${s.modelHardStopFloorCents}¢`);
@@ -1905,6 +1917,7 @@ function wireSliderDisplays() {
     'bot-minentries',
     'bot-model-confidence',
     'bot-model-live-favor',
+    'bot-model-signal-dom',
     'bot-model-confirm-cross',
     'bot-model-confirm-ext',
     'bot-model-min-entry',
@@ -2125,6 +2138,14 @@ async function loadBotConfigIntoForm() {
       modelLiveFavor.value =
         c.modelEntryLiveLeanMarginPct != null ? c.modelEntryLiveLeanMarginPct : 3;
     }
+    const modelSignalDom = document.getElementById('bot-model-signal-dom');
+    if (modelSignalDom) {
+      const dom =
+        c.modelSignalDominanceMin != null ? Number(c.modelSignalDominanceMin) : 0;
+      modelSignalDom.value = Math.round(
+        Math.max(0, Math.min(3, Number.isFinite(dom) ? dom : 0)) * 10
+      );
+    }
     const modelConfirmCross = document.getElementById('bot-model-confirm-cross');
     if (modelConfirmCross) {
       modelConfirmCross.value =
@@ -2226,6 +2247,7 @@ async function loadBotConfigIntoForm() {
       'bot-minentries',
       'bot-model-confidence',
       'bot-model-live-favor',
+      'bot-model-signal-dom',
       'bot-model-confirm-cross',
       'bot-model-confirm-ext',
       'bot-model-min-entry',
@@ -2385,6 +2407,11 @@ async function saveBotConfig(opts = {}) {
     modelShadowBooks: document.getElementById('bot-model-shadow-books')?.value || 'off',
     modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '55'),
     modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '3'),
+    modelSignalDominanceMin: (() => {
+      const raw = parseFloat(document.getElementById('bot-model-signal-dom')?.value || '0');
+      if (!Number.isFinite(raw) || raw <= 0) return 0;
+      return Math.round(raw) / 10;
+    })(),
     modelConfirmCrossCents: parseFloat(document.getElementById('bot-model-confirm-cross')?.value || '0'),
     modelConfirmMaxExtensionCents: parseFloat(
       document.getElementById('bot-model-confirm-ext')?.value || '15'
