@@ -573,14 +573,19 @@ function pickModelWindowKey(minutesRemaining) {
   return 'w5';
 }
 
-/** Frozen cycle call when present; else live probability lean. */
+/** Live probability lean first; frozen tracking lock only breaks ties. */
 function modelWindowDirection(window) {
   if (!window) return null;
+  const up = Number(window.probabilityUp);
+  const down = Number(window.probabilityDown);
+  if (Number.isFinite(up) && Number.isFinite(down)) {
+    if (up > down) return 'UP';
+    if (down > up) return 'DOWN';
+  }
   const locked = window.tracking && window.tracking.predictedDirection;
   if (locked === 'UP' || locked === 'DOWN') return locked;
-  const up = Number(window.probabilityUp);
-  if (!Number.isFinite(up)) return null;
-  return up >= 50 ? 'UP' : 'DOWN';
+  if (Number.isFinite(up)) return up >= 50 ? 'UP' : 'DOWN';
+  return null;
 }
 
 /**

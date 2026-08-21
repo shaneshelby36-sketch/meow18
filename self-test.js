@@ -5677,9 +5677,19 @@ async function testModelStrategy() {
     },
   };
   checkEq(pickModelWindow(asset, 12).key, 'w5', 'pick early window key');
-  checkEq(pickModelWindow(asset, 12).direction, 'UP', 'early uses locked UP');
-  checkEq(pickModelWindow(asset, 8).direction, 'DOWN', 'mid uses locked DOWN');
+  checkEq(pickModelWindow(asset, 12).direction, 'UP', 'early follows live UP (matches lock)');
+  checkEq(pickModelWindow(asset, 8).direction, 'DOWN', 'mid follows live DOWN');
   checkEq(modelWindowDirection(win(49, 60)), 'DOWN', 'live lean DOWN under 50');
+  checkEq(
+    modelWindowDirection({ ...win(25, 80), tracking: { predictedDirection: 'UP' } }),
+    'DOWN',
+    'live 75% DOWN overrides stale UP lock'
+  );
+  checkEq(
+    modelWindowDirection({ ...win(50, 80), tracking: { predictedDirection: 'DOWN' } }),
+    'DOWN',
+    '50/50 tie keeps tracking lock'
+  );
   check(modelDirectionAgainstHeld('DOWN', 'yes'), 'DOWN against YES');
   check(!modelDirectionAgainstHeld('UP', 'yes'), 'UP not against YES');
   check(isModelStrategyMode({ strategyMode: 'model' }), 'model mode helper');
@@ -6105,7 +6115,7 @@ async function testModelStrategy() {
     checkEq(trade.status, 'open', 'fade signal drop does not TP a red NO ticket');
   }
 
-  // Lock UP but live lean flipped DOWN → no entry
+  // Stale UP lock but live lean flipped DOWN → bid NO (follow live)
   {
     const closeMs = Date.now() + 12 * 60 * 1000;
     const bot = makeBot(
@@ -6114,28 +6124,28 @@ async function testModelStrategy() {
         status: 'open',
         floor_strike: 3000,
         close_time: new Date(closeMs).toISOString(),
-        yes_bid: 52,
-        yes_ask: 55,
-        no_bid: 45,
-        no_ask: 48,
+        yes_bid: 28,
+        yes_ask: 30,
+        no_bid: 68,
+        no_ask: 70,
       }),
-      { strategyMode: 'model', modelMinConfidence: 55 }
+      { strategyMode: 'model', modelMinConfidence: 55, modelMinEntryCents: 65 }
     );
     const preds = {
       ETH: {
         ready: true,
         price: 3010,
         windows: {
-          // Lock still UP; live probs already DOWN hard.
-          w5: { ...win(35, 70), tracking: { predictedDirection: 'UP' } },
+          // Lock still UP; live probs already DOWN hard (75% NO).
+          w5: { ...win(25, 80), tracking: { predictedDirection: 'UP' } },
           w10: win(40, 70),
           w15: win(45, 60),
         },
       },
     };
-    const blocked = await bot._evaluateSymbolForModel('ETH', preds);
-    checkEq(blocked, null, 'stale lock + live against → no entry');
-    check(/live lean/i.test(bot.lastDecision || ''), 'decision cites live lean disagreement');
+    const opp = await bot._evaluateSymbolForModel('ETH', preds);
+    check(opp && opp.side === 'no', 'live 75% DOWN overrides stale UP lock → NO');
+    checkEq(opp && opp.priceCents, 70, 'bids NO ask when live leans NO');
   }
 
   // Never enter above 93¢
