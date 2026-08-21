@@ -21,7 +21,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 57;
+const SETTINGS_DEFAULTS_VERSION = 58;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -866,6 +866,21 @@ function modelMinTpCents(config = {}) {
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return Math.round(n);
   return MODEL_MIN_TP_CENTS_DEFAULT;
+}
+
+/**
+ * Model TAKE_PROFIT floor: never bank a scratch under minTp (default +7¢).
+ * Rich near-certain bids (≥96¢) are always allowed.
+ */
+function modelTakeProfitMeetsFloor(trade, exitPriceCents, config = {}) {
+  const entry = Number(trade && trade.entryPriceCents);
+  const exit = Number(exitPriceCents);
+  if (!Number.isFinite(entry) || entry < 1 || !Number.isFinite(exit)) return false;
+  if (exit < entry) return false;
+  if (Math.round(exit) >= MODEL_RICH_BANK_CENTS_DEFAULT) return true;
+  const minTp = modelMinTpCents(config);
+  if (!(minTp > 0)) return exit > entry;
+  return Math.round(exit - entry) >= minTp;
 }
 
 /** Unconditional bank threshold (¢ green). 0 = only lean-exit TPs. */
@@ -2812,7 +2827,7 @@ function checkPostStopPeerCascade({
 
 /**
  * Profit split for skimMode === 'insurance':
- *   40% → Personal Wallet (locked paycheck)
+ *   40% → Personal Wallet (locked paycheck — NEVER spent on entries or losses)
  *   20% → Insurance Fund (builds until insuranceOverflowDollars soft ceiling)
  *   40% → Active Bankroll (Available Cash)
  * Soft overflow: while fund ≥ overflow, the 20% skim stays in Available instead
@@ -2821,6 +2836,8 @@ function checkPostStopPeerCascade({
  * Losses: sticky hysteresis — arm at insuranceCapDollars ($10), stay usable
  *         down to insuranceFloorDollars ($6). Absorb only while insuranceReady;
  *         below floor, disarm until balance ≥ arm again.
+ * Invariant: Personal Wallet (reserveCents) is append-only — this function
+ * never returns a lower reserve than it was given.
  */
 function applyProfitBuckets({
   pnlCents,
@@ -2831,7 +2848,8 @@ function applyProfitBuckets({
   rebuildInsurance = true,
 }) {
   const pnl = Number(pnlCents) || 0;
-  let nextReserve = Number(reserveCents) || 0;
+  const lockedReserve = Math.max(0, Math.round(Number(reserveCents) || 0));
+  let nextReserve = lockedReserve;
   let nextInsurance = Number(insuranceCents) || 0;
   const out = {
     reserveCents: nextReserve,
@@ -2848,8 +2866,14 @@ function applyProfitBuckets({
   const overflowCapCents = insuranceOverflowCents(settings);
 
   if (settings.skimMode !== 'insurance') {
-    if (pnl <= 0) return out;
-    if (settings.skimMode === 'off') return out;
+    if (pnl <= 0) {
+      out.reserveCents = lockedReserve;
+      return out;
+    }
+    if (settings.skimMode === 'off') {
+      out.reserveCents = lockedReserve;
+      return out;
+    }
     let skimmed = 0;
     if (settings.skimMode === 'fixed') {
       skimmed = Math.min(Math.round(Number(settings.skimFixedDollars || 0) * 100), pnl);
@@ -2857,7 +2881,7 @@ function applyProfitBuckets({
       skimmed = Math.round(pnl * (Number(settings.skimPercent) || 0) / 100);
     }
     out.skimmedCents = skimmed;
-    out.reserveCents = nextReserve + skimmed;
+    out.reserveCents = lockedReserve + skimmed;
     return out;
   }
 
@@ -2865,6 +2889,7 @@ function applyProfitBuckets({
 
   if (pnl < 0) {
     // Absorb uses sticky ready (not balance >= arm), so $7–$9.99 still pays.
+    // Wallet is never drawn — only Insurance (when ready).
     if (ready && nextInsurance > 0) {
       const loss = -pnl;
       const drawn = Math.min(nextInsurance, loss);
@@ -2872,10 +2897,12 @@ function applyProfitBuckets({
       out.insuranceDrawnCents = drawn;
       out.insuranceCents = nextInsurance;
     }
+    out.reserveCents = lockedReserve;
     out.insuranceReady = syncInsuranceReady(nextInsurance, ready, armCents, floorCents);
     return out;
   }
   if (pnl === 0) {
+    out.reserveCents = lockedReserve;
     out.insuranceReady = ready;
     return out;
   }
@@ -2893,7 +2920,7 @@ function applyProfitBuckets({
   out.skimmedCents = wallet;
   out.insuranceAddedCents = insuranceAdd;
   out.insuranceOverflowCents = overflowAdd;
-  out.reserveCents = nextReserve + wallet;
+  out.reserveCents = lockedReserve + wallet;
   out.insuranceCents = nextInsurance;
   out.insuranceReady = syncInsuranceReady(nextInsurance, ready, armCents, floorCents);
   return out;
@@ -4152,6 +4179,7 @@ class TradingBot {
    * Cash the bot may spend on a *new* entry: Available only (never Wallet /
    * Insurance). Live also caps at Kalshi cash so we don't overdraft the API.
    * Insurance may still absorb *losses* when armed — that is separate.
+   * Personal Wallet is never spendable here (or anywhere else).
    */
   _tradingSpendableCents() {
     const capital = this._capitalStatus();
@@ -4647,19 +4675,22 @@ class TradingBot {
    * win from the start, until the soft overflow ceiling ($15). Excess 20% →
    * Available. Arm at $10 (sticky ready); stay usable down to $6 floor.
    * Until armed, losses hit Available; while ready, Insurance absorbs first.
+   * Personal Wallet is append-only — never spent on entries or losses.
    */
   _applyReserveFlow(trade) {
     const pnlCents = Number(trade.pnlCents) || 0;
+    const beforeWallet = Math.max(0, Math.round(Number(this.ledger.reserveCents) || 0));
 
     const flow = applyProfitBuckets({
       pnlCents,
-      reserveCents: this.ledger.reserveCents || 0,
+      reserveCents: beforeWallet,
       insuranceCents: this.ledger.insuranceCents || 0,
       insuranceReady: !!this.ledger.insuranceReady,
       settings: this.config,
       rebuildInsurance: true, // keep building until soft overflow ceiling
     });
-    this.ledger.reserveCents = flow.reserveCents;
+    // Hard lock: wallet can only stay flat or grow — never shrink.
+    this.ledger.reserveCents = Math.max(beforeWallet, Math.round(Number(flow.reserveCents) || 0));
     this.ledger.insuranceCents = flow.insuranceCents;
     this.ledger.insuranceReady = !!flow.insuranceReady;
     trade.skimmedCents = flow.skimmedCents;
@@ -4667,7 +4698,8 @@ class TradingBot {
     trade.insuranceOverflowCents = flow.insuranceOverflowCents;
     trade.insuranceDrawnCents = flow.insuranceDrawnCents;
     trade.insuranceReleasedCents = flow.insuranceReleasedCents;
-    trade.reserveDrawnCents = flow.insuranceDrawnCents;
+    // Legacy field name — insurance draw only; wallet is never drawn.
+    trade.reserveDrawnCents = 0;
   }
 
   _withTradeLock(fn) {
@@ -5400,6 +5432,25 @@ class TradingBot {
       ) {
         this.lastDecision =
           `Blocked fake ${reason} on ${trade.symbol}: bid ${Math.round(bookedExit)}¢ is below entry ${Math.round(entryPx)}¢ — holding.`;
+        return false;
+      }
+      // Model: never book TAKE_PROFIT under minTp (default +7¢). Blocks soft-lean
+      // scratches like 85→87 that used to label as TP for a few cents of edge.
+      if (
+        reason === 'take_profit' &&
+        isModelTrade(trade) &&
+        !modelTakeProfitMeetsFloor(trade, bookedExit, this.config)
+      ) {
+        const minTp = modelMinTpCents(this.config);
+        const green = Number.isFinite(entryPx) && Number.isFinite(bookedExit)
+          ? Math.round(bookedExit - entryPx)
+          : null;
+        this.lastDecision =
+          `Blocked micro take_profit on ${trade.symbol}: ` +
+          `${Number.isFinite(entryPx) ? Math.round(entryPx) : '?'}→` +
+          `${Number.isFinite(bookedExit) ? Math.round(bookedExit) : '?'}¢` +
+          (green != null ? ` (+${green}¢)` : '') +
+          ` — need ≥+${minTp}¢ green (or ≥${MODEL_RICH_BANK_CENTS_DEFAULT}¢). Holding.`;
         return false;
       }
       const isLive = this._isLiveTrade(trade);
@@ -6640,6 +6691,7 @@ class TradingBot {
         modelLateExtendOk(picked.window, trade.side, this.config)
       );
       if (inLateBarrier && bidOk && !canExtendLate) {
+        // Late forced exit: only label take_profit when minTp is met; else model_late_exit.
         const reason = flatOrGreen
           ? isDecentGreen || isBankableGreen
             ? 'take_profit'
@@ -6647,7 +6699,13 @@ class TradingBot {
               ? 'breakeven'
               : 'model_late_exit'
           : 'model_late_exit';
-        await this._closePosition(trade, heldSideBidCents, reason, {
+        const lateReason =
+          reason === 'take_profit' && !modelTakeProfitMeetsFloor(trade, heldSideBidCents, this.config)
+            ? exactlyFlat
+              ? 'breakeven'
+              : 'model_late_exit'
+            : reason;
+        await this._closePosition(trade, heldSideBidCents, lateReason, {
           liveSellPriceCents: heldSideBidCents,
         });
         return;
@@ -6667,7 +6725,11 @@ class TradingBot {
         const redCents = underwater ? adverseCents : 0;
         if (redCents <= settleCloseThresh) {
           const reason = flatOrGreen
-            ? 'take_profit'
+            ? isBankableGreen || isDecentGreen
+              ? 'take_profit'
+              : exactlyFlat
+                ? 'breakeven'
+                : 'model_late_exit'
             : exactlyFlat
               ? 'breakeven'
               : 'model_late_exit';
@@ -6687,14 +6749,14 @@ class TradingBot {
         return;
       }
 
-      // Follow the bid from a solid green (+5¢). Bank when it stalls
-      // (2¢ off peak, or ~8s flat). Never TP if the ticket is red.
+      // Follow the bid from trail arm (+5¢). Bank on stall only if still ≥ minTp
+      // (default +7¢) — never scratch a +2/+4 "TP". Unconditional bank at bankGreen.
       const armCents = modelTrailArmCents(this.config);
       const armed = flatOrGreen && greenCents >= armCents;
       const priceStalled =
         (stallPullback > 0 && pullback >= stallPullback) ||
         (stallMs > 0 && peakAgeMs >= stallMs);
-      if (bidOk && armed && priceStalled) {
+      if (bidOk && armed && priceStalled && isBankableGreen && heldForBank) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
         });
@@ -6702,14 +6764,14 @@ class TradingBot {
       }
       if (bidOk && armed && !priceStalled) {
         const holdMsg =
-          `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — following, TP on a small stall or at +${bankGreen}¢.`;
+          `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — following, TP on a stall at ≥+${minTp}¢ or bank at +${bankGreen}¢.`;
         trade.holdReason = holdMsg;
         this.lastDecision = holdMsg;
         return;
       }
 
-      // Weak-conf lean-exit leftover: only if still green/flat and not already cut above.
-      if (bidOk && leanExit && heldLongEnough && isBankableGreen) {
+      // Weak-conf lean-exit leftover: only real bankable green (never micro TP).
+      if (bidOk && leanExit && heldLongEnough && isBankableGreen && heldForBank) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
         });
@@ -9633,6 +9695,7 @@ module.exports = {
   modelShouldLeanStopRed,
   modelLeanStopBarrierCents,
   modelMinTpCents,
+  modelTakeProfitMeetsFloor,
   modelBankGreenCents,
   modelTrailArmCents,
   modelSettleCloseMinutes,

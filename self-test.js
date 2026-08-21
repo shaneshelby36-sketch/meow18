@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, scoreModelSetupsAgainstLog, modelSetupById, MODEL_SETUPS, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelEngineClearlyWithUs, modelPriceAllowed, modelLowAskConvictionGate, checkModelPostExitCooldown, modelSignalDropCents, modelAdverseExitFillCents, modelEffectiveMaxLossCents, modelOnPaceBelowBarrier, modelShouldLeanStopRed, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT, MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT, modelSideSwitchConfirmMs, modelSideSwitchConfirmTicks, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_ARM_CENTS_DEFAULT, MODEL_MOMENTUM_STALL_MS_DEFAULT, MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel, summarizeLedgerCapital, rebuildLedgerSkimFromTrades, MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT, isForceRetryExitReason } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, scoreModelSetupsAgainstLog, modelSetupById, MODEL_SETUPS, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelEngineClearlyWithUs, modelPriceAllowed, modelLowAskConvictionGate, checkModelPostExitCooldown, modelSignalDropCents, modelAdverseExitFillCents, modelEffectiveMaxLossCents, modelOnPaceBelowBarrier, modelShouldLeanStopRed, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT, MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT, modelSideSwitchConfirmMs, modelSideSwitchConfirmTicks, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_ARM_CENTS_DEFAULT, MODEL_MOMENTUM_STALL_MS_DEFAULT, MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, modelTakeProfitMeetsFloor, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel, summarizeLedgerCapital, rebuildLedgerSkimFromTrades, MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT, isForceRetryExitReason } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -2174,6 +2174,35 @@ async function testBotTradingFlow() {
     checkEq(absorbAtArm.insuranceCents, 200, 'at arm: insurance reduced');
     checkEq(absorbAtArm.insuranceReady, false, 'drawn below floor → not ready');
     checkEq(absorbAtArm.reserveCents, 400, 'wallet untouched by loss');
+
+    // Wallet append-only across win → loss → win
+    let walletLock = 0;
+    const w1 = applyProfitBuckets({
+      pnlCents: 1000,
+      reserveCents: walletLock,
+      insuranceCents: 0,
+      insuranceReady: false,
+      settings: insSettings,
+    });
+    walletLock = w1.reserveCents;
+    checkEq(walletLock, 400, 'win locks 40% into wallet');
+    const lossHit = applyProfitBuckets({
+      pnlCents: -500,
+      reserveCents: walletLock,
+      insuranceCents: w1.insuranceCents,
+      insuranceReady: w1.insuranceReady,
+      settings: insSettings,
+    });
+    checkEq(lossHit.reserveCents, walletLock, 'loss never debits wallet');
+    const w2 = applyProfitBuckets({
+      pnlCents: 500,
+      reserveCents: lossHit.reserveCents,
+      insuranceCents: lossHit.insuranceCents,
+      insuranceReady: lossHit.insuranceReady,
+      settings: insSettings,
+    });
+    check(w2.reserveCents > walletLock, 'next win only adds to wallet');
+    checkEq(w2.reserveCents, walletLock + 200, 'wallet grows by 40% of second win');
 
     // Absorb at $8 while ready (hysteresis band)
     const absorbMid = applyProfitBuckets({
@@ -5940,6 +5969,21 @@ async function testModelStrategy() {
   checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 7, 'bank / momentum arm at ≥7¢ green');
   checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 7, 'min TP 7¢ — no micro banks');
   checkEq(MODEL_TRAIL_ARM_CENTS_DEFAULT, 5, 'trail arm at ≥5¢ green');
+  checkEq(
+    modelTakeProfitMeetsFloor({ entryPriceCents: 85 }, 87, { modelMinTpCents: 7 }),
+    false,
+    '85→87 blocked as micro TP'
+  );
+  checkEq(
+    modelTakeProfitMeetsFloor({ entryPriceCents: 85 }, 92, { modelMinTpCents: 7 }),
+    true,
+    '85→92 (+7) allowed'
+  );
+  checkEq(
+    modelTakeProfitMeetsFloor({ entryPriceCents: 85 }, 96, { modelMinTpCents: 7 }),
+    true,
+    'rich 96¢ always allowed'
+  );
   checkEq(MODEL_MOMENTUM_STALL_MS_DEFAULT, 8_000, 'stall flat ~8s');
   checkEq(MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, 2, 'stall pullback 2¢');
   checkEq(MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, 0, 'model late entry cutoff off');
@@ -6476,8 +6520,8 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, stillUp);
-    checkEq(trade.exitReason, 'take_profit', '+7¢ with 1¢ pullback from peak → TP');
-    checkEq(trade.exitPriceCents, 63, 'stall TP at live bid');
+    checkEq(trade.exitReason, 'take_profit', '+8¢ (≥ bank green / minTp) → TP');
+    checkEq(trade.exitPriceCents, 63, 'TP at live bid');
   }
 
   // 96¢ held bid banks immediately
@@ -6514,7 +6558,7 @@ async function testModelStrategy() {
     checkEq(trade.exitPriceCents, 96, 'rich TP at 96¢');
   }
 
-  // 52¢ entry: +6¢ then 2¢ off peak → TP (does not wait for +7)
+  // 52¢ entry: +4¢ after peak — under minTp, must NOT micro-TP on stall
   {
     const now = Date.now();
     const bot = makeBot(
@@ -6528,6 +6572,7 @@ async function testModelStrategy() {
         strategyMode: 'model',
         modelMinHoldSeconds: 0,
         modelBankGreenCents: 7,
+        modelMinTpCents: 7,
         modelMomentumStallSeconds: 30,
         modelMomentumPullbackCents: 2,
       }
@@ -6552,8 +6597,7 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'take_profit', '52→58 peak then 56 (2¢ stall at +4) banks without +7');
-    checkEq(trade.exitPriceCents, 56, 'stricter-stall TP at live bid');
+    checkEq(trade.status, 'open', '52→56 (+4¢) stall does not micro-TP under +7 minTp');
   }
 
   // Mid underwater with firm lean: deep red stops via fast-red / dump cut
@@ -6877,7 +6921,7 @@ async function testModelStrategy() {
     checkEq(trade.exitReason, 'model_lean_stop', 'red + live lean against stops ASAP');
   }
 
-  // Green + engine against → bank immediately (don't wait for stall / +7)
+  // Green + engine against but under minTp → hold (no micro TP)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -6887,7 +6931,7 @@ async function testModelStrategy() {
         yes_bid: 57,
         no_bid: 43,
       }),
-      { strategyMode: 'model', modelMinHoldSeconds: 0 }
+      { strategyMode: 'model', modelMinHoldSeconds: 0, modelMinTpCents: 7 }
     );
     const trade = openTrade(bot, {
       strategy: 'model',
@@ -6908,8 +6952,7 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'take_profit', 'engine against + small green banks now');
-    checkEq(trade.exitPriceCents, 57, 'banks the green bid');
+    checkEq(trade.status, 'open', 'engine against + only +2¢ green does not micro-TP');
   }
 
   // Fade hold is supposed to sit against the lock — no lean-stop
@@ -7054,7 +7097,7 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'take_profit', 'signalScore weakening banks green preemptive');
+    checkEq(trade.status, 'open', 'signalScore weakening + only +2¢ does not micro-TP');
   }
 
   // Held-side prob drift from entry → exit before deep red
@@ -7093,7 +7136,7 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'take_profit', 'held-side prob drift banks before dump');
+    checkEq(trade.status, 'open', 'held-side prob drift + only +2¢ does not micro-TP');
   }
 
   // Green +7¢ + lean against → bank now (don't sit for more)
@@ -7436,7 +7479,7 @@ async function testModelStrategy() {
     checkEq(trade.exitPriceCents, 70, 'fast red fills at live bid');
   }
 
-  // Soft lean + still green → bank preemptive (don't wait for 84→68)
+  // Soft lean + still green under minTp → hold (don't scratch 84→86 as TP)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7446,7 +7489,7 @@ async function testModelStrategy() {
         yes_bid: 86,
         no_bid: 14,
       }),
-      { strategyMode: 'model', modelMinHoldSeconds: 0 }
+      { strategyMode: 'model', modelMinHoldSeconds: 0, modelMinTpCents: 7 }
     );
     const trade = openTrade(bot, {
       strategy: 'model',
@@ -7468,8 +7511,7 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'take_profit', 'soft lean + green banks preemptive');
-    checkEq(trade.exitPriceCents, 86, 'preemptive bank at live green bid');
+    checkEq(trade.status, 'open', 'soft lean + only +2¢ green does not micro-TP');
   }
 
   // Green +7¢ + lean against → TP (real bank)

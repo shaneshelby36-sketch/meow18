@@ -15,10 +15,16 @@ function priceInCents(legacyCents, dollarValue) {
   // prefer a fake 0¢ bid over a valid dollar-string quote.
   if (legacyCents != null && legacyCents !== '') {
     const legacy = Number(legacyCents);
-    if (Number.isFinite(legacy)) return Math.round(legacy);
+    if (Number.isFinite(legacy)) {
+      const cents = Math.round(legacy);
+      // Kalshi uses 0 for "no quote" on empty books — not a tradable 0¢.
+      return cents >= 1 ? cents : null;
+    }
   }
   const dollars = Number.parseFloat(dollarValue);
-  return Number.isFinite(dollars) ? Math.round(dollars * 100) : null;
+  if (!Number.isFinite(dollars)) return null;
+  const cents = Math.round(dollars * 100);
+  return cents >= 1 ? cents : null;
 }
 
 function parseMarketCloseMs(market) {
@@ -69,15 +75,50 @@ function sizeFromFp(legacy, fpValue) {
   return Number.isFinite(fp) && fp >= 0 ? Math.floor(fp) : null;
 }
 
+function clampQuoteCents(n) {
+  if (!Number.isFinite(n)) return null;
+  const c = Math.round(n);
+  if (c < 1 || c > 99) return null;
+  return c;
+}
+
 function normalizeMarketPrices(market) {
   if (!market) return market;
+  let yes_bid = priceInCents(market.yes_bid, market.yes_bid_dollars);
+  let yes_ask = priceInCents(market.yes_ask, market.yes_ask_dollars);
+  let no_bid = priceInCents(market.no_bid, market.no_bid_dollars);
+  let no_ask = priceInCents(market.no_ask, market.no_ask_dollars);
+  const last_price = priceInCents(market.last_price, market.last_price_dollars);
+
+  // Fill missing YES from the NO book (and vice versa). Thin 15m books often
+  // publish only one side; complement keeps entries from dying as "no quote".
+  if (yes_bid == null && no_ask != null) yes_bid = clampQuoteCents(100 - no_ask);
+  if (yes_ask == null && no_bid != null) yes_ask = clampQuoteCents(100 - no_bid);
+  if (no_bid == null && yes_ask != null) no_bid = clampQuoteCents(100 - yes_ask);
+  if (no_ask == null && yes_bid != null) no_ask = clampQuoteCents(100 - yes_bid);
+
+  // Last trade can patch a single missing side when the book is one-sided.
+  if (yes_bid == null && yes_ask != null && last_price != null && last_price <= yes_ask) {
+    yes_bid = last_price;
+  }
+  if (yes_ask == null && yes_bid != null && last_price != null && last_price >= yes_bid) {
+    yes_ask = last_price;
+  }
+  if (yes_bid != null && yes_ask != null && yes_bid > yes_ask) {
+    // Crossed after complement — prefer the tighter last/mid if available.
+    if (last_price != null && last_price >= 1 && last_price <= 99) {
+      yes_bid = Math.min(yes_bid, last_price);
+      yes_ask = Math.max(yes_ask, last_price);
+    }
+  }
+
   return {
     ...market,
-    yes_bid: priceInCents(market.yes_bid, market.yes_bid_dollars),
-    yes_ask: priceInCents(market.yes_ask, market.yes_ask_dollars),
-    no_bid: priceInCents(market.no_bid, market.no_bid_dollars),
-    no_ask: priceInCents(market.no_ask, market.no_ask_dollars),
-    last_price: priceInCents(market.last_price, market.last_price_dollars),
+    yes_bid,
+    yes_ask,
+    no_bid,
+    no_ask,
+    last_price,
     yes_ask_size: sizeFromFp(market.yes_ask_size, market.yes_ask_size_fp),
     no_ask_size: sizeFromFp(market.no_ask_size, market.no_ask_size_fp),
     yes_bid_size: sizeFromFp(market.yes_bid_size, market.yes_bid_size_fp),
@@ -85,7 +126,7 @@ function normalizeMarketPrices(market) {
   };
 }
 
-/** List payloads often omit quotes — entry needs a real two-sided book. */
+/** List/ticker payloads need a real (or complemented) two-sided YES book. */
 function marketHasUsableTwoSidedQuote(market) {
   if (!market || typeof market !== 'object') return false;
   const yesBid = Number(market.yes_bid);

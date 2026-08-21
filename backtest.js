@@ -470,7 +470,7 @@ function backtestWithSettings(
         insuranceDrawnCents: flow.insuranceDrawnCents,
         insuranceOverflowCents: flow.insuranceOverflowCents,
         insuranceReleasedCents: flow.insuranceReleasedCents,
-        reserveDrawnCents: flow.insuranceDrawnCents,
+        reserveDrawnCents: 0,
         closedAt: minute,
       });
       openTrades.splice(t, 1);
@@ -808,7 +808,7 @@ function backtestWithSettings(
       insuranceDrawnCents: flow.insuranceDrawnCents,
       insuranceOverflowCents: flow.insuranceOverflowCents,
       insuranceReleasedCents: flow.insuranceReleasedCents,
-      reserveDrawnCents: flow.insuranceDrawnCents,
+      reserveDrawnCents: 0,
       closedAt: endMinute,
     });
   }
