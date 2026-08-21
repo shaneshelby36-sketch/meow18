@@ -1106,6 +1106,13 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
         Number.isFinite(t.feesCents) && t.feesCents > 0
           ? ` · fees $${(t.feesCents / 100).toFixed(2)}`
           : '';
+      const gross =
+        Number.isFinite(t.pnlGrossCents) &&
+        Number.isFinite(t.feesCents) &&
+        t.feesCents > 0 &&
+        t.pnlGrossCents !== t.pnlCents
+          ? ` · gross $${(t.pnlGrossCents / 100).toFixed(2)}`
+          : '';
       const conf = Number.isFinite(t.engineConfidence) ? ` · conf ${t.engineConfidence}%` : '';
       let stopNote = '';
       let stopCopy = '';
@@ -1136,6 +1143,7 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
         Number.isFinite(t.stakeDollars) ? `$${Number(t.stakeDollars).toFixed(2)}` : null,
         conf ? conf.replace(/^\s·\s/, '') : null,
         fees ? fees.replace(/^\s·\s/, '') : null,
+        gross ? gross.replace(/^\s·\s/, '') : null,
         skim ? skim.replace(/^\s·\s/, '') : null,
         `opened ${formatTradeTime(t.openedAt)}${t.mode ? ` · ${t.mode}` : ''}`,
         stopCopy || null,
@@ -1149,7 +1157,7 @@ function buildTradeLogHtml(tradeLog, tradeLogTotal) {
           <span class="bot-log-msg">
             <strong>${t.symbol || '?'} ${side}</strong>
             ${status} · ${entry}${t.status === 'closed' ? ` → ${exit}` : ''}
-            ${Number.isFinite(t.stakeDollars) ? ` · $${Number(t.stakeDollars).toFixed(2)}` : ''}${conf}${fees}${skim}
+            ${Number.isFinite(t.stakeDollars) ? ` · $${Number(t.stakeDollars).toFixed(2)}` : ''}${conf}${fees}${gross}${skim}
             <span class="bot-log-sub">opened ${formatTradeTime(t.openedAt)}${t.mode ? ` · ${t.mode}` : ''}</span>
             ${stopNote}
           </span>
@@ -1404,6 +1412,11 @@ function buildCapitalLedgerHtml(capital, opts = {}) {
   const reservedClass = reserved > 0 ? 'chip-positive' : '';
   const insuranceClass = insurance > 0 ? 'chip-positive' : '';
   const readyLabel = insuranceReady ? ' · armed' : '';
+  const liveCash = Number(capital.liveAvailableCents);
+  const hasLiveCash = Number.isFinite(liveCash);
+  const liveGap = hasLiveCash ? liveCash - available : null;
+  const liveGapClass =
+    liveGap == null ? '' : liveGap > 0 ? 'chip-positive' : liveGap < 0 ? 'chip-negative' : '';
   const depositBlock = depositControls
     ? `<div class="insurance-deposit-row">
         <input id="bot-insurance-deposit" type="number" min="0.01" max="500" step="0.01" inputmode="decimal" placeholder="Amount $" aria-label="Insurance deposit dollars" />
@@ -1411,6 +1424,12 @@ function buildCapitalLedgerHtml(capital, opts = {}) {
       </div>
       <p class="field-hint insurance-deposit-hint">Seed or top up with your own money (external — does not take from Available). Max $500 per add.</p>
       <p class="settings-hint" id="bot-insurance-deposit-feedback" role="status" aria-live="polite"></p>`
+    : '';
+
+  const liveBlock = hasLiveCash
+    ? `<div class="capital-row"><span>Kalshi cash <em>(API balance)</em></span><span>${formatMoneyCents(liveCash)}</span></div>
+      <div class="capital-row"><span>Bot Available vs Kalshi</span><span class="${liveGapClass}">${formatMoneyCents(liveGap, { signed: true })}</span></div>
+      <div class="capital-divider"></div>`
     : '';
 
   return `
@@ -1426,14 +1445,15 @@ function buildCapitalLedgerHtml(capital, opts = {}) {
       </div>
       ${depositBlock}
       <div class="capital-divider"></div>
+      ${liveBlock}
       <div class="capital-row"><span>Starting Bankroll</span><span>${formatMoneyCents(starting)}</span></div>
       ${deposited > 0 ? `<div class="capital-row"><span>Insurance deposits <em>(manual)</em></span><span>${formatMoneyCents(deposited)}</span></div>` : ''}
       <div class="capital-row"><span>Available Cash</span><span>${formatMoneyCents(available)}</span></div>
       <div class="capital-row"><span>Open Positions Value</span><span>${formatMoneyCents(openPositions)}</span></div>
       <div class="capital-divider"></div>
       <div class="capital-row capital-total"><span>Total Equity</span><span>${formatMoneyCents(totalEquity)}</span></div>
-      <div class="capital-row capital-pnl"><span>Net P&amp;L</span><span class="${pnlClass}">${formatMoneyCents(netPnl, { signed: true })}</span></div>
-      <p class="capital-formula">Insurance: every win is 20% Insurance / 40% Wallet / 40% Available. Arms at ${formatMoneyCents(insuranceCap)}; stays usable down to ${formatMoneyCents(insuranceFloor)}. Soft fill ceiling ${formatMoneyCents(insuranceOverflow)} — excess 20% skim → Available (fund stays as cushion). Below the floor, Available takes losses until re-armed. Manual Add seeds without touching Available. Available = Starting + all closed PnL − Wallet − Insurance − Open (12h trade rotation no longer drops PnL from this math).</p>
+      <div class="capital-row capital-pnl"><span>Net P&amp;L <em>(fee-net)</em></span><span class="${pnlClass}">${formatMoneyCents(netPnl, { signed: true })}</span></div>
+      <p class="capital-formula">Closed P&amp;L is fee-net so Available tracks Kalshi cash closer (gross − fees). Insurance: every win is 20% Insurance / 40% Wallet / 40% Available. Arms at ${formatMoneyCents(insuranceCap)}; stays usable down to ${formatMoneyCents(insuranceFloor)}. Soft fill ceiling ${formatMoneyCents(insuranceOverflow)} — excess 20% skim → Available (fund stays as cushion). Below the floor, Available takes losses until re-armed. Manual Add seeds without touching Available.</p>
     </div>`;
 }
 

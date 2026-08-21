@@ -1371,8 +1371,8 @@ const SETTLE_TOUCHED90_HOLD_MINUTES = 3.5;
 /** Settle weak-ticket confirm: once held bid tags this, lean-switch exit turns off. */
 const SETTLE_WEAK_CONFIRM_CENTS = 80;
 
-/** After a live IOC miss, skip that coin+side this long before retrying (default 7s). */
-const ENTRY_MISS_COOLDOWN_MS = 7_000;
+/** After a live IOC miss, skip that coin+side this long before retrying (default 3.5s). */
+const ENTRY_MISS_COOLDOWN_MS = 3_500;
 
 function entryMissKey(symbol, side = null) {
   const sym = String(symbol || '').toUpperCase();
@@ -4443,13 +4443,45 @@ class TradingBot {
   }
 
   /**
-   * Trade PnL in cents: (exit − entry) × contracts.
-   * Matches Kalshi's trade PnL (price improvement included). Fees are tracked
-   * separately for the activity note — do not subtract here (v1.2.29 fee-aware
-   * netting under-reported real wins vs Kalshi, e.g. ETH $3.42 vs $4.57).
-   * entryFeesCents / exitFeesCents kept for call-site compat; ignored.
+   * Standard Kalshi taker fee estimate (cents): ceil(0.07 × C × P × (1−P) × 100).
+   * Used when the order payload omits fee fields so cash P&L still tracks Kalshi.
    */
-  _netPnlCents(entryCents, exitCents, contracts, _entryFeesCents = 0, _exitFeesCents = 0) {
+  _estimateTakerFeesCents(priceCents, contracts) {
+    const C = Math.max(0, Math.floor(Number(contracts) || 0));
+    const cents = Math.round(Number(priceCents) || 0);
+    if (C < 1 || cents < 1 || cents > 99) return 0;
+    const P = cents / 100;
+    const dollars = 0.07 * C * P * (1 - P);
+    return Math.max(0, Math.ceil(dollars * 100 - 1e-9));
+  }
+
+  /**
+   * Prefer fees reported on the order; otherwise estimate taker fees from fill price/size.
+   */
+  _resolveOrderFeesCents(order, priceCents, contracts) {
+    const reported = this._orderFeesCents(order);
+    if (reported > 0) return reported;
+    const filled = this._orderFillCount(order);
+    const n = filled > 0 ? filled : Math.max(0, Math.floor(Number(contracts) || 0));
+    return this._estimateTakerFeesCents(priceCents, n);
+  }
+
+  /**
+   * Cash-aligned trade PnL in cents: (exit − entry) × contracts − fees.
+   * Kalshi's per-trade UI often shows gross price PnL; cash / available moves fee-net.
+   * pnlGrossCents is stored separately on the trade for display.
+   */
+  _netPnlCents(entryCents, exitCents, contracts, entryFeesCents = 0, exitFeesCents = 0) {
+    const n = Math.max(0, Math.floor(Number(contracts) || 0));
+    const entry = Number(entryCents) || 0;
+    const exit = Number(exitCents) || 0;
+    const fees =
+      Math.max(0, Math.round(Number(entryFeesCents) || 0)) +
+      Math.max(0, Math.round(Number(exitFeesCents) || 0));
+    return (exit - entry) * n - fees;
+  }
+
+  _grossPnlCents(entryCents, exitCents, contracts) {
     const n = Math.max(0, Math.floor(Number(contracts) || 0));
     const entry = Number(entryCents) || 0;
     const exit = Number(exitCents) || 0;
@@ -4875,6 +4907,7 @@ class TradingBot {
       entryFeesCents: entryFeesSlice,
       exitFeesCents: exitFees,
       feesCents,
+      pnlGrossCents: this._grossPnlCents(entry, exitPx, sold),
       pnlCents: this._netPnlCents(entry, exitPx, sold, entryFeesSlice, exitFees),
       liveOrderId: trade.liveOrderId || null,
       liveExitOrderId: orderId || null,
@@ -4892,7 +4925,7 @@ class TradingBot {
       feesCents > 0 ? ` · fees $${(feesCents / 100).toFixed(2)}` : '';
     this.lastDecision =
       `Partial exit ${trade.symbol} ${String(trade.side).toUpperCase()}: sold ${sold} @ ${exitPx}¢ ` +
-      `(P&L $${(closedSlice.pnlCents / 100).toFixed(2)}${feeNote}); ${remaining} still open.`;
+      `(cash P&L $${(closedSlice.pnlCents / 100).toFixed(2)}${feeNote}); ${remaining} still open.`;
     this._logActivity(this.lastDecision, {
       kind: 'close',
       symbol: trade.symbol,
@@ -4919,6 +4952,7 @@ class TradingBot {
       status: 'closed',
       exitReason: closedSlice.exitReason,
       pnlCents: closedSlice.pnlCents,
+      pnlGrossCents: closedSlice.pnlGrossCents || 0,
       feesCents: closedSlice.feesCents || 0,
       entryFeesCents: closedSlice.entryFeesCents || 0,
       exitFeesCents: closedSlice.exitFeesCents || 0,
@@ -4998,10 +5032,10 @@ class TradingBot {
           return false;
         }
 
-        // Cash-outs / stops: up to 3 IOC sells in one call (−1¢ each, re-quote bid)
+        // Cash-outs / stops: up to 4 IOC sells in one call (−1¢ each, re-quote bid)
         // so a miss does not leave inventory sitting until the signal clears.
         const forceRetry = isForceRetryExitReason(reason);
-        const maxAttempts = forceRetry ? 3 : 1;
+        const maxAttempts = forceRetry ? 4 : 2;
         let lastErr = null;
         let soldOk = false;
         let workingBase = baseSellPrice;
@@ -5017,7 +5051,7 @@ class TradingBot {
             } catch {
               /* keep prior base */
             }
-            await this._sleep(120);
+            await this._sleep(70);
           }
           const sellPrice = Math.max(1, Math.min(99, workingBase - attempt));
           bookedExit = sellPrice;
@@ -5072,7 +5106,7 @@ class TradingBot {
                 exitPx,
                 reason,
                 orderId,
-                this._orderFeesCents(fill.order)
+                this._resolveOrderFeesCents(fill.order, exitPx, filled)
               );
               lastErr = new Error(
                 `sell partially filled (got ${filled}/${filled + trade.contracts}, status ${
@@ -5099,7 +5133,11 @@ class TradingBot {
               bookedExit = avg;
             } else bookedExit = sellPrice;
             trade.liveExitOrderId = orderId;
-            trade.exitFeesCents = this._orderFeesCents(fill.order);
+            trade.exitFeesCents = this._resolveOrderFeesCents(
+              fill.order,
+              bookedExit,
+              trade.contracts
+            );
             soldOk = true;
             break;
           } catch (err) {
@@ -5158,6 +5196,11 @@ class TradingBot {
       const entryFees = Math.max(0, Math.round(Number(trade.entryFeesCents) || 0));
       const exitFees = Math.max(0, Math.round(Number(trade.exitFeesCents) || 0));
       trade.feesCents = entryFees + exitFees;
+      trade.pnlGrossCents = this._grossPnlCents(
+        trade.entryPriceCents,
+        bookedExit,
+        trade.contracts
+      );
       trade.pnlCents = this._netPnlCents(
         trade.entryPriceCents,
         bookedExit,
@@ -5171,7 +5214,11 @@ class TradingBot {
 
       const feeNote =
         trade.feesCents > 0 ? ` · fees $${(trade.feesCents / 100).toFixed(2)}` : '';
-      let decision = `Closed ${trade.symbol} ${String(trade.side).toUpperCase()} via ${reason} at ${bookedExit}¢ (P&L $${(trade.pnlCents / 100).toFixed(2)}${feeNote}).`;
+      const grossNote =
+        trade.feesCents > 0 && trade.pnlGrossCents !== trade.pnlCents
+          ? ` · gross $${(trade.pnlGrossCents / 100).toFixed(2)}`
+          : '';
+      let decision = `Closed ${trade.symbol} ${String(trade.side).toUpperCase()} via ${reason} at ${bookedExit}¢ (cash P&L $${(trade.pnlCents / 100).toFixed(2)}${grossNote}${feeNote}).`;
       if (trade.insuranceDrawnCents > 0) {
         decision += ` Insurance absorbed $${(trade.insuranceDrawnCents / 100).toFixed(2)}.`;
       }
@@ -5214,6 +5261,7 @@ class TradingBot {
         status: 'closed',
         exitReason: trade.exitReason,
         pnlCents: trade.pnlCents,
+        pnlGrossCents: trade.pnlGrossCents || 0,
         feesCents: trade.feesCents || 0,
         entryFeesCents: trade.entryFeesCents || 0,
         exitFeesCents: trade.exitFeesCents || 0,
@@ -6791,8 +6839,8 @@ class TradingBot {
     }
 
     if (this.config.mode === 'live' && !this._inShadow) {
-      // MODEL default 3 IOC tries; settle/edge default 2. Re-quote + chase ask.
-      // Pass entryAttempts to override (cap 3).
+      // MODEL default 4 IOC tries; settle/edge default 2. Re-quote + chase ask.
+      // Pass entryAttempts to override (cap 5).
       let filled = 0;
       let fill = null;
       let orderId = null;
@@ -6802,13 +6850,13 @@ class TradingBot {
       const rawAttempts = Number(entryAttempts);
       const maxEntryAttempts =
         Number.isFinite(rawAttempts) && rawAttempts > 0
-          ? Math.min(3, Math.floor(rawAttempts))
+          ? Math.min(5, Math.floor(rawAttempts))
           : isModel
-            ? 3
+            ? 4
             : 2;
 
       for (let attempt = 0; attempt < maxEntryAttempts; attempt++) {
-        if (attempt > 0) await this._sleep(80);
+        if (attempt > 0) await this._sleep(50);
 
         let liveMarket = null;
         try {
@@ -6822,13 +6870,18 @@ class TradingBot {
         const ceiling = isSettle
           ? Math.min(99, richFloor - 1, Math.max(band?.max ?? priceCents, priceCents) + 2)
           : isModel
-            ? Math.min(99, priceCents + 4)
+            ? Math.min(99, priceCents + 6)
             : Math.min(99, priceCents + 2);
         if (Number.isFinite(freshAsk)) {
-          const chase = Math.min(99, Math.round(freshAsk) + attempt);
+          // MODEL: cross at ask+1 on first try (then +2…) — IOC at exact ask often misses.
+          const chaseBump = isModel ? attempt + 1 : attempt;
+          const chase = Math.min(99, Math.round(freshAsk) + chaseBump);
           workingPrice = Math.min(ceiling, Math.max(priceCents, freshAsk, chase));
         } else {
-          workingPrice = Math.min(ceiling, Math.max(1, Math.round(priceCents) + attempt));
+          workingPrice = Math.min(
+            ceiling,
+            Math.max(1, Math.round(priceCents) + attempt + (isModel ? 1 : 0))
+          );
         }
         workingPrice = Math.max(1, Math.min(99, Math.round(workingPrice)));
 
@@ -6998,7 +7051,11 @@ class TradingBot {
           trade.stakeDollars = +((trade.contracts * workingPrice) / 100).toFixed(2);
         }
       }
-      trade.entryFeesCents = this._orderFeesCents(fill && fill.order);
+      trade.entryFeesCents = this._resolveOrderFeesCents(
+        fill && fill.order,
+        trade.entryPriceCents,
+        trade.contracts
+      );
       if (isModel && modelIsHalfStakeAsk(trade.entryPriceCents)) {
         modelQuarter = true;
         trade.modelUncertain = true;

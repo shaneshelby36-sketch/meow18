@@ -4466,13 +4466,13 @@ async function testBotTradingFlow() {
     // Old bug: entry=1 → (76−1)×14 = 1050 (~$10.50). Real gross: (76−69)×14 = 98.
     checkEq(
       bot._netPnlCents(1, 76, 14, 8, 10),
-      1050,
-      'sanity: 1¢ entry would invent the false ~$10.50 gross'
+      1050 - 18,
+      'sanity: 1¢ entry would invent the false ~$10.50 before fees'
     );
     checkEq(
       bot._netPnlCents(xrpEntry, 76, 14, 8, 10),
-      98,
-      'XRP-style PnL is $0.98 gross (fees not subtracted)'
+      98 - 18,
+      'XRP-style PnL is fee-net cash ($0.98 − $0.18)'
     );
 
     const xrpClient = {
@@ -4533,14 +4533,15 @@ async function testBotTradingFlow() {
     });
     checkEq(xrpClosed, true, 'XRP-style TP closes');
     checkEq(xrpTrade.exitPriceCents, 76, 'XRP-style TP books avg/sell limit not cost-derived 99¢');
-    checkEq(xrpTrade.pnlCents, 98, 'XRP-style TP PnL is $0.98 not false $10.32');
+    checkEq(xrpTrade.pnlGrossCents, 98, 'XRP-style TP gross is $0.98');
+    checkEq(xrpTrade.pnlCents, 80, 'XRP-style TP cash PnL is $0.80 after fees');
     checkEq(xrpTrade.feesCents, 18, 'XRP-style fees still recorded for the note');
     check(xrpTrade.pnlCents < 200, 'XRP-style TP must not invent huge PnL');
-    // 40% wallet of $0.98 = $0.39 — not the logged Wallet +$4.13 from false $10.32
-    checkEq(xrpTrade.skimmedCents, 39, 'XRP-style wallet skim matches real $0.98 win');
+    // 40% wallet of $0.80 = $0.32
+    checkEq(xrpTrade.skimmedCents, 32, 'XRP-style wallet skim matches fee-net $0.80 win');
   }
 
-  // ETH under-count: avg entry improvement + gross PnL ≈ Kalshi (not fee-netted limit prices)
+  // ETH: avg entry improvement; cash PnL = gross − fees
   {
     const ethEntry = bot._orderAvgFillPriceCents(
       {
@@ -4566,16 +4567,21 @@ async function testBotTradingFlow() {
     );
     checkEq(ethEntry, 52, 'ETH-style entry uses avg improvement (52) not limit cost (56)');
     checkEq(ethExit, 79, 'ETH-style exit uses average_fill_price');
-    // Old dashboard: (79−56)×17 − 49 = 342 ($3.42). Kalshi ≈ (79−52)×17 = 459 ($4.59).
-    checkEq(bot._netPnlCents(56, 79, 17, 24, 25), 391, 'limit prices gross without fee net');
+    checkEq(bot._grossPnlCents(56, 79, 17), 391, 'limit prices gross');
+    checkEq(
+      bot._netPnlCents(56, 79, 17, 24, 25),
+      391 - 49,
+      'limit prices fee-net'
+    );
+    checkEq(bot._grossPnlCents(ethEntry, ethExit, 17), 459, 'ETH-style gross ~$4.59');
     checkEq(
       bot._netPnlCents(ethEntry, ethExit, 17, 24, 25),
-      459,
-      'ETH-style PnL ~$4.59 matches Kalshi-style trade PnL (not $3.42)'
+      459 - 49,
+      'ETH-style cash PnL nets fees (~$4.10)'
     );
   }
 
-  // Fees are recorded for the note; PnL stays gross (Kalshi trade PnL)
+  // Fees reduce cash PnL; estimated when order omits fee fields
   {
     checkEq(
       bot._orderFeesCents({
@@ -4594,10 +4600,12 @@ async function testBotTradingFlow() {
       20,
       'V2 average_fee_paid × fills → cents'
     );
+    checkEq(bot._estimateTakerFeesCents(50, 100), 175, 'estimate 100@50¢ → $1.75');
+    checkEq(bot._estimateTakerFeesCents(10, 100), 63, 'estimate 100@10¢ → $0.63');
     checkEq(
       bot._netPnlCents(42, 57, 10, 12, 15),
-      (57 - 42) * 10,
-      'PnL is gross; fee args do not reduce it'
+      (57 - 42) * 10 - 27,
+      'PnL is fee-net cash'
     );
 
     const feeClient = {
@@ -4660,10 +4668,11 @@ async function testBotTradingFlow() {
     checkEq(feeClosed, true, 'fee-aware TP closes');
     checkEq(feeTrade.exitFeesCents, 15, 'exit fees booked from order');
     checkEq(feeTrade.feesCents, 27, 'total fees = entry + exit');
-    checkEq(feeTrade.pnlCents, (57 - 42) * 10, 'PnL is gross; fees only in the note');
+    checkEq(feeTrade.pnlGrossCents, (57 - 42) * 10, 'gross price PnL stored');
+    checkEq(feeTrade.pnlCents, (57 - 42) * 10 - 27, 'cash PnL nets fees');
     check(
-      feeBot.lastDecision.includes('fees $0.27'),
-      'decision mentions fees without replacing P&L'
+      feeBot.lastDecision.includes('fees $0.27') && feeBot.lastDecision.includes('cash P&L'),
+      'decision mentions cash P&L and fees'
     );
   }
 
