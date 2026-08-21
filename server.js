@@ -13,7 +13,7 @@ const { buildPredictions } = require('./prediction');
 const { PredictionTracker } = require('./tracker');
 const { SignalAccumulatorManager } = require('./signalAccumulator');
 const { KalshiClient, marketStrikePrice, parseMarketCloseMs } = require('./kalshiClient');
-const { TradingBot, SERIES_BY_SYMBOL, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, settleExitTiersForDashboard } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, settleExitTiersForDashboard } = require('./bot');
 const { backtestSymbol, backtestWithSettings, huntBestSettings } = require('./backtest');
 const { DATA_DIR, DATA_DIR_EPHEMERAL, DATA_DIR_FROM_ENV, dataPath, ensureDataDir, ARCHIVE_RETENTION_DAYS, writeJsonAtomic } = require('./paths');
 const APP_VERSION = require('./package.json').version;
@@ -379,14 +379,43 @@ async function fetchKalshiTargets() {
   return targets;
 }
 
+function activeEngineSymbols() {
+  // Prediction-only (no bot): keep full dashboard compute.
+  if (!bot) return Object.keys(state);
+  const want = new Set(
+    symbolsNeedingEngineCompute({
+      config: bot.config,
+      openTrades: bot.openTrades,
+    })
+  );
+  return Object.keys(state).filter((s) => want.has(s));
+}
+
+function pausedEngineStub(symbol, prevAsset) {
+  const s = state[symbol];
+  const price =
+    (s && s.series && typeof s.series.latestClose === 'function' && s.series.latestClose()) ||
+    (prevAsset && Number(prevAsset.price)) ||
+    null;
+  return {
+    ready: false,
+    enginePaused: true,
+    price: Number.isFinite(Number(price)) ? Number(price) : null,
+    message: 'Engine paused — not in AUTO / no open position',
+  };
+}
+
 let recomputeInFlight = false;
 
 async function recompute() {
   if (recomputeInFlight) return; // guard against overlapping runs if a cycle takes longer than the interval
   recomputeInFlight = true;
   try {
+    const active = activeEngineSymbols();
     const input = {};
-    for (const [symbol, s] of Object.entries(state)) {
+    for (const symbol of active) {
+      const s = state[symbol];
+      if (!s) continue;
       input[symbol] = { series: s.series, book: s.book };
     }
 
@@ -396,6 +425,14 @@ async function recompute() {
       Object.entries(state).map(([sym, s]) => [sym, s.feedStatus])
     );
 
+    // Idle coins: stub so the dashboard still lists them, without running
+    // indicators / Kalshi clocks / tracker updates.
+    const prev = latestPrediction && typeof latestPrediction === 'object' ? latestPrediction : {};
+    for (const symbol of Object.keys(state)) {
+      if (result[symbol]) continue;
+      result[symbol] = pausedEngineStub(symbol, prev[symbol]);
+    }
+
     // Feed each ready symbol through the tracker once — all three windows
     // (0-5/5-10/10-15 min) share the same target price and the same real
     // Kalshi clock, rather than each running its own independent timer.
@@ -403,6 +440,7 @@ async function recompute() {
     const FIFTEEN_MIN_MS = 15 * 60 * 1000;
     for (const [symbol, assetResult] of Object.entries(result)) {
       if (!assetResult || !assetResult.ready || !assetResult.windows) continue;
+      if (assetResult.enginePaused) continue;
 
       // Graceful fallback when no live Kalshi market was found: synthesize a
       // ticker/close time that still rotates every real 15 minutes (aligned
@@ -442,6 +480,7 @@ async function recompute() {
     latestPrediction = result;
     if (latestPrediction && typeof latestPrediction === 'object') {
       latestPrediction.manualStrikes = manualStrikes;
+      latestPrediction.engineSymbols = active;
     }
     lastComputeError = null;
 

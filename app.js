@@ -28,7 +28,15 @@ const ASSET_LABELS = {
 
 // Non-asset keys that can appear alongside per-symbol entries in the
 // /api/latest response — used to figure out which keys are actual assets.
-const NON_ASSET_KEYS = new Set(['correlation', 'timestamp', 'feedStatus', 'message', 'manualStrikes']);
+const NON_ASSET_KEYS = new Set([
+  'correlation',
+  'correlations',
+  'timestamp',
+  'feedStatus',
+  'message',
+  'manualStrikes',
+  'engineSymbols',
+]);
 
 const REC_CLASS = {
   'Strong Buy': 'strong-buy',
@@ -435,7 +443,12 @@ function renderAssetTabs(symbols, data) {
       'asset-tab' +
       (featured.includes(symbol) ? ' selected' : '') +
       (pinned.includes(symbol) ? ' pinned' : '');
-    const rec = asset && asset.ready && asset.overall ? asset.overall.recommendation : 'Seeding';
+    const rec =
+      asset && asset.enginePaused
+        ? 'Paused'
+        : asset && asset.ready && asset.overall
+          ? asset.overall.recommendation
+          : 'Seeding';
     const pinMark = pinned.includes(symbol) ? '📌 ' : '';
     tab.textContent = `${pinMark}${symbol} · ${rec}`;
     tab.addEventListener('click', () => {
@@ -505,7 +518,11 @@ function renderAsset(symbol, assetData) {
 
   if (!assetData.ready) {
     const patternEl = panel.querySelector('.meta-pattern');
-    if (patternEl) patternEl.textContent = 'Seeding history…';
+    if (patternEl) {
+      patternEl.textContent = assetData.enginePaused
+        ? assetData.message || 'Engine paused — not in AUTO'
+        : 'Seeding history…';
+    }
     return;
   }
 

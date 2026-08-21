@@ -186,6 +186,20 @@ function symbolsNeedingKalshiTargets({ config = null, openTrades = [] } = {}) {
 }
 
 /**
+ * Symbols the prediction engine should compute each cycle.
+ * Same as Kalshi-target set, plus BTC when any alt is active (cross-check
+ * reference — not a Kalshi poll by itself).
+ */
+function symbolsNeedingEngineCompute({ config = null, openTrades = [] } = {}) {
+  const base = symbolsNeedingKalshiTargets({ config, openTrades });
+  const set = new Set(base);
+  if ([...set].some((s) => s !== 'BTC') && SERIES_BY_SYMBOL.BTC) {
+    set.add('BTC');
+  }
+  return Object.keys(SERIES_BY_SYMBOL).filter((s) => set.has(s));
+}
+
+/**
  * Named MODEL paper setups. Apply one from the dashboard instead of guessing knobs.
  * The active setup is the live book; the others run as silent shadow paper books
  * on the same quotes. Scoreboard also shows a what-if on saved fills (not a replay).
@@ -9372,6 +9386,7 @@ module.exports = {
   isKalshiTradeEnabled,
   tradeableKalshiSymbols,
   symbolsNeedingKalshiTargets,
+  symbolsNeedingEngineCompute,
   liquidityPriority,
   LIQUIDITY_PRIORITY_BY_SYMBOL,
   settleEntryBand,
