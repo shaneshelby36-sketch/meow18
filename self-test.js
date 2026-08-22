@@ -34,6 +34,13 @@ const {
   WINDOWS,
 } = require('./prediction');
 const {
+  calibrateProbabilityUp,
+  applyWindowConsensus,
+  windowConsensusSupportsSide,
+  modelCalibrationEntryGate,
+  applyCalibrationToWindow,
+} = require('./engineCalibration');
+const {
   backtestSymbol,
   backtestWithSettings,
   huntBestSettings,
@@ -546,6 +553,60 @@ function testPrediction() {
   check(result.ETH && result.ETH.ready, 'ETH prediction ready');
   check(result.BTC.windows.w5 && result.BTC.windows.w15, 'all windows present');
   check(result.BTC.targetCloseTime > Date.now(), 'targetCloseTime in future');
+  check(result.BTC.consensus && result.BTC.consensus.agreeCount >= 2, 'consensus attached');
+  check(
+    result.BTC.windows.w5.probabilityUpRaw != null,
+    'raw probability preserved for tracker calibration'
+  );
+
+  // Empirical calibration soft-shrinks overconfident buckets toward history.
+  const calMap = {
+    BTC: {
+      w5: { '70-79%': { trades: 120, wins: 66 } },
+    },
+  };
+  const cal = calibrateProbabilityUp(0.74, {
+    symbol: 'BTC',
+    windowKey: 'w5',
+    calibration: calMap,
+  });
+  check(cal.calibrated, 'calibration blends with mature bucket');
+  check(cal.probabilityUp < 0.74 && cal.probabilityUp > 0.5, 'overconfident 74% pulled toward ~55%');
+
+  const thin = calibrateProbabilityUp(0.74, {
+    symbol: 'BTC',
+    windowKey: 'w5',
+    calibration: { BTC: { w5: { '70-79%': { trades: 10, wins: 3 } } } },
+  });
+  check(!thin.calibrated, 'thin buckets leave probs untouched');
+
+  const gateBad = modelCalibrationEntryGate({
+    symbol: 'BTC',
+    windowKey: 'w5',
+    probabilityUp: 74,
+    side: 'yes',
+    calibration: { BTC: { w5: { '70-79%': { trades: 80, wins: 30 } } } },
+    minWinRatePct: 52,
+  });
+  check(!gateBad.ok, 'entry blocked when calibrated bucket historically loses');
+
+  const disagree = {
+    w5: { probabilityUp: 70, probabilityDown: 30, confidence: 70 },
+    w10: { probabilityUp: 35, probabilityDown: 65, confidence: 70 },
+    w15: { probabilityUp: 38, probabilityDown: 62, confidence: 70 },
+  };
+  applyWindowConsensus(disagree);
+  check(disagree.w5.probabilityUp < 70, 'outlier horizon shrunk toward 50');
+  check(!windowConsensusSupportsSide(disagree, 'yes'), 'YES blocked when majority DOWN');
+  check(windowConsensusSupportsSide(disagree, 'no'), 'NO allowed when majority DOWN');
+
+  const withCal = buildPredictions(
+    { BTC: { series, book } },
+    { BTC: { price: series.latestClose(), closeTime: Date.now() + 600_000, ticker: 'KXBTC15M-Y' } },
+    null,
+    { calibration: calMap }
+  );
+  check(withCal.BTC.ready, 'buildPredictions accepts calibration option');
 }
 
 // ───────────────────────────── kalshi client helpers ─────────────────────────────
@@ -5795,8 +5856,8 @@ async function testModelStrategy() {
   checkEq(pickModelWindowKey(10), 'w10', '10m → w10');
   checkEq(pickModelWindowKey(7), 'w10', '5–10m → w10');
   checkEq(pickModelWindowKey(5.01), 'w10', 'just over 5 → w10');
-  checkEq(pickModelWindowKey(5), 'w5', '≤5m → w5');
-  checkEq(pickModelWindowKey(1), 'w5', 'late → w5');
+  checkEq(pickModelWindowKey(5), 'w15', '≤5m → w15 (long horizon)');
+  checkEq(pickModelWindowKey(1), 'w15', 'late → w15');
 
   const asset = {
     ready: true,

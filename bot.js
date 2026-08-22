@@ -5,6 +5,10 @@ const path = require('path');
 const crypto = require('crypto');
 const { dataPath, ensureDataDir, writeJsonAtomic, pruneArchiveFiles } = require('./paths');
 const { bookSideFromLegacy, marketStrikePrice, parseMarketCloseMs } = require('./kalshiClient');
+const {
+  windowConsensusSupportsSide,
+  modelCalibrationEntryGate,
+} = require('./engineCalibration');
 
 ensureDataDir();
 pruneArchiveFiles();
@@ -13,7 +17,8 @@ const LEDGER_PATH = dataPath('bot-ledger.json');
 const TRADE_LOG_PATH = dataPath('trade-log.json');
 const SHADOW_BOOKS_PATH = dataPath('shadow-books.json');
 const CONFIG_PATH = dataPath('bot-config.json');
-const CALIBRATION_PATH = dataPath('calibration.json');
+const CALIBRATION_PATH = dataPath('bot-calibration.json');
+const LEGACY_CALIBRATION_PATH = dataPath('calibration.json');
 const MODE_STATE_PATH = dataPath('bot-mode-state.json');
 const RUN_STATE_PATH = dataPath('bot-run-state.json');
 const ARCHIVE_DIR = dataPath('archive');
@@ -21,7 +26,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 66;
+const SETTINGS_DEFAULTS_VERSION = 67;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -36,6 +41,15 @@ function loadCalibration() {
   try {
     if (fs.existsSync(CALIBRATION_PATH)) {
       return JSON.parse(fs.readFileSync(CALIBRATION_PATH, 'utf8'));
+    }
+    if (fs.existsSync(LEGACY_CALIBRATION_PATH)) {
+      const legacy = JSON.parse(fs.readFileSync(LEGACY_CALIBRATION_PATH, 'utf8'));
+      // Bot schema is { buckets: { "50": {trades,wins}, ... } }.
+      if (legacy && legacy.buckets && typeof legacy.buckets === 'object') {
+        saveCalibration(legacy);
+        console.log('[bot] migrated trade calibration → bot-calibration.json');
+        return legacy;
+      }
     }
   } catch (err) {
     console.error('[bot] failed to load calibration data, starting fresh:', err.message);
@@ -570,7 +584,8 @@ function pickModelWindowKey(minutesRemaining) {
   if (!Number.isFinite(m)) return 'w5';
   if (m > 10) return 'w5';
   if (m > 5) return 'w10';
-  return 'w5';
+  // Final 5m: use the long-horizon profile (was bouncing back to noisy w5).
+  return 'w15';
 }
 
 /** Live probability lean first; frozen tracking lock only breaks ties. */
@@ -9195,6 +9210,38 @@ class TradingBot {
       return null;
     }
 
+    // Multi-horizon agreement: skip when w5/w10/w15 mostly disagree with this side.
+    if (!windowConsensusSupportsSide(assetPrediction.windows, side)) {
+      const maj =
+        assetPrediction.consensus && assetPrediction.consensus.majorityDirection
+          ? assetPrediction.consensus.majorityDirection
+          : assetPrediction.windows &&
+              assetPrediction.windows.w5 &&
+              assetPrediction.windows.w5.consensus
+            ? assetPrediction.windows.w5.consensus.majorityDirection
+            : '?';
+      say(
+        `Waiting: ${symbol} — horizons disagree with ${String(side).toUpperCase()} ` +
+          `(majority ${maj}; need 2/3 agreement).`
+      );
+      return null;
+    }
+
+    // When this confidence bucket historically loses, skip (mature samples only).
+    const engCal = predictions && predictions.engineCalibration;
+    const calGate = modelCalibrationEntryGate({
+      symbol,
+      windowKey,
+      probabilityUp: window.probabilityUpRaw != null ? window.probabilityUpRaw : window.probabilityUp,
+      side,
+      calibration: engCal,
+      minWinRatePct: 52,
+    });
+    if (!calGate.ok) {
+      say(`Waiting: ${symbol} ${String(side).toUpperCase()} — ${calGate.reason}.`);
+      return null;
+    }
+
     const leanStrength = Math.abs(Number(window.probabilityUp) - 50) || 1;
     const uncertain = modelIsHalfStakeAsk(priceCents);
     return {
@@ -9207,7 +9254,11 @@ class TradingBot {
       priceCents,
       entryBidCents: Number.isFinite(heldBid) ? Math.round(heldBid) : null,
       closeTime,
-      rankScore: leanStrength * (window.confidence / 100),
+      rankScore:
+        leanStrength *
+        (window.confidence / 100) *
+        (assetPrediction.consensus && assetPrediction.consensus.unanimous ? 1.15 : 1) *
+        (calGate.winRatePct != null ? Math.min(1.2, calGate.winRatePct / 55) : 1),
       uncertain,
       invert,
       signalSide,
@@ -10036,6 +10087,8 @@ module.exports = {
   modelBreakevenExitAllowed,
   modelLeanStaleForScratch,
   modelDirectionSupportsHold,
+  windowConsensusSupportsSide,
+  modelCalibrationEntryGate,
   modelPriceAllowed,
   modelLowAskConvictionGate,
   modelKalshiFavoriteCents,

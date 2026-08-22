@@ -11,6 +11,10 @@ const {
   volumeSpike,
   candlePattern,
 } = require('./indicators');
+const {
+  applyWindowConsensus,
+  applyCalibrationToWindow,
+} = require('./engineCalibration');
 
 const WINDOWS = [
   { key: 'w5', label: '0-5 min', minutes: 5 },
@@ -22,8 +26,9 @@ function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
 }
 
-// Logistic squash: turns an unbounded score into a 0..1 probability
-function logistic(x, k = 2.2) {
+// Logistic squash: turns an unbounded score into a 0..1 probability.
+// Slightly softer than 2.2 so mid-range scores don't read as false certainty.
+function logistic(x, k = 2.0) {
   return 1 / (1 + Math.exp(-k * x));
 }
 
@@ -239,6 +244,19 @@ function computeConfidence(ind, contributions, crossCorrelation, agreementWithOt
     dock(5, 'Very little short-term price movement');
   }
 
+  // Short vs medium momentum fight — common false-confidence setup
+  if (
+    ind.momentumShort != null &&
+    ind.momentumLong != null &&
+    Math.sign(ind.momentumShort) !== 0 &&
+    Math.sign(ind.momentumLong) !== 0 &&
+    Math.sign(ind.momentumShort) !== Math.sign(ind.momentumLong) &&
+    Math.abs(ind.momentumShort) >= 0.08 &&
+    Math.abs(ind.momentumLong) >= 0.08
+  ) {
+    dock(8, 'Short-term and medium momentum disagree');
+  }
+
   // Large sell (or buy) pressure that conflicts with the trend direction
   if (ind.imbalance) {
     const trendSign = Math.sign(ind.trend.alignment) || Math.sign(ind.momentumLong ?? 0);
@@ -259,7 +277,6 @@ function computeConfidence(ind, contributions, crossCorrelation, agreementWithOt
   }
 
   // Conflicting indicators: do the contributions disagree in direction?
-  const positives = contributions.filter((c) => c.weight > 0 && c.text && !/bearish|sell|overbought|falling|oversold/i.test(c.text));
   const signs = contributions.map((c) => c.text);
   const posCount = signs.filter((t) => /bullish|buy|rising|oversold/i.test(t)).length;
   const negCount = signs.filter((t) => /bearish|sell|falling|overbought/i.test(t)).length;
@@ -270,6 +287,11 @@ function computeConfidence(ind, contributions, crossCorrelation, agreementWithOt
   // Wide spread / thin liquidity
   if (ind.spread && ind.spread.percent > 0.05) {
     dock(5, `Wider than normal bid/ask spread (${ind.spread.percent.toFixed(3)}%)`);
+  }
+  if (ind.liquidity != null && Number.isFinite(ind.liquidity) && ind.liquidity < 0.15) {
+    dock(8, `Thin order-book liquidity (${(ind.liquidity * 100).toFixed(0)}% depth)`);
+  } else if (ind.liquidity != null && Number.isFinite(ind.liquidity) && ind.liquidity < 0.28) {
+    dock(4, `Below-average book depth (${(ind.liquidity * 100).toFixed(0)}%)`);
   }
 
   // Agreement with the other asset's directional lean nudges confidence up
@@ -316,19 +338,14 @@ function buildWindowPrediction(windowDef, ind, otherInd, crossCorrelation, targe
     trendScore = clamp(accumulatorOutput.netDominance, -maxWeightSum, maxWeightSum);
   }
 
-  // Distance-to-target term: how far the current price already sits from
-  // the one shared target price (Kalshi's real strike when available,
-  // otherwise the current price itself as a neutral fallback), expressed in
-  // units of ~2x the asset's own typical ATR move. Shorter windows weight
-  // this more heavily (little time left for price to cross back over the
-  // target); longer windows weight the trend/oscillator score more heavily
-  // (more time for things to change).
+  // Distance-to-target: important, but previously dominated short windows and
+  // produced overconfident "already above strike" calls that still flipped.
   const distanceRatio = (ind.price - targetPrice) / targetPrice;
   const atrFrac = Math.max(ind.atrPct / 100, 0.0005); // guard against a near-zero ATR
   const distanceScore = clamp(distanceRatio / (atrFrac * 2), -1, 1);
 
-  const DISTANCE_WEIGHT = { w5: 1.5, w10: 1.05, w15: 0.7 };
-  const TREND_WEIGHT = { w5: 0.6, w10: 0.85, w15: 1.0 };
+  const DISTANCE_WEIGHT = { w5: 1.15, w10: 0.9, w15: 0.65 };
+  const TREND_WEIGHT = { w5: 0.75, w10: 0.9, w15: 1.05 };
   const score = trendScore * TREND_WEIGHT[windowDef.key] + distanceScore * DISTANCE_WEIGHT[windowDef.key];
 
   if (Math.abs(distanceScore) > 0.3) {
@@ -360,6 +377,8 @@ function buildWindowPrediction(windowDef, ind, otherInd, crossCorrelation, targe
     minutes: windowDef.minutes,
     probabilityUp: +(pUp * 100).toFixed(1),
     probabilityDown: +(pDown * 100).toFixed(1),
+    probabilityUpRaw: +(pUp * 100).toFixed(1),
+    probabilityDownRaw: +(pDown * 100).toFixed(1),
     confidence: +confidence.toFixed(0),
     riskAdjustmentPct: +riskPoints.toFixed(0),
     recommendation: recommend(pUp, confidence),
@@ -384,12 +403,15 @@ function buildWindowPrediction(windowDef, ind, otherInd, crossCorrelation, targe
  * Top-level entry point. `data` = { BTC: {series, book}, XRP: {series, book} }
  * `kalshiTargets` (optional) = { BTC: {price, closeTime, ticker}, XRP: {...} } —
  * the real strike price from Kalshi's live 15-minute market, when available.
+ * `options.calibration` (optional) = tracker engine-calibration map used to
+ * remap raw logistic probs toward empirical hit rates.
  * Falls back to the current price itself (a neutral distance of zero) when
  * Kalshi data isn't available, so the engine still works standalone.
  * Returns null (per product) until enough candle history has been seeded.
  */
-function buildPredictions(data, kalshiTargets = {}, accumulatorManager = null) {
+function buildPredictions(data, kalshiTargets = {}, accumulatorManager = null, options = {}) {
   const now = Date.now();
+  const calibration = options && options.calibration ? options.calibration : null;
   const indicators = {};
   for (const symbol of Object.keys(data)) {
     indicators[symbol] = gatherIndicators(data[symbol].series, data[symbol].book);
@@ -441,6 +463,25 @@ function buildPredictions(data, kalshiTargets = {}, accumulatorManager = null) {
       windows[w.key] = buildWindowPrediction(w, ind, otherInd, crossCorrelation, targetPrice, symbol, accumulator, now);
     }
 
+    // Remap logistic probs toward historical hit rates when buckets are mature.
+    if (calibration) {
+      for (const w of WINDOWS) {
+        applyCalibrationToWindow(windows[w.key], {
+          symbol,
+          windowKey: w.key,
+          calibration,
+        });
+      }
+    }
+
+    // Multi-horizon agreement after calibration (shrink outliers, boost unanimity).
+    const consensus = applyWindowConsensus(windows);
+
+    for (const w of WINDOWS) {
+      const p = windows[w.key].probabilityUp / 100;
+      windows[w.key].recommendation = recommend(p, windows[w.key].confidence);
+    }
+
     // Blended overall view across all three windows, weighted by each
     // window's own confidence (a window the engine trusts more pulls the
     // overall call toward it more). This is a summary on top of the three
@@ -456,6 +497,7 @@ function buildPredictions(data, kalshiTargets = {}, accumulatorManager = null) {
       probabilityDown: +(100 - overallProbUp).toFixed(1),
       confidence: +overallConfidence.toFixed(0),
       recommendation: recommend(overallProbUp / 100, overallConfidence),
+      consensus,
     };
 
     result[symbol] = {
@@ -466,6 +508,7 @@ function buildPredictions(data, kalshiTargets = {}, accumulatorManager = null) {
       targetCloseTime: kalshiTarget && kalshiTarget.closeTime ? kalshiTarget.closeTime : null,
       kalshiTicker: kalshiTarget && kalshiTarget.ticker ? kalshiTarget.ticker : null,
       overall,
+      consensus,
       indicatorsSnapshot: {
         rsi: +ind.rsi.toFixed(1),
         macdHistogram: +ind.macd.histogram.toFixed(4),
@@ -508,5 +551,6 @@ module.exports = {
   gatherIndicators,
   directionalScore,
   buildWindowPrediction,
+  computeConfidence,
   logistic,
 };

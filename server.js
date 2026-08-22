@@ -358,7 +358,10 @@ async function recompute() {
     }
 
     const kalshiTargets = dashboardStrikeTargets();
-    const result = buildPredictions(input, kalshiTargets, signalAccumulatorManager);
+    const result = buildPredictions(input, kalshiTargets, signalAccumulatorManager, {
+      calibration: tracker.calibration,
+    });
+    result.engineCalibration = tracker.calibration;
     result.feedStatus = Object.fromEntries(
       Object.entries(state).map(([sym, s]) => [sym, s.feedStatus])
     );

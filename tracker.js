@@ -17,7 +17,8 @@ const WINDOW_KEYS = CHECKPOINTS.map((c) => c.key);
 const ROTATION_PERIOD_MS = 24 * 60 * 60 * 1000; // 24 hours — keep yesterday beside today
 const PERIOD_STATE_PATH = dataPath('tracker-period-start.json');
 const ARCHIVE_DIR = dataPath('archive');
-const CALIBRATION_PATH = dataPath('calibration.json');
+const CALIBRATION_PATH = dataPath('engine-calibration.json');
+const LEGACY_CALIBRATION_PATH = dataPath('calibration.json');
 const HISTORY_PATH = dataPath('tracker-history.json');
 
 function bucketLabel(probabilityOfCalledDirection) {
@@ -26,10 +27,27 @@ function bucketLabel(probabilityOfCalledDirection) {
   return `${floor}-${floor + 9}%`;
 }
 
+function looksLikeEngineCalibration(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj) || obj.buckets) return false;
+  return Object.values(obj).some(
+    (v) => v && typeof v === 'object' && (v.w5 || v.w10 || v.w15)
+  );
+}
+
 function loadCalibration() {
   try {
     if (fs.existsSync(CALIBRATION_PATH)) {
       return JSON.parse(fs.readFileSync(CALIBRATION_PATH, 'utf8'));
+    }
+    // Migrate from the old shared calibration.json when it holds engine buckets
+    // (bot trade buckets live under { buckets: {...} } and must not be used here).
+    if (fs.existsSync(LEGACY_CALIBRATION_PATH)) {
+      const legacy = JSON.parse(fs.readFileSync(LEGACY_CALIBRATION_PATH, 'utf8'));
+      if (looksLikeEngineCalibration(legacy)) {
+        saveCalibration(legacy);
+        console.log('[tracker] migrated engine calibration → engine-calibration.json');
+        return legacy;
+      }
     }
   } catch (err) {
     console.error('[tracker] failed to load calibration stats, starting fresh:', err.message);
@@ -250,22 +268,38 @@ class PredictionTracker {
 
     if (isNewCycle) {
       const windowOpenTime = closeTime - 15 * 60 * 1000;
+      const lockProb = (w) => {
+        // Prefer raw logistic probs so empirical calibration doesn't feed itself.
+        const up = Number(w && (w.probabilityUpRaw != null ? w.probabilityUpRaw : w.probabilityUp));
+        const down = Number(
+          w && (w.probabilityDownRaw != null ? w.probabilityDownRaw : w.probabilityDown)
+        );
+        const pUp = Number.isFinite(up) ? up : 50;
+        const pDown = Number.isFinite(down) ? down : 100 - pUp;
+        return {
+          direction: pUp >= 50 ? 'UP' : 'DOWN',
+          called: Math.max(pUp, pDown),
+        };
+      };
+      const l5 = lockProb(windows.w5);
+      const l10 = lockProb(windows.w10);
+      const l15 = lockProb(windows.w15);
       cycle = {
         ticker,
         baselinePrice: targetPrice,
         windowOpenTime,
         closeTime,
         predictedDirection: {
-          w5: windows.w5.probabilityUp >= 50 ? 'UP' : 'DOWN',
-          w10: windows.w10.probabilityUp >= 50 ? 'UP' : 'DOWN',
-          w15: windows.w15.probabilityUp >= 50 ? 'UP' : 'DOWN',
+          w5: l5.direction,
+          w10: l10.direction,
+          w15: l15.direction,
         },
         predictedProbability: {
           // Probability OF the called direction (always >=50 by
           // construction) — this is what gets bucketed for calibration.
-          w5: Math.max(windows.w5.probabilityUp, windows.w5.probabilityDown),
-          w10: Math.max(windows.w10.probabilityUp, windows.w10.probabilityDown),
-          w15: Math.max(windows.w15.probabilityUp, windows.w15.probabilityDown),
+          w5: l5.called,
+          w10: l10.called,
+          w15: l15.called,
         },
         resolved: { w5: false, w10: false, w15: false },
       };
@@ -357,4 +391,4 @@ class PredictionTracker {
   }
 }
 
-module.exports = { PredictionTracker, ROTATION_PERIOD_MS };
+module.exports = { PredictionTracker, ROTATION_PERIOD_MS, bucketLabel };
