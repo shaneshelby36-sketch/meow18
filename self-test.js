@@ -573,6 +573,15 @@ function testPrediction() {
   check(cal.calibrated, 'calibration blends with mature bucket');
   check(cal.probabilityUp < 0.74 && cal.probabilityUp > 0.5, 'overconfident 74% pulled toward ~55%');
 
+  const flipTrap = calibrateProbabilityUp(0.74, {
+    symbol: 'BTC',
+    windowKey: 'w5',
+    calibration: { BTC: { w5: { '70-79%': { trades: 200, wins: 50 } } } },
+  });
+  check(flipTrap.calibrated, 'poor bucket still calibrates');
+  check(flipTrap.probabilityUp >= 0.5, 'bad calibration never flips UP→DOWN (was Strong Sell bug)');
+  checkEq(flipTrap.probabilityUp, 0.5, 'sub-50% history shrinks to coin-flip, not reverse');
+
   const thin = calibrateProbabilityUp(0.74, {
     symbol: 'BTC',
     windowKey: 'w5',

@@ -3739,6 +3739,9 @@ class TradingBot {
     this.calibration = loadCalibration();
     this.lastError = null;
     this.lastDecision = 'Waiting for a prediction cycle.';
+    // Live Kalshi strikes for the prediction engine (distance-to-target + session key).
+    // Filled as markets are fetched; server merges these into buildPredictions.
+    this._engineStrikeTargets = Object.create(null);
     // Symbol → timestamp until which we demote after a live entry fill miss
     // (try other cryptos first, then allow retry). Streak resets when that
     // coin's Kalshi session ends (or on a successful fill / any close).
@@ -4280,6 +4283,50 @@ class TradingBot {
       keptSamples: kept.length,
       keepTarget: keepN,
     };
+  }
+
+  /**
+   * Remember a live Kalshi strike so the next prediction cycle can score
+   * distance-to-target (and reset signal accumulators on ticker change).
+   */
+  _noteEngineStrike(symbol, market) {
+    if (!market || !symbol) return;
+    const sym = String(symbol).toUpperCase();
+    const price = Number(marketStrikePrice(market));
+    let closeTime = parseMarketCloseMs(market);
+    if (!Number.isFinite(closeTime) && market.close_time) {
+      closeTime = new Date(market.close_time).getTime();
+    }
+    if (!Number.isFinite(price) || price <= 0) return;
+    if (!Number.isFinite(closeTime)) return;
+    if (!this._engineStrikeTargets) this._engineStrikeTargets = Object.create(null);
+    this._engineStrikeTargets[sym] = {
+      price,
+      closeTime,
+      ticker: market.ticker || null,
+      source: 'kalshi',
+      updatedAt: Date.now(),
+    };
+  }
+
+  /** Strikes for buildPredictions — drops expired windows. */
+  getEngineStrikeTargets() {
+    const out = {};
+    const now = Date.now();
+    for (const [sym, row] of Object.entries(this._engineStrikeTargets || {})) {
+      if (!row) continue;
+      const close = Number(row.closeTime);
+      const price = Number(row.price);
+      if (!Number.isFinite(price) || price <= 0) continue;
+      if (Number.isFinite(close) && close + 60_000 < now) continue;
+      out[sym] = {
+        price,
+        closeTime: close,
+        ticker: row.ticker || null,
+        source: row.source || 'kalshi',
+      };
+    }
+    return out;
   }
 
   /**
@@ -6594,6 +6641,8 @@ class TradingBot {
 
     if (!market) return;
 
+    if (trade.symbol) this._noteEngineStrike(trade.symbol, market);
+
     if (this._isTradePastDeadline(trade, market, now)) {
       await this._settleClosedWindow(trade, predictions, market);
       return;
@@ -8609,6 +8658,7 @@ class TradingBot {
       this.lastDecision = this._liveMarketWaitReason(symbol);
       return null;
     }
+    this._noteEngineStrike(symbol, market);
     if (this._hasOpenOnTicker(market.ticker)) {
       this.lastDecision = `Waiting: already holding an open position on ${market.ticker}.`;
       return null;
@@ -9053,6 +9103,7 @@ class TradingBot {
       say(this._liveMarketWaitReason(symbol));
       return null;
     }
+    this._noteEngineStrike(symbol, market);
     if (this._hasOpenOnTicker(market.ticker)) {
       say(`Waiting: already holding an open position on ${market.ticker}.`);
       return null;
@@ -9537,6 +9588,7 @@ class TradingBot {
       say(this._liveMarketWaitReason(symbol));
       return null;
     }
+    this._noteEngineStrike(symbol, market);
     if (this._hasOpenOnTicker(market.ticker)) {
       say(`Waiting: already holding an open position on ${market.ticker}.`);
       return null;

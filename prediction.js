@@ -309,11 +309,12 @@ function computeConfidence(ind, contributions, crossCorrelation, agreementWithOt
 }
 
 function recommend(pUp, confidence) {
+  // Labels are UP/DOWN vs the Kalshi strike — not "buy/sell the coin".
   if (confidence < 32) return 'Wait';
-  if (pUp >= 0.66 && confidence >= 55) return 'Strong Buy';
-  if (pUp >= 0.55) return 'Buy';
-  if (pUp <= 0.34 && confidence >= 55) return 'Strong Sell';
-  if (pUp <= 0.45) return 'Sell';
+  if (pUp >= 0.66 && confidence >= 55) return 'Strong UP';
+  if (pUp >= 0.55) return 'UP';
+  if (pUp <= 0.34 && confidence >= 55) return 'Strong DOWN';
+  if (pUp <= 0.45) return 'DOWN';
   return 'Wait';
 }
 
@@ -453,12 +454,20 @@ function buildPredictions(data, kalshiTargets = {}, accumulatorManager = null, o
         : 'kalshi'
       : 'current_price';
 
+    // Always bind accumulators to a 15m session. Without this, sessionKey was
+    // null whenever Kalshi strikes weren't injected → signal EMA never reset
+    // and stale leans bled across windows (looked permanently inverted/skewed).
+    const fifteenMs = 15 * 60 * 1000;
+    const wallBucket = Math.floor(now / fifteenMs) * fifteenMs;
+    const sessionKey =
+      (kalshiTarget && kalshiTarget.ticker) ||
+      (kalshiTarget && Number.isFinite(Number(kalshiTarget.closeTime))
+        ? `CLOSE-${symbol}-${Number(kalshiTarget.closeTime)}`
+        : null) ||
+      `WALL-${symbol}-${wallBucket}`;
+
     const windows = {};
     for (const w of WINDOWS) {
-      const sessionKey =
-        (kalshiTarget && kalshiTarget.ticker) ||
-        (kalshiTarget && kalshiTarget.closeTime) ||
-        null;
       const accumulator = accumulatorManager ? accumulatorManager.get(symbol, w.key, sessionKey) : null;
       windows[w.key] = buildWindowPrediction(w, ind, otherInd, crossCorrelation, targetPrice, symbol, accumulator, now);
     }

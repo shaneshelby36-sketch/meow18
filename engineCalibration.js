@@ -62,8 +62,9 @@ function lookupEmpiricalCalledRate(calibration, symbol, windowKey, calledProbPct
 }
 
 /**
- * Calibrate a 0..1 P(up). Shrinks toward historical hit rate for that
- * confidence bucket. Leaves probs untouched when data is thin.
+ * Calibrate a 0..1 P(up). Softens confidence toward historical hit rate for
+ * that bucket — but NEVER flips the call. If the bucket is historically
+ * wrong (<50%), we shrink toward a coin-flip, not reverse Buy↔Sell.
  */
 function calibrateProbabilityUp(pUp01, { symbol, windowKey, calibration } = {}) {
   const raw = clamp(Number(pUp01), 0, 1);
@@ -77,8 +78,11 @@ function calibrateProbabilityUp(pUp01, { symbol, windowKey, calibration } = {}) 
     return { probabilityUp: raw, calibrated: false, bucket: bucketLabel(calledProbPct) };
   }
   const rawCalled = calledProbPct / 100;
-  const blendedCalled = rawCalled * (1 - emp.weight) + emp.rate * emp.weight;
-  const probabilityUp = calledUp ? blendedCalled : 1 - blendedCalled;
+  // Reliability floored at 50%: bad buckets only erase edge, they don't invert.
+  const reliableRate = Math.max(0.5, emp.rate);
+  const blendedCalled = rawCalled * (1 - emp.weight) + reliableRate * emp.weight;
+  const calledClamped = clamp(Math.max(0.5, blendedCalled), 0.5, 0.98);
+  const probabilityUp = calledUp ? calledClamped : 1 - calledClamped;
   return {
     probabilityUp: clamp(probabilityUp, 0.02, 0.98),
     calibrated: true,
@@ -87,6 +91,7 @@ function calibrateProbabilityUp(pUp01, { symbol, windowKey, calibration } = {}) 
     blendWeight: emp.weight,
     maturity: emp.maturity,
     trades: emp.trades,
+    directionPreserved: true,
   };
 }
 

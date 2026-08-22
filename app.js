@@ -39,9 +39,13 @@ const NON_ASSET_KEYS = new Set([
 ]);
 
 const REC_CLASS = {
-  'Strong Buy': 'strong-buy',
+  'Strong UP': 'strong-buy',
+  UP: 'buy',
+  'Strong Buy': 'strong-buy', // legacy
   Buy: 'buy',
   Wait: 'wait',
+  DOWN: 'sell',
+  'Strong DOWN': 'strong-sell',
   Sell: 'sell',
   'Strong Sell': 'strong-sell',
 };

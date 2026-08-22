@@ -310,11 +310,12 @@ function applyManualStrikes(targets, now = Date.now()) {
   return out;
 }
 
-// Intentionally no Kalshi HTTP here. Dashboard/engine strikes are manual or
-// Coinbase current-price + wall-clock 15m fallbacks. Only the trading bot
-// talks to Kalshi (entries, exits, balance, fill polls).
+// Intentionally avoid an extra Kalshi list HTTP here: the bot caches strikes
+// from markets it already fetches for trading, and manual strikes override.
 function dashboardStrikeTargets() {
-  return applyManualStrikes({});
+  const fromBot =
+    bot && typeof bot.getEngineStrikeTargets === 'function' ? bot.getEngineStrikeTargets() : {};
+  return applyManualStrikes(fromBot);
 }
 
 function activeEngineSymbols() {
