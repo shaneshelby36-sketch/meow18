@@ -1161,7 +1161,41 @@ function testBotControls() {
 
   const reset = bot.resetPaperState();
   checkEq(reset.ok, true, 'reset paper in paper mode');
-  checkEq(bot.ledger.trades.length, 0, 'ledger cleared');
+  checkEq(bot.ledger.trades.length, 0, 'ledger cleared for fresh P&L');
+
+  // Paper reset keeps the newest 40 closed samples for calibration.
+  {
+    const keepBot = makeBot(mockClient({ status: 'open' }), { mode: 'paper', strategyMode: 'model' });
+    const now = Date.now();
+    keepBot.ledger.trades = [];
+    for (let i = 0; i < 45; i++) {
+      keepBot.ledger.trades.push({
+        id: `keep-${i}`,
+        mode: 'paper',
+        symbol: 'ETH',
+        side: 'yes',
+        status: 'closed',
+        closedAt: now - (45 - i) * 1000,
+        openedAt: now - (45 - i) * 1000 - 60_000,
+        engineProbability: 60 + (i % 5),
+        pnlCents: i % 2 === 0 ? 50 : -40,
+        exitReason: 'breakeven',
+        contracts: 1,
+        entryPriceCents: 55,
+      });
+    }
+    const r = keepBot.resetPaperState();
+    checkEq(r.ok, true, 'reset with history ok');
+    checkEq(r.keptSamples, 40, 'keeps last 40 closed samples');
+    checkEq(keepBot.ledger.trades.length, 0, 'live ledger still cleared');
+    const calTrades = Object.values(keepBot.calibration.buckets).reduce((s, b) => s + b.trades, 0);
+    check(calTrades > 0, 'calibration rebuilt from kept samples');
+    checkEq(calTrades, 40, 'calibration counts match kept samples');
+    const logPath = dataPath('trade-log.json');
+    const logRaw = JSON.parse(fs.readFileSync(logPath, 'utf8'));
+    const logTrades = Array.isArray(logRaw) ? logRaw : logRaw.trades || [];
+    checkEq(logTrades.length, 40, 'trade log retains 40 samples');
+  }
 }
 
 // ───────────────────────────── bot: exits / settlement ─────────────────────────────

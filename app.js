@@ -2565,7 +2565,14 @@ async function saveBotConfig(opts = {}) {
 }
 
 async function resetPaperHistory() {
-  if (!window.confirm('Reset all paper trades, P&L, reserve, and calibration stats? This cannot be undone.')) return;
+  if (
+    !window.confirm(
+      'Reset paper P&L, reserve, and open trades?\n\n' +
+        'The newest 40 closed trades are kept so calibration stats are not wiped to zero. Full history is archived. This cannot be undone.'
+    )
+  ) {
+    return;
+  }
   const { engineUrl } = loadSettings();
   const feedback = document.getElementById('bot-settings-feedback');
   try {

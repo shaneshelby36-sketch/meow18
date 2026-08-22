@@ -37,6 +37,9 @@ const CALIBRATION_GUIDANCE = {
   best: 200,
 };
 
+/** Closed trades retained across paper reset so calibration isn't wiped to zero. */
+const PAPER_RESET_KEEP_SAMPLES = CALIBRATION_GUIDANCE.minToStartTrusting;
+
 function loadCalibration() {
   try {
     if (fs.existsSync(CALIBRATION_PATH)) {
@@ -3465,7 +3468,7 @@ function upsertTradeLog(entry) {
   saveTradeLog(trades);
 }
 
-function clearTradeLog({ archive = true } = {}) {
+function clearTradeLog({ archive = true, keepTrades = null } = {}) {
   const existing = loadTradeLog();
   if (archive && existing.length) {
     try {
@@ -3479,7 +3482,47 @@ function clearTradeLog({ archive = true } = {}) {
       console.error('[bot] failed to archive trade log before clear:', err.message);
     }
   }
-  saveTradeLog([]);
+  const kept = Array.isArray(keepTrades) ? keepTrades : [];
+  saveTradeLog(kept);
+}
+
+/** Newest-first closed trades (non-shadow), capped for paper-reset retention. */
+function pickRecentClosedTradeSamples(trades, keep = PAPER_RESET_KEEP_SAMPLES) {
+  const n = Math.max(0, Math.floor(Number(keep) || 0));
+  if (n <= 0) return [];
+  const closed = (Array.isArray(trades) ? trades : [])
+    .filter((t) => t && t.status === 'closed' && !t.shadow)
+    .slice()
+    .sort((a, b) => {
+      const ta = Number(a.closedAt) || Number(a.openedAt) || 0;
+      const tb = Number(b.closedAt) || Number(b.openedAt) || 0;
+      return tb - ta;
+    });
+  const out = [];
+  const seen = new Set();
+  for (const t of closed) {
+    const id = String(t.id || '');
+    if (id && seen.has(id)) continue;
+    if (id) seen.add(id);
+    out.push(t);
+    if (out.length >= n) break;
+  }
+  return out;
+}
+
+/** Rebuild bot probability-bucket calibration from a closed-trade sample. */
+function rebuildCalibrationFromTrades(trades) {
+  const buckets = {};
+  for (const trade of trades || []) {
+    if (!trade || trade.status !== 'closed') continue;
+    if (trade.engineProbability == null) continue;
+    const bucketKey = String(Math.min(90, Math.floor(Number(trade.engineProbability) / 10) * 10));
+    if (!Number.isFinite(Number(bucketKey))) continue;
+    if (!buckets[bucketKey]) buckets[bucketKey] = { trades: 0, wins: 0 };
+    buckets[bucketKey].trades += 1;
+    if (Number(trade.pnlCents) > 0) buckets[bucketKey].wins += 1;
+  }
+  return { buckets };
 }
 
 /**
@@ -4175,6 +4218,14 @@ class TradingBot {
     if (this.config.mode !== 'paper') {
       return { ok: false, message: 'Paper history can only be reset while the bot is in paper mode.' };
     }
+    // Keep the newest closed samples so calibration isn't wiped to empty.
+    const keepN = PAPER_RESET_KEEP_SAMPLES;
+    const merged = pickRecentClosedTradeSamples(
+      [...(this.ledger.trades || []), ...loadTradeLog()],
+      keepN
+    );
+    const kept = pickRecentClosedTradeSamples(merged, keepN);
+
     this.ledger = {
       trades: [],
       reserveCents: 0,
@@ -4185,16 +4236,26 @@ class TradingBot {
       periodStartTime: Date.now(),
       activityLog: [],
     };
-    this.calibration = { buckets: {} };
+    this.calibration = rebuildCalibrationFromTrades(kept);
     this.lastError = null;
-    this.lastDecision = 'Paper trading history and statistics were reset.';
-    clearTradeLog({ archive: true });
+    const keptMsg =
+      kept.length > 0
+        ? ` Kept last ${kept.length} closed trade${kept.length === 1 ? '' : 's'} for calibration.`
+        : '';
+    this.lastDecision =
+      `Paper P&L, reserve, and open book were reset.${keptMsg}`;
+    clearTradeLog({ archive: true, keepTrades: kept });
     this._clearAllShadowBooks();
-    this._logActivity(this.lastDecision, { kind: 'reset' });
+    this._logActivity(this.lastDecision, { kind: 'reset', keptSamples: kept.length });
     this._persist();
     this._persistShadowBooks();
     saveCalibration(this.calibration);
-    return { ok: true, message: 'Paper trading history and statistics were reset.' };
+    return {
+      ok: true,
+      message: this.lastDecision,
+      keptSamples: kept.length,
+      keepTarget: keepN,
+    };
   }
 
   /**
@@ -10150,6 +10211,9 @@ module.exports = {
   MODEL_AUTO_SWITCH_MIN_LEAD_DEFAULT,
   MODEL_AUTO_SWITCH_COOLDOWN_MINUTES_DEFAULT,
   isForceRetryExitReason,
+  PAPER_RESET_KEEP_SAMPLES,
+  pickRecentClosedTradeSamples,
+  rebuildCalibrationFromTrades,
   modelConfirmCrossCents,
   modelConfirmMaxExtensionCents,
   modelConfirmMinContinueCents,
