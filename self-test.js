@@ -6668,7 +6668,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, stillUp);
-    checkEq(trade.exitReason, 'model_lean_stop', 'deep red + firm lean stops via fast-red/dump cut');
+    checkEq(trade.status, 'open', 'deep red + firm lean holds (no price lean-stop)');
   }
 
   // Small red + firm lean (<8s) still holds — bounce window
@@ -6711,7 +6711,7 @@ async function testModelStrategy() {
     checkEq(trade.status, 'open', 'small red (−2¢) + firm lean holds under fast-red');
   }
 
-  // Hard cliff can still be enabled via config when wanted
+  // Hard cliff config no longer price-stops MODEL — firm lean holds
   {
     const now = Date.now();
     const bot = makeBot(
@@ -6748,8 +6748,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, stillUp);
-    checkEq(trade.exitReason, 'model_dip_stop', 'config hard cliff still works when set');
-    checkEq(trade.exitPriceCents, 48, 'hard cliff at live bid');
+    checkEq(trade.status, 'open', 'firm lean ignores legacy hard-cliff config');
   }
 
   // Soft lean (50/50) while flat → preemptive BE (don't wait for clear against / dump)
@@ -6908,8 +6907,8 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, against);
-    checkEq(trade.exitReason, 'model_lean_stop', 'underwater + lean against stops ASAP');
-    checkEq(trade.exitPriceCents, 50, 'lean-stop fills at live bid');
+    checkEq(trade.exitReason, 'breakeven', 'underwater + lean against → BE/cut');
+    checkEq(trade.exitPriceCents, 55, 'paper BE books entry');
   }
 
   // Underwater + live lean against (lock still with us) → stop ASAP
@@ -6949,7 +6948,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, liveFlip);
-    checkEq(trade.exitReason, 'model_lean_stop', 'red + live lean against stops ASAP');
+    checkEq(trade.exitReason, 'breakeven', 'red + live lean against → BE/cut');
   }
 
   // Green + engine against but under minTp → hold (no micro TP)
@@ -7054,7 +7053,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, weakRed);
-    checkEq(trade.exitReason, 'model_lean_stop', 'weak confidence while red → model cut');
+    checkEq(trade.exitReason, 'breakeven', 'weak confidence while red → BE/cut');
   }
 
   // Red + firm model still with us (high conf) → brief bounce window
@@ -7323,7 +7322,7 @@ async function testModelStrategy() {
     checkEq(trade.status, 'open', '78→67 stays open toward hard floor 55');
   }
 
-  // Fast dump pace toward 55 after bid is near floor → lean-stop
+  // Fast dump near floor + firm lean → hold (no pace lean-stop)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7351,16 +7350,16 @@ async function testModelStrategy() {
         ready: true,
         price: 3000,
         windows: {
-          w5: { ...win(50, 60), tracking: { predictedDirection: 'UP' } },
-          w10: win(50, 60),
-          w15: win(50, 60),
+          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
         },
       },
     });
-    checkEq(trade.exitReason, 'model_lean_stop', 'fast dump near floor → lean-stop');
+    checkEq(trade.status, 'open', 'fast dump near floor + firm lean → hold');
   }
 
-  // Already ≤55 → lean-stop
+  // Bid ≤55 + firm lean → hold (no bid-floor stop)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7381,19 +7380,20 @@ async function testModelStrategy() {
       peakHeldBidCents: 60,
       windowCloseTime: now + 12 * 60 * 1000,
       openedAt: now - 20_000,
+      modelEntryHeldProb: 62,
     });
     await bot._manageOpenTrade(trade, {
       ETH: {
         ready: true,
         price: 3000,
         windows: {
-          w5: { ...win(50, 60), tracking: { predictedDirection: 'UP' } },
-          w10: win(50, 60),
-          w15: win(50, 60),
+          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
         },
       },
     });
-    checkEq(trade.exitReason, 'model_lean_stop', 'bid ≤55 lean-stops');
+    checkEq(trade.status, 'open', 'bid ≤55 + firm lean → hold');
   }
 
   check(
@@ -7424,7 +7424,7 @@ async function testModelStrategy() {
     );
   }
 
-  // Red + lean with us for >8s → stop
+  // Red + lean with us for >8s → hold (no price lean-stop)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7455,10 +7455,10 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'model_lean_stop', 'still red after 8s stops even if lean with us');
+    checkEq(trade.status, 'open', 'still red after 8s + firm lean → hold');
   }
 
-  // Bid dump off peak while lean still UP → stop early (XRP 68→18 style)
+  // Bid dump off peak while lean still UP → hold (no price dump cut)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7489,11 +7489,10 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'model_lean_stop', '5¢ peak slide stops even if lean still UP');
-    checkEq(trade.exitPriceCents, 63, 'dump cut at live bid');
+    checkEq(trade.status, 'open', 'peak slide + firm lean → hold');
   }
 
-  // Fast red: −4¢ while lean still with us
+  // Fast red while lean still with us → hold
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7524,8 +7523,7 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'model_lean_stop', 'fast red at −4¢ without waiting for lean flip');
-    checkEq(trade.exitPriceCents, 70, 'fast red fills at live bid');
+    checkEq(trade.status, 'open', 'fast red + firm lean → hold');
   }
 
   // Soft lean + still green under minTp → hold (don't scratch 84→86 as TP)
@@ -7701,10 +7699,7 @@ async function testModelStrategy() {
         },
       },
     });
-    check(
-      trade.exitReason === 'model_lean_stop' || trade.exitReason === 'breakeven',
-      'red + lean against → BE/cut (not firm hold)'
-    );
+    check(trade.exitReason === 'breakeven', 'red + lean against → BE/cut (not firm hold)');
   }
 
   // Post-exit cooldown blocks reopen briefly (~60s scalp recycle)
@@ -7857,7 +7852,7 @@ async function testModelStrategy() {
     checkEq(trade.exitReason, undefined, 'no exit reason on haircut hold');
   }
 
-  // Gap dump paper fill capped at max loss (83→60 books −8¢ not −23¢)
+  // Gap dump while model against → BE/cut (no max-loss lean-stop)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7877,7 +7872,7 @@ async function testModelStrategy() {
       modelEntrySpreadCents: 2,
       peakHeldBidCents: 81,
       windowCloseTime: now + 12 * 60 * 1000,
-      openedAt: now - 5_000,
+      openedAt: now - 15_000,
       modelEntryHeldProb: 84,
     });
     await bot._manageOpenTrade(trade, {
@@ -7885,14 +7880,14 @@ async function testModelStrategy() {
         ready: true,
         price: 3000,
         windows: {
-          w5: { ...win(40, 70), tracking: { predictedDirection: 'UP' } },
+          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
           w10: win(45, 60),
           w15: win(45, 60),
         },
       },
     });
-    checkEq(trade.exitReason, 'model_lean_stop', 'gap dump stops via max-loss');
-    checkEq(trade.exitPriceCents, 75, 'paper books entry−8¢ not the 60¢ gap print');
+    checkEq(trade.exitReason, 'breakeven', 'gap dump + model against → BE/cut');
+    checkEq(trade.exitPriceCents, 83, 'paper BE books entry');
     checkEq(MODEL_MAX_LOSS_CENTS_DEFAULT, 8, 'default max loss 8¢');
     checkEq(modelAdverseExitFillCents({ entryPriceCents: 83 }, 60, {}, 'paper'), 75, 'adverse fill helper caps paper');
   }
@@ -8061,10 +8056,10 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'model_lean_stop', 'red >8s stops even if locked lean still UP');
+    checkEq(trade.status, 'open', 'red >8s + firm lean → hold');
   }
 
-  // Mid-session window switch: w10 DOWN against an underwater YES → lean-stop
+  // Mid-session window switch: w10 DOWN against underwater YES → BE/cut
   {
     const now = Date.now();
     const bot = makeBot(
@@ -8095,7 +8090,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, mid);
-    checkEq(trade.exitReason, 'model_lean_stop', 'w10 locked DOWN stops underwater YES');
+    checkEq(trade.exitReason, 'breakeven', 'w10 locked DOWN → BE/cut underwater YES');
   }
 
   // Reentrant lock: shadow cycle holds the lock, then _openPosition takes it again.

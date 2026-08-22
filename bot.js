@@ -21,7 +21,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 62;
+const SETTINGS_DEFAULTS_VERSION = 63;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -6588,10 +6588,6 @@ class TradingBot {
       const underwater = bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents < entry;
       const adverseCents =
         underwater && Number.isFinite(entry) ? Math.round(entry - heldSideBidCents) : 0;
-      const hardAdverseBase = modelHardAdverseCents(this.config);
-      const maxLoss = modelEffectiveMaxLossCents(trade, this.config);
-      // Follow the ticket's effective max loss (hard floor 55 for all, incl. 78+).
-      const hardAdverse = Math.max(hardAdverseBase || 0, maxLoss || 0);
       const faded = trade.modelInverted === true;
       const againstLocked =
         picked &&
@@ -6671,8 +6667,6 @@ class TradingBot {
           ? Math.max(0, adverseCents - entrySpread)
           : 0;
       const econUnderwater = trueAdverse > 0;
-      const adverseFill = (bid) =>
-        modelAdverseExitFillCents(trade, bid, this.config, this.config.mode);
 
       const peak = Number(trade.peakHeldBidCents);
       const peakAt = Number(trade.peakHeldBidAt);
@@ -6731,19 +6725,6 @@ class TradingBot {
         return;
       }
 
-      // Hard max-loss ceiling — gap dumps stop here; paper books ≤ max loss.
-      const hitMaxLoss =
-        (maxLoss > 0 && underwater && adverseCents >= maxLoss) ||
-        (hardAdverse > 0 && econUnderwater && trueAdverse >= hardAdverse) ||
-        (hardAdverse > 0 && underwater && adverseCents >= hardAdverse);
-      if (hitMaxLoss) {
-        await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
-          liveSellPriceCents: heldSideBidCents,
-        });
-        return;
-      }
-
-      const redDumpThreat = modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, this.config);
       const modelFirm = !!(picked && picked.window && engineClearlyWithUs);
       const againstBeDelay = modelLeanAgainstBeMs(this.config);
       const againstBeReady =
@@ -6774,16 +6755,10 @@ class TradingBot {
           return true;
         }
         if (underwater || econUnderwater) {
-          if (!econUnderwater || adverseCents <= Math.max(1, entrySpread + 1)) {
-            const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
-            await this._closePosition(trade, beFill, 'breakeven', {
-              liveSellPriceCents: heldSideBidCents,
-            });
-          } else {
-            await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
-              liveSellPriceCents: heldSideBidCents,
-            });
-          }
+          const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
+          await this._closePosition(trade, beFill, 'breakeven', {
+            liveSellPriceCents: heldSideBidCents,
+          });
           return true;
         }
         return false;
@@ -6793,18 +6768,11 @@ class TradingBot {
         if (await exitModelAgainst()) return;
       }
 
-      // Bid-led dump cut when model still firm (backup when probs lag Kalshi).
+      // Bid-led dump: only act when model is not firm (firm holds ignore price slides).
       const dumpPullback = modelDumpPullbackCents(this.config);
       if (!faded && bidOk && dumpPullback > 0 && pullback >= dumpPullback) {
         if (modelAgainst && (postFillAgainstReady || againstBeReady)) {
           if (await exitModelAgainst()) return;
-        } else if (underwater || econUnderwater) {
-          if (modelFirm && redDumpThreat) {
-            await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
-              liveSellPriceCents: heldSideBidCents,
-            });
-            return;
-          }
         } else if (isBankableGreen && heldForBank) {
           await this._closePosition(trade, heldSideBidCents, 'take_profit', {
             liveSellPriceCents: heldSideBidCents,
@@ -6817,38 +6785,6 @@ class TradingBot {
           });
           return;
         }
-      }
-
-      const fastRed = modelFastRedCents(this.config);
-      if (
-        !faded &&
-        bidOk &&
-        fastRed > 0 &&
-        econUnderwater &&
-        trueAdverse >= fastRed &&
-        heldMs >= MODEL_FAST_RED_MIN_HOLD_MS_DEFAULT &&
-        modelFirm &&
-        redDumpThreat
-      ) {
-        await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
-          liveSellPriceCents: heldSideBidCents,
-        });
-        return;
-      }
-
-      // Model still firm but ticket red — only give up on pace toward hard floor.
-      if (
-        !faded &&
-        bidOk &&
-        econUnderwater &&
-        modelFirm &&
-        heldMs >= MODEL_RED_GIVEUP_MS_DEFAULT &&
-        redDumpThreat
-      ) {
-        await this._closePosition(trade, adverseFill(heldSideBidCents), 'model_lean_stop', {
-          liveSellPriceCents: heldSideBidCents,
-        });
-        return;
       }
 
       // Late forced exits off by default (barrier + settle-close minutes = 0).
@@ -6987,9 +6923,9 @@ class TradingBot {
       else if (modelAgainst && (underwater || econUnderwater))
         why = `model against (${leanTxt}) — cutting red toward BE`;
       else if (underwater && modelFirm)
-        why = `model still firm (${leanTxt}) — max-loss / pace backstop only`;
-      else if (underwater && pullback >= modelDumpPullbackCents(this.config))
-        why = `bid −${pullback}¢ off peak — firm-hold backup`;
+        why = `model still firm (${leanTxt}) — holding (no price lean-stop)`;
+      else if (underwater && !modelFirm)
+        why = `model not firm (${leanTxt}) — BE when timer elapses`;
       else if (!armed && flatOrGreen && !liveFavors)
         why = `lean soft — exit armed (${leanTxt})`;
       else if (!armed && flatOrGreen) why = `green but under trail arm (need +${armCents}¢)`;

@@ -472,42 +472,42 @@
               <input id="bot-model-max-loss" type="range" min="4" max="20" step="1" />
               <span class="slider-value" id="bot-model-max-loss-value">—</span>
             </div>
-            <span class="field-hint">Hard cap — never lose more than this many ¢ below entry (default <strong>−8¢</strong>), even on 70¢+ tickets. Bid ≤ hard floor still cuts immediately.</span>
+            <span class="field-hint"><strong>Unused</strong> — MODEL exits follow <em>model still firm</em> only (not a −8¢ price cliff).</span>
           </label>
           <label>MODEL hard stop floor (¢)
             <div class="slider-row">
               <input id="bot-model-hard-floor" type="range" min="40" max="65" step="1" />
               <span class="slider-value" id="bot-model-hard-floor-value">—</span>
             </div>
-            <span class="field-hint">Bid ≤ this stops immediately (default <strong>55</strong>). Pace projection only after drawdown + sample when bid is near the floor.</span>
+            <span class="field-hint"><strong>Unused</strong> for exits. Entry “min room to floor” still blocks tight buys near 55.</span>
           </label>
           <label>MODEL pace lean-stop drawdown (% of room to floor)
             <div class="slider-row">
               <input id="bot-model-pace-drawdown" type="range" min="15" max="60" step="5" />
               <span class="slider-value" id="bot-model-pace-drawdown-value">—</span>
             </div>
-            <span class="field-hint">Pace lean-stop only after this much of the ride toward the hard floor (default <strong>35%</strong>, min <strong>8¢</strong>). 84→79 in ~11s holds (~10¢ needed); real dumps toward 55 can still cut.</span>
+            <span class="field-hint"><strong>Unused</strong> — pace lean-stop removed. Hold while firm; BE when lean turns.</span>
           </label>
           <label>MODEL pace sample (sec)
             <div class="slider-row">
               <input id="bot-model-pace-sample" type="range" min="2" max="20" step="1" />
               <span class="slider-value" id="bot-model-pace-sample-value">—</span>
             </div>
-            <span class="field-hint">Minimum hold time before pace projection is trusted (default <strong>8s</strong> — was 2s and caused 84→79 false stops).</span>
+            <span class="field-hint"><strong>Unused</strong> (pace lean-stop off).</span>
           </label>
           <label>MODEL rich stop floor (¢)
             <div class="slider-row">
               <input id="bot-model-rich-floor" type="range" min="0" max="75" step="1" />
               <span class="slider-value" id="bot-model-rich-floor-value">—</span>
             </div>
-            <span class="field-hint">Optional. Default <strong>off</strong> — everyone (incl. 78+) uses the hard floor. Only matters if set <em>below</em> the hard floor for extra room on rich asks.</span>
+            <span class="field-hint"><strong>Unused</strong> — exits no longer widen/tighten by price floor.</span>
           </label>
           <label>MODEL post-exit sit-out (sec)
             <div class="slider-row">
               <input id="bot-model-sitout" type="range" min="0" max="120" step="5" />
               <span class="slider-value" id="bot-model-sitout-value">—</span>
             </div>
-            <span class="field-hint">After BE/TP wait before rebuy (default <strong>60s</strong> / 1 min). After a red lean-stop, sit-out is <strong>2 min</strong>.</span>
+            <span class="field-hint">After BE/TP wait before rebuy (default <strong>60s</strong>). Model exits are BE/cut when lean turns — no separate lean-stop sit-out.</span>
           </label>
         </div>
 
