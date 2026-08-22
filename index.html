@@ -401,14 +401,14 @@
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />
               <span class="slider-value" id="bot-model-confidence-value">—</span>
             </div>
-            <span class="field-hint">Default <strong>55%</strong> (Core).</span>
+            <span class="field-hint">Default <strong>41%</strong> (Core).</span>
           </label>
           <label>MODEL live favor (pts)
             <div class="slider-row">
               <input id="bot-model-live-favor" type="range" min="0" max="15" step="1" />
               <span class="slider-value" id="bot-model-live-favor-value">—</span>
             </div>
-            <span class="field-hint">Live UP vs DOWN must lead by this many pts to enter. Default <strong>3</strong>. <strong>0</strong> = any lead.</span>
+            <span class="field-hint">Live UP vs DOWN must lead by this many pts to enter. Default <strong>2</strong>. <strong>0</strong> = any lead.</span>
           </label>
           <label>MODEL signal score strength
             <div class="slider-row">
@@ -436,6 +436,13 @@
               <span class="slider-value" id="bot-model-min-entry-value">—</span>
             </div>
             <span class="field-hint">Default <strong>65¢</strong>. Floor for any MODEL buy.</span>
+          </label>
+          <label>MODEL min room to hard floor (¢)
+            <div class="slider-row">
+              <input id="bot-model-min-room-floor" type="range" min="0" max="25" step="1" />
+              <span class="slider-value" id="bot-model-min-room-floor-value">—</span>
+            </div>
+            <span class="field-hint">Entry ask must be at least this many ¢ above the hard stop floor (default <strong>10</strong>). Blocks 57¢ buys when floor is 55. <strong>0</strong> = off.</span>
           </label>
           <label>MODEL low-ask conviction (conf %)
             <div class="slider-row">
@@ -465,14 +472,14 @@
               <input id="bot-model-max-loss" type="range" min="4" max="20" step="1" />
               <span class="slider-value" id="bot-model-max-loss-value">—</span>
             </div>
-            <span class="field-hint">Base cliff on tickets already near the hard floor (default <strong>−8¢</strong>). Widened by floors below.</span>
+            <span class="field-hint">Hard cap — never lose more than this many ¢ below entry (default <strong>−8¢</strong>), even on 70¢+ tickets. Bid ≤ hard floor still cuts immediately.</span>
           </label>
           <label>MODEL hard stop floor (¢)
             <div class="slider-row">
               <input id="bot-model-hard-floor" type="range" min="40" max="65" step="1" />
               <span class="slider-value" id="bot-model-hard-floor-value">—</span>
             </div>
-            <span class="field-hint">All non-rich tickets can ride down to this bid (default <strong>55</strong>). Bid ≤ floor stops immediately; pace projection only after drawdown + sample below.</span>
+            <span class="field-hint">Bid ≤ this stops immediately (default <strong>55</strong>). Pace projection only after drawdown + sample when bid is near the floor.</span>
           </label>
           <label>MODEL pace lean-stop drawdown (% of room to floor)
             <div class="slider-row">

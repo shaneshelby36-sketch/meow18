@@ -21,7 +21,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 60;
+const SETTINGS_DEFAULTS_VERSION = 61;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -633,7 +633,7 @@ function modelSignalDropCents(signalEntryCents, signalBidCents) {
 /** Live lean against held side — low so stops fire early (preemptive). */
 const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 2;
 /** Entry: live lean must favor the locked side by at least this many pts (0 = any lead). */
-const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 3;
+const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 2;
 /** Don't early-exit a Model hold until it's been open at least this long. */
 const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
 /** After Model BE/TP, sit out that coin this long before rebuy. */
@@ -1139,8 +1139,8 @@ function modelStopFloorForEntryCents(entryCents, config = {}) {
 }
 
 /**
- * Hard max-loss for this ticket. Base −N¢, widened down to the hard floor (55¢)
- * for all entries including 78+/80/85.
+ * Hard max-loss for this ticket. Slider −N¢ is a cap from entry; never widened
+ * to ride all the way to the hard floor (that was booking 70→61 / −9¢ on an 8¢ knob).
  */
 function modelEffectiveMaxLossCents(trade, config = {}) {
   const base = modelMaxLossCents(config);
@@ -1151,7 +1151,7 @@ function modelEffectiveMaxLossCents(trade, config = {}) {
   const floor = modelStopFloorForEntryCents(entry, config);
   if (!(floor > 0) || entry <= floor) return base;
   const room = Math.max(0, Math.round(entry - floor));
-  return Math.max(base, room);
+  return Math.min(base, room);
 }
 
 /**
@@ -1413,11 +1413,33 @@ function modelEntryDumpRisk({
  * Normal entries need ≥ modelMinEntry (default 65¢). Below that only if confidence + lean
  * are especially strong, and never below the perfect floor.
  */
+function modelMinRoomToFloorCents(config = {}) {
+  const n = Number(config.modelMinRoomToFloorCents);
+  if (Number.isFinite(n) && n >= 0) return Math.round(n);
+  return MODEL_MIN_ROOM_TO_FLOOR_CENTS_DEFAULT;
+}
+
+/** Block entries with too little cushion above the hard stop floor. */
+function modelEntryRoomToFloorGate(priceCents, config = {}) {
+  const price = Number(priceCents);
+  const floor = modelHardStopFloorCents(config);
+  const minRoom = modelMinRoomToFloorCents(config);
+  if (minRoom <= 0 || !Number.isFinite(price) || !(floor > 0)) return { ok: true };
+  const room = Math.round(price - floor);
+  if (room >= minRoom) return { ok: true };
+  return {
+    ok: false,
+    reason: `only ${Math.max(0, room)}¢ room to ${floor}¢ hard floor (need ≥${minRoom}¢)`,
+  };
+}
+
 function modelPriceAllowed(priceCents, window, config = {}) {
   const price = Number(priceCents);
   if (!Number.isFinite(price) || price < 1 || price > 99) {
     return { ok: false, reason: 'invalid price' };
   }
+  const roomGate = modelEntryRoomToFloorGate(price, config);
+  if (!roomGate.ok) return roomGate;
   const maxEntry = Number.isFinite(Number(config.modelMaxEntryCents))
     ? Number(config.modelMaxEntryCents)
     : MODEL_MAX_ENTRY_DEFAULT_CENTS;
@@ -1836,7 +1858,7 @@ const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
 const MODEL_PERFECT_LEAN_DEFAULT = 15;
 /** Model confidence floor default. */
-const MODEL_MIN_CONFIDENCE_DEFAULT = 55;
+const MODEL_MIN_CONFIDENCE_DEFAULT = 41;
 /** Trail off peak — unused by simplified Model exits (kept for config compat). */
 const MODEL_TRAIL_CENTS_DEFAULT = 0;
 /** Soft lean margin — treat 52/48 as turning (bank before the dump). */
@@ -1853,8 +1875,10 @@ const MODEL_MAX_LOSS_CENTS_DEFAULT = 8;
  * more room on very rich entries; values above hard floor are ignored.
  */
 const MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT = 0;
-/** Absolute bid floor for all tickets — e.g. 75→55, 78→55, 85→55. */
+/** Absolute bid floor for all tickets — bid ≤ this stops immediately. */
 const MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT = 55;
+/** Min entry ask − hard floor required to open (blocks 57¢ tickets when floor is 55). */
+const MODEL_MIN_ROOM_TO_FLOOR_CENTS_DEFAULT = 10;
 /** @deprecated mid-band folded into hard floor; kept for saved configs. */
 const MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT = MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT;
 const MODEL_MID_RICH_ENTRY_MIN_CENTS_DEFAULT = 72;
@@ -2359,6 +2383,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelHardAdverseCents',
   'modelMaxLossCents',
   'modelHardStopFloorCents',
+  'modelMinRoomToFloorCents',
   'modelRichStopFloorCents',
   'modelMidRichStopFloorCents',
   'modelRichStopEntryMinCents',
@@ -3414,6 +3439,7 @@ class TradingBot {
       modelHardAdverseCents: MODEL_HARD_ADVERSE_CENTS_DEFAULT,
       modelMaxLossCents: MODEL_MAX_LOSS_CENTS_DEFAULT,
       modelHardStopFloorCents: MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT,
+      modelMinRoomToFloorCents: MODEL_MIN_ROOM_TO_FLOOR_CENTS_DEFAULT,
       modelLeanStopBarrierCents: MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT,
       modelLeanStopPaceDrawdownPct: MODEL_LEAN_STOP_PACE_DRAWDOWN_PCT_DEFAULT,
       modelLeanStopPaceMinSampleSeconds: MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT / 1000,
@@ -9864,12 +9890,15 @@ module.exports = {
   modelMaxLossCents,
   modelEffectiveMaxLossCents,
   modelHardStopFloorCents,
+  modelMinRoomToFloorCents,
+  modelEntryRoomToFloorGate,
   modelRichStopFloorCents,
   modelAdverseExitFillCents,
   modelRichAskCents,
   MODEL_MAX_LOSS_CENTS_DEFAULT,
   MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT,
   MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT,
+  MODEL_MIN_ROOM_TO_FLOOR_CENTS_DEFAULT,
   MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT,
   MODEL_RICH_STOP_ENTRY_MIN_CENTS_DEFAULT,
   MODEL_RICH_STOP_MIN_CONFIDENCE_DEFAULT,

@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, scoreModelSetupsAgainstLog, modelSetupById, MODEL_SETUPS, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelEngineClearlyWithUs, modelPriceAllowed, modelLowAskConvictionGate, modelKalshiFavoriteSide, modelKalshiFavoriteGate, MODEL_KALSHI_FAVORITE_CENTS_DEFAULT, checkModelPostExitCooldown, modelSignalDropCents, modelAdverseExitFillCents, modelEffectiveMaxLossCents, modelOnPaceBelowBarrier, modelShouldLeanStopRed, modelLeanStopMinAdverseCents, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT, MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT, modelSideSwitchConfirmMs, modelSideSwitchConfirmTicks, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_ARM_CENTS_DEFAULT, MODEL_MOMENTUM_STALL_MS_DEFAULT, MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, modelTakeProfitMeetsFloor, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel, summarizeLedgerCapital, rebuildLedgerSkimFromTrades, MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT, isForceRetryExitReason } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, scoreModelSetupsAgainstLog, modelSetupById, MODEL_SETUPS, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelEngineClearlyWithUs, modelPriceAllowed, modelEntryRoomToFloorGate, modelLowAskConvictionGate, modelKalshiFavoriteSide, modelKalshiFavoriteGate, MODEL_KALSHI_FAVORITE_CENTS_DEFAULT, checkModelPostExitCooldown, modelSignalDropCents, modelAdverseExitFillCents, modelEffectiveMaxLossCents, modelOnPaceBelowBarrier, modelShouldLeanStopRed, modelLeanStopMinAdverseCents, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT, MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT, modelSideSwitchConfirmMs, modelSideSwitchConfirmTicks, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_ARM_CENTS_DEFAULT, MODEL_MOMENTUM_STALL_MS_DEFAULT, MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, modelTakeProfitMeetsFloor, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel, summarizeLedgerCapital, rebuildLedgerSkimFromTrades, MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT, isForceRetryExitReason } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -7413,6 +7413,15 @@ async function testModelStrategy() {
       16,
       '55% drawdown slider raises min adverse'
     );
+    check(
+      !modelEntryRoomToFloorGate(57, {}).ok,
+      '57¢ entry blocked — only 2¢ room to 55 floor (need 10)'
+    );
+    check(modelEntryRoomToFloorGate(66, {}).ok, '66¢ entry ok — 11¢ room to floor');
+    check(
+      !modelPriceAllowed(57, { confidence: 90, probabilityUp: 20, probabilityDown: 80 }, {}).ok,
+      'modelPriceAllowed rejects near-floor 57¢'
+    );
   }
 
   // Red + lean with us for >8s → stop
@@ -7863,46 +7872,46 @@ async function testModelStrategy() {
     );
     checkEq(
       modelEffectiveMaxLossCents({ entryPriceCents: 70, engineConfidence: 60 }, {}),
-      15,
-      '70¢ entry: ride to 55¢ floor (−15¢)'
+      8,
+      '70¢ entry: max-loss slider caps at −8¢ (not ride to 55)'
     );
     checkEq(
       modelEffectiveMaxLossCents({ entryPriceCents: 75, engineConfidence: 80 }, {}),
-      20,
-      '75¢ entry: ride to 55¢ floor (−20¢)'
+      8,
+      '75¢ entry: max-loss slider caps at −8¢'
     );
     checkEq(
       modelEffectiveMaxLossCents({ entryPriceCents: 78, engineConfidence: 80 }, {}),
-      23,
-      '78¢ entry: hard floor 55 (−23¢)'
+      8,
+      '78¢ entry: max-loss slider caps at −8¢'
     );
     checkEq(
       modelEffectiveMaxLossCents({ entryPriceCents: 80, engineConfidence: 75 }, {}),
-      25,
-      '80¢ entry: hard floor 55 (−25¢)'
+      8,
+      '80¢ entry: max-loss slider caps at −8¢'
     );
     checkEq(
       modelEffectiveMaxLossCents({ entryPriceCents: 85, engineConfidence: 72 }, {}),
-      30,
-      '85¢ entry: hard floor 55 (−30¢)'
+      8,
+      '85¢ entry: max-loss slider caps at −8¢'
     );
     checkEq(
       modelEffectiveMaxLossCents(
         { entryPriceCents: 85, engineConfidence: 72 },
         { modelRichStopFloorCents: 68, modelRichStopEntryMinCents: 80 }
       ),
-      30,
+      8,
       'saved rich floor 68 is ignored when above hard 55'
     );
     checkEq(
       modelAdverseExitFillCents({ entryPriceCents: 75, engineConfidence: 78 }, 50, {}, 'paper'),
-      55,
-      'paper 75¢ gap books hard floor 55'
+      67,
+      'paper 75¢ gap books max-loss cap 67 (not floor 55)'
     );
     checkEq(
       modelAdverseExitFillCents({ entryPriceCents: 82, engineConfidence: 78 }, 50, {}, 'paper'),
-      55,
-      'paper 82¢ gap books hard floor 55'
+      74,
+      'paper 82¢ gap books max-loss cap 74'
     );
     checkEq(modelSideSwitchConfirmMs(12), 15_000, 'early window: 15s side-switch confirm');
     checkEq(modelSideSwitchConfirmMs(7), 8_000, 'mid window: 8s confirm');

@@ -99,7 +99,7 @@ const bot = KALSHI_ENABLED
         takeProfitCents: parseInt(process.env.KALSHI_TAKE_PROFIT_CENTS || '15', 10),
         minEntryCents: parseInt(process.env.KALSHI_MIN_ENTRY_CENTS || '40', 10),
         minMinutesToOpen: parseFloat(process.env.KALSHI_MIN_MINUTES_TO_OPEN || '3'),
-        modelMinConfidence: parseFloat(process.env.KALSHI_MODEL_MIN_CONFIDENCE || '55'),
+        modelMinConfidence: parseFloat(process.env.KALSHI_MODEL_MIN_CONFIDENCE || '41'),
         stopRecoveryCents: parseInt(process.env.KALSHI_STOP_RECOVERY_CENTS || '6', 10),
         stopRecoveryMaxMinutes: parseFloat(process.env.KALSHI_STOP_RECOVERY_MAX_MINUTES || '15'),
         peerCascadeMaxMinutes: parseFloat(process.env.KALSHI_PEER_CASCADE_MAX_MINUTES || '3'),

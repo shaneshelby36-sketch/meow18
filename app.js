@@ -1544,6 +1544,7 @@ const SLIDER_UNITS = {
   'bot-minentries': (v) => `${Math.round(v)}¢`,
   'bot-model-confidence': (v) => `${Math.round(v)}%`,
   'bot-model-live-favor': (v) => (Number(v) <= 0 ? 'any lead' : `≥${Math.round(v)} pts`),
+  'bot-model-min-room-floor': (v) => (Number(v) <= 0 ? 'off' : `≥${Math.round(v)}¢`),
   'bot-model-signal-dom': (v) => {
     const n = Number(v);
     if (!(n > 0)) return 'off';
@@ -1659,6 +1660,7 @@ function formatSetupKnobs(s) {
   if (s.modelLeanStopBarrierCents != null) bits.push(`barrier ${s.modelLeanStopBarrierCents}¢`);
   if (s.modelLeanStopPaceDrawdownPct != null) bits.push(`pace ${s.modelLeanStopPaceDrawdownPct}%`);
   if (s.modelLeanStopPaceMinSampleSeconds != null) bits.push(`pace ${s.modelLeanStopPaceMinSampleSeconds}s`);
+  if (s.modelMinRoomToFloorCents != null) bits.push(`room ${s.modelMinRoomToFloorCents}¢`);
   return bits.join(' · ');
 }
 
@@ -1943,6 +1945,7 @@ function wireSliderDisplays() {
     'bot-model-confirm-cross',
     'bot-model-confirm-ext',
     'bot-model-min-entry',
+    'bot-model-min-room-floor',
     'bot-model-low-ask-conf',
     'bot-model-max-entry',
     'bot-model-bank-green',
@@ -2064,6 +2067,7 @@ function wireBotConfigAutoSave() {
     'bot-model-confirm-cross',
     'bot-model-confirm-ext',
     'bot-model-min-entry',
+    'bot-model-min-room-floor',
     'bot-model-low-ask-conf',
     'bot-model-max-entry',
     'bot-model-bank-green',
@@ -2159,11 +2163,11 @@ async function loadBotConfigIntoForm() {
       modelShadowBooks.value = on ? 'on' : 'off';
     }
     const modelConf = document.getElementById('bot-model-confidence');
-    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 55;
+    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 41;
     const modelLiveFavor = document.getElementById('bot-model-live-favor');
     if (modelLiveFavor) {
       modelLiveFavor.value =
-        c.modelEntryLiveLeanMarginPct != null ? c.modelEntryLiveLeanMarginPct : 3;
+        c.modelEntryLiveLeanMarginPct != null ? c.modelEntryLiveLeanMarginPct : 2;
     }
     const modelSignalDom = document.getElementById('bot-model-signal-dom');
     if (modelSignalDom) {
@@ -2185,6 +2189,11 @@ async function loadBotConfigIntoForm() {
     }
     const modelMinEntry = document.getElementById('bot-model-min-entry');
     if (modelMinEntry) modelMinEntry.value = c.modelMinEntryCents != null ? c.modelMinEntryCents : 65;
+    const modelMinRoomFloor = document.getElementById('bot-model-min-room-floor');
+    if (modelMinRoomFloor) {
+      modelMinRoomFloor.value =
+        c.modelMinRoomToFloorCents != null ? c.modelMinRoomToFloorCents : 10;
+    }
     const modelLowAskConf = document.getElementById('bot-model-low-ask-conf');
     if (modelLowAskConf) {
       modelLowAskConf.value =
@@ -2293,6 +2302,7 @@ async function loadBotConfigIntoForm() {
       'bot-model-confirm-cross',
       'bot-model-confirm-ext',
       'bot-model-min-entry',
+    'bot-model-min-room-floor',
       'bot-model-low-ask-conf',
       'bot-model-max-entry',
       'bot-model-bank-green',
@@ -2450,8 +2460,8 @@ async function saveBotConfig(opts = {}) {
     modelInvertSide: document.getElementById('bot-model-invert')?.value || 'off',
     modelAutoSwitchSetup: document.getElementById('bot-model-auto-switch')?.value || 'off',
     modelShadowBooks: document.getElementById('bot-model-shadow-books')?.value || 'off',
-    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '55'),
-    modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '3'),
+    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '41'),
+    modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '2'),
     modelSignalDominanceMin: (() => {
       const raw = parseFloat(document.getElementById('bot-model-signal-dom')?.value || '0');
       if (!Number.isFinite(raw) || raw <= 0) return 0;
@@ -2462,6 +2472,9 @@ async function saveBotConfig(opts = {}) {
       document.getElementById('bot-model-confirm-ext')?.value || '15'
     ),
     modelMinEntryCents: parseFloat(document.getElementById('bot-model-min-entry')?.value || '65'),
+    modelMinRoomToFloorCents: parseFloat(
+      document.getElementById('bot-model-min-room-floor')?.value || '10'
+    ),
     modelLowAskMinConfidence: parseFloat(document.getElementById('bot-model-low-ask-conf')?.value || '75'),
     modelMaxEntryCents: parseFloat(document.getElementById('bot-model-max-entry')?.value || '93'),
     modelLowPriceMaxCents: 70,
