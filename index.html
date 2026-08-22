@@ -472,7 +472,21 @@
               <input id="bot-model-hard-floor" type="range" min="40" max="65" step="1" />
               <span class="slider-value" id="bot-model-hard-floor-value">—</span>
             </div>
-            <span class="field-hint">All non-rich tickets can ride down to this bid (default <strong>55</strong>). Soft lean-stop pace also uses this barrier.</span>
+            <span class="field-hint">All non-rich tickets can ride down to this bid (default <strong>55</strong>). Bid ≤ floor stops immediately; pace projection only after drawdown + sample below.</span>
+          </label>
+          <label>MODEL pace lean-stop drawdown (% of room to floor)
+            <div class="slider-row">
+              <input id="bot-model-pace-drawdown" type="range" min="15" max="60" step="5" />
+              <span class="slider-value" id="bot-model-pace-drawdown-value">—</span>
+            </div>
+            <span class="field-hint">Pace lean-stop only after this much of the ride toward the hard floor (default <strong>35%</strong>, min <strong>8¢</strong>). 84→79 in ~11s holds (~10¢ needed); real dumps toward 55 can still cut.</span>
+          </label>
+          <label>MODEL pace sample (sec)
+            <div class="slider-row">
+              <input id="bot-model-pace-sample" type="range" min="2" max="20" step="1" />
+              <span class="slider-value" id="bot-model-pace-sample-value">—</span>
+            </div>
+            <span class="field-hint">Minimum hold time before pace projection is trusted (default <strong>8s</strong> — was 2s and caused 84→79 false stops).</span>
           </label>
           <label>MODEL rich stop floor (¢)
             <div class="slider-row">

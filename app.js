@@ -1557,6 +1557,8 @@ const SLIDER_UNITS = {
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
   'bot-model-max-loss': (v) => `−${Math.round(v)}¢`,
   'bot-model-hard-floor': (v) => `${Math.round(v)}¢ floor`,
+  'bot-model-pace-drawdown': (v) => `${Math.round(v)}% of room`,
+  'bot-model-pace-sample': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s sample`),
   'bot-model-rich-floor': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}¢ floor`),
   'bot-model-sitout': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-settle-min': (v) => `${Math.round(v)}¢`,
@@ -1655,6 +1657,8 @@ function formatSetupKnobs(s) {
   if (s.modelFastRedCents != null) bits.push(`fast-red ${s.modelFastRedCents}¢`);
   if (s.modelMinEntryCents != null) bits.push(`min ${s.modelMinEntryCents}¢`);
   if (s.modelLeanStopBarrierCents != null) bits.push(`barrier ${s.modelLeanStopBarrierCents}¢`);
+  if (s.modelLeanStopPaceDrawdownPct != null) bits.push(`pace ${s.modelLeanStopPaceDrawdownPct}%`);
+  if (s.modelLeanStopPaceMinSampleSeconds != null) bits.push(`pace ${s.modelLeanStopPaceMinSampleSeconds}s`);
   return bits.join(' · ');
 }
 
@@ -1944,6 +1948,8 @@ function wireSliderDisplays() {
     'bot-model-bank-green',
     'bot-model-max-loss',
     'bot-model-hard-floor',
+    'bot-model-pace-drawdown',
+    'bot-model-pace-sample',
     'bot-model-rich-floor',
     'bot-model-late-extend-conf',
     'bot-settle-min',
@@ -2195,6 +2201,16 @@ async function loadBotConfigIntoForm() {
       modelHardFloor.value =
         c.modelHardStopFloorCents != null ? c.modelHardStopFloorCents : 55;
     }
+    const modelPaceDrawdown = document.getElementById('bot-model-pace-drawdown');
+    if (modelPaceDrawdown) {
+      modelPaceDrawdown.value =
+        c.modelLeanStopPaceDrawdownPct != null ? c.modelLeanStopPaceDrawdownPct : 35;
+    }
+    const modelPaceSample = document.getElementById('bot-model-pace-sample');
+    if (modelPaceSample) {
+      modelPaceSample.value =
+        c.modelLeanStopPaceMinSampleSeconds != null ? c.modelLeanStopPaceMinSampleSeconds : 8;
+    }
     const modelRichFloor = document.getElementById('bot-model-rich-floor');
     if (modelRichFloor) {
       modelRichFloor.value =
@@ -2282,6 +2298,8 @@ async function loadBotConfigIntoForm() {
       'bot-model-bank-green',
       'bot-model-max-loss',
       'bot-model-hard-floor',
+      'bot-model-pace-drawdown',
+      'bot-model-pace-sample',
       'bot-model-rich-floor',
       'bot-model-sitout',
       'bot-settle-min',
@@ -2454,6 +2472,12 @@ async function saveBotConfig(opts = {}) {
     modelHardAdverseCents: parseFloat(document.getElementById('bot-model-max-loss')?.value || '8'),
     modelHardStopFloorCents: parseFloat(document.getElementById('bot-model-hard-floor')?.value || '55'),
     modelLeanStopBarrierCents: parseFloat(document.getElementById('bot-model-hard-floor')?.value || '55'),
+    modelLeanStopPaceDrawdownPct: parseFloat(
+      document.getElementById('bot-model-pace-drawdown')?.value || '35'
+    ),
+    modelLeanStopPaceMinSampleSeconds: parseFloat(
+      document.getElementById('bot-model-pace-sample')?.value || '8'
+    ),
     modelRichStopFloorCents: parseFloat(document.getElementById('bot-model-rich-floor')?.value || '0'),
     modelPostExitCooldownMinutes:
       Number.isFinite(modelSitoutSec) && modelSitoutSec > 0 ? modelSitoutSec / 60 : 0,

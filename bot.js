@@ -21,7 +21,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 59;
+const SETTINGS_DEFAULTS_VERSION = 60;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -673,10 +673,12 @@ const MODEL_LEAN_STOP_PACE_HORIZON_MS_DEFAULT = 90_000;
 /** Need at least this long of red sample before trusting pace. */
 const MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT = 8_000;
 /**
- * Pace lean-stop only after this much ¢ adverse (or ~55% of room to hard floor).
- * Stops mid-ticket cuts like 78→67 while the hard floor is still 55.
+ * Pace lean-stop only after this much ¢ adverse (or ~35% of room to hard floor).
+ * Stops mid-ticket cuts like 84→79 while the hard floor is still 55.
  */
 const MODEL_LEAN_STOP_MIN_ADVERSE_CENTS_DEFAULT = 8;
+/** Default % of (entry − floor) required before pace projection can lean-stop. */
+const MODEL_LEAN_STOP_PACE_DRAWDOWN_PCT_DEFAULT = 35;
 /**
  * Pace projection only arms once bid is within this many ¢ of the hard floor.
  * Absolute hit (bid ≤ floor) still stops immediately. Default 8 → arm at ≤63 when floor=55.
@@ -812,20 +814,25 @@ function modelLeanStopPaceMinSampleMs(config = {}) {
   return MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT;
 }
 
+/** % of (entry − floor) before pace lean-stop can arm (default 35). 0 = use min ¢ only. */
+function modelLeanStopPaceDrawdownPct(config = {}) {
+  const n = Number(config.modelLeanStopPaceDrawdownPct);
+  if (Number.isFinite(n) && n > 0) return Math.min(100, Math.max(1, n)) / 100;
+  return MODEL_LEAN_STOP_PACE_DRAWDOWN_PCT_DEFAULT / 100;
+}
+
 /** ¢ adverse required before pace-to-floor can lean-stop (absolute barrier still instant). */
 function modelLeanStopMinAdverseCents(trade, config = {}) {
   const configured = Number(config.modelLeanStopMinAdverseCents);
-  if (Number.isFinite(configured) && configured >= 0) return Math.round(configured);
+  if (Number.isFinite(configured) && configured > 0) return Math.round(configured);
   const barrier = modelLeanStopBarrierCents(config);
   const entry = Number(trade && trade.entryPriceCents);
   if (!Number.isFinite(entry) || !(barrier > 0) || entry <= barrier) {
     return MODEL_LEAN_STOP_MIN_ADVERSE_CENTS_DEFAULT;
   }
-  // Need most of the ride toward the hard floor before pace can cut.
-  return Math.max(
-    MODEL_LEAN_STOP_MIN_ADVERSE_CENTS_DEFAULT,
-    Math.round((entry - barrier) * 0.55)
-  );
+  const room = Math.max(0, Math.round(entry - barrier));
+  const pct = modelLeanStopPaceDrawdownPct(config);
+  return Math.max(MODEL_LEAN_STOP_MIN_ADVERSE_CENTS_DEFAULT, Math.round(room * pct));
 }
 
 function modelLeanStopPaceArmCents(config = {}) {
@@ -2361,6 +2368,10 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelDumpPullbackCents',
   'modelFastRedCents',
   'modelLeanStopBarrierCents',
+  'modelLeanStopPaceDrawdownPct',
+  'modelLeanStopPaceMinSampleSeconds',
+  'modelLeanStopPaceArmCents',
+  'modelLeanStopMinAdverseCents',
   'modelRichAskCents',
   'modelRichMaxSpreadCents',
   'modelRichMinConfidence',
@@ -3403,6 +3414,10 @@ class TradingBot {
       modelHardAdverseCents: MODEL_HARD_ADVERSE_CENTS_DEFAULT,
       modelMaxLossCents: MODEL_MAX_LOSS_CENTS_DEFAULT,
       modelHardStopFloorCents: MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT,
+      modelLeanStopBarrierCents: MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT,
+      modelLeanStopPaceDrawdownPct: MODEL_LEAN_STOP_PACE_DRAWDOWN_PCT_DEFAULT,
+      modelLeanStopPaceMinSampleSeconds: MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT / 1000,
+      modelLeanStopPaceArmCents: MODEL_LEAN_STOP_PACE_ARM_CENTS_DEFAULT,
       modelRichStopFloorCents: MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT,
       modelMidRichStopFloorCents: MODEL_MID_RICH_STOP_FLOOR_CENTS_DEFAULT,
       modelRichStopEntryMinCents: MODEL_RICH_STOP_ENTRY_MIN_CENTS_DEFAULT,
@@ -9794,6 +9809,12 @@ module.exports = {
   modelOnPaceBelowBarrier,
   modelShouldLeanStopRed,
   modelLeanStopBarrierCents,
+  modelLeanStopPaceDrawdownPct,
+  modelLeanStopPaceMinSampleMs,
+  modelLeanStopMinAdverseCents,
+  modelLeanStopPaceArmCents,
+  MODEL_LEAN_STOP_PACE_DRAWDOWN_PCT_DEFAULT,
+  MODEL_LEAN_STOP_PACE_MIN_SAMPLE_MS_DEFAULT,
   modelMinTpCents,
   modelTakeProfitMeetsFloor,
   modelBankGreenCents,
