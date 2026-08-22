@@ -21,7 +21,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 65;
+const SETTINGS_DEFAULTS_VERSION = 66;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -1670,6 +1670,7 @@ function checkModelPostExitCooldown({
       reason !== 'model_lean_flip' &&
       reason !== 'model_lean_stop' &&
       reason !== 'model_dip_stop' &&
+      reason !== 'model_against' &&
       reason !== 'breakeven' &&
       reason !== 'take_profit' &&
       reason !== 'near_certain'
@@ -1688,7 +1689,8 @@ function checkModelPostExitCooldown({
   const isLeanStop =
     reason === 'model_lean_stop' ||
     reason === 'model_lean_flip' ||
-    reason === 'model_dip_stop';
+    reason === 'model_dip_stop' ||
+    reason === 'model_against';
   const cd = isLeanStop
     ? Number.isFinite(cdLean) && cdLean > 0
       ? cdLean
@@ -1999,6 +2001,7 @@ function isForceRetryExitReason(reason) {
     r === 'stop_loss' ||
     r === 'take_profit' ||
     r === 'breakeven' ||
+    r === 'model_against' ||
     r === 'model_lean_stop' ||
     r === 'model_lean_flip' ||
     r === 'near_certain' ||
@@ -6608,7 +6611,19 @@ class TradingBot {
     // Failed protective exit: keep forcing sells every cycle until flat,
     // even if the bid has bounced back above the stop level.
     if (trade.pendingForceExit) {
-      const forceReason = String(trade.pendingForceExit);
+      let forceReason = String(trade.pendingForceExit);
+      // Stale BE force-retry while truly red can never fill (fake-BE guard).
+      // Promote to model_against so we actually cut instead of looping to settlement.
+      if (
+        forceReason === 'breakeven' &&
+        isModelTrade(trade) &&
+        heldSideBidCents != null &&
+        Number.isFinite(heldSideBidCents) &&
+        !modelBreakevenExitAllowed(trade, heldSideBidCents)
+      ) {
+        forceReason = 'model_against';
+        trade.pendingForceExit = forceReason;
+      }
       if (
         heldSideBidCents != null &&
         Number.isFinite(heldSideBidCents) &&
@@ -6811,14 +6826,40 @@ class TradingBot {
         modelLeanStaleForScratch(picked.window, trade.side, engineClearlyWithUs, this.config);
 
       const tryModelBreakevenScratch = async () => {
+        if (!modelBreakevenExitAllowed(trade, heldSideBidCents)) {
+          // Never arm a BE force-retry that the guard will reject forever.
+          delete trade.pendingForceExit;
+          return false;
+        }
         const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
         const closed = await this._closePosition(trade, beFill, 'breakeven', {
           liveSellPriceCents: heldSideBidCents,
         });
-        if (!closed && this._isLiveTrade(trade)) {
+        if (!closed && this._isLiveTrade(trade) && trade.status === 'open') {
           trade.pendingForceExit = 'breakeven';
           this.lastDecision =
             `BE scratch missed on ${trade.symbol} — retrying every cycle until flat.`;
+          this._logActivity(this.lastDecision, {
+            kind: 'close',
+            symbol: trade.symbol,
+            side: trade.side,
+            tradeId: trade.id,
+          });
+          this._persist();
+        }
+        return closed;
+      };
+
+      /** Hard lean against + red: sell the bid (loss cut). Not labeled breakeven. */
+      const tryModelAgainstCut = async () => {
+        const cutFill = heldSideBidCents;
+        const closed = await this._closePosition(trade, cutFill, 'model_against', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        if (!closed && this._isLiveTrade(trade) && trade.status === 'open') {
+          trade.pendingForceExit = 'model_against';
+          this.lastDecision =
+            `Model-against cut missed on ${trade.symbol} — retrying every cycle until flat.`;
           this._logActivity(this.lastDecision, {
             kind: 'close',
             symbol: trade.symbol,
@@ -6842,7 +6883,7 @@ class TradingBot {
           return true;
         }
         if (underwater || econUnderwater) {
-          await tryModelBreakevenScratch();
+          await tryModelAgainstCut();
           return true;
         }
         return false;

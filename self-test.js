@@ -3615,6 +3615,7 @@ async function testBotTradingFlow() {
   {
     check(isForceRetryExitReason('take_profit'), 'TP is force-retry exit');
     check(isForceRetryExitReason('breakeven'), 'BE is force-retry exit');
+    check(isForceRetryExitReason('model_against'), 'model_against is force-retry exit');
     check(isForceRetryExitReason('model_lean_stop'), 'lean-stop is force-retry exit');
     check(isForceRetryExitReason('stop_loss'), 'stop_loss is force-retry exit');
     check(!isForceRetryExitReason('settled'), 'settled is not a live sell retry');
@@ -6953,8 +6954,8 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, against);
-    checkEq(trade.exitReason, 'breakeven', 'underwater + lean against → BE/cut');
-    checkEq(trade.exitPriceCents, 55, 'paper BE books entry');
+    checkEq(trade.exitReason, 'model_against', 'underwater + lean against → cut at bid');
+    checkEq(trade.exitPriceCents, 50, 'paper against-cut books live bid');
   }
 
   // Underwater + live lean against (lock still with us) → stop ASAP
@@ -6994,7 +6995,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, liveFlip);
-    checkEq(trade.exitReason, 'breakeven', 'red + live lean against → BE/cut');
+    checkEq(trade.exitReason, 'model_against', 'red + live lean against → cut at bid');
   }
 
   // Green + engine against but under minTp → hold (no micro TP)
@@ -7099,7 +7100,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, weakRed);
-    checkEq(trade.exitReason, 'breakeven', 'weak confidence while red → BE/cut');
+    checkEq(trade.exitReason, 'model_against', 'weak confidence while red → cut at bid');
   }
 
   // Red + firm model still with us (high conf) → brief bounce window
@@ -7745,7 +7746,7 @@ async function testModelStrategy() {
         },
       },
     });
-    check(trade.exitReason === 'breakeven', 'red + lean against → BE/cut (not firm hold)');
+    check(trade.exitReason === 'model_against', 'red + lean against → cut at bid (not firm hold)');
   }
 
   // Post-exit cooldown blocks reopen briefly (~60s scalp recycle)
@@ -7932,8 +7933,8 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'breakeven', 'gap dump + model against → BE/cut');
-    checkEq(trade.exitPriceCents, 83, 'paper BE books entry');
+    checkEq(trade.exitReason, 'model_against', 'gap dump + model against → cut at bid');
+    checkEq(trade.exitPriceCents, 60, 'paper against-cut books live bid');
     checkEq(MODEL_MAX_LOSS_CENTS_DEFAULT, 8, 'default max loss 8¢');
     checkEq(modelAdverseExitFillCents({ entryPriceCents: 83 }, 60, {}, 'paper'), 75, 'adverse fill helper caps paper');
   }
@@ -8105,6 +8106,44 @@ async function testModelStrategy() {
     checkEq(trade.status, 'open', 'red >8s + firm lean → hold');
   }
 
+  // Stale pending BE while red: promote to model_against and cut (don't loop to settle)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 60,
+        no_bid: 40,
+      }),
+      { strategyMode: 'model', modelMinHoldSeconds: 0 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 78,
+      modelEntryBidCents: 76,
+      modelEntrySpreadCents: 2,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 5 * 60 * 1000,
+      pendingForceExit: 'breakeven',
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(40, 70), tracking: { predictedDirection: 'DOWN' } },
+          w10: win(40, 70),
+          w15: win(45, 60),
+        },
+      },
+    });
+    checkEq(trade.exitReason, 'model_against', 'stale BE force-retry promotes to against-cut');
+    checkEq(trade.exitPriceCents, 60, 'cut books red bid not fake BE');
+    checkEq(trade.pendingForceExit, undefined, 'force-exit cleared after cut');
+  }
+
   // Mid-session window switch: w10 DOWN against underwater YES → BE/cut
   {
     const now = Date.now();
@@ -8136,7 +8175,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, mid);
-    checkEq(trade.exitReason, 'breakeven', 'w10 locked DOWN → BE/cut underwater YES');
+    checkEq(trade.exitReason, 'model_against', 'w10 locked DOWN → cut underwater YES');
   }
 
   // Reentrant lock: shadow cycle holds the lock, then _openPosition takes it again.
