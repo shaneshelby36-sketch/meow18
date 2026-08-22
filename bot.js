@@ -21,7 +21,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 64;
+const SETTINGS_DEFAULTS_VERSION = 65;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -1389,6 +1389,39 @@ function modelEngineClearlyWithUs({ window, direction, side, entryHeldProb, conf
     if (side === 'no' && (!Number.isFinite(nd) || nd > -minDom)) return false;
   }
   return true;
+}
+
+/** Bid at/above entry or within the recorded entry spread (ask fill → bid mark). */
+function modelNearFlatCents(trade, heldSideBidCents) {
+  const entry = Number(trade && trade.entryPriceCents);
+  const bid = Number(heldSideBidCents);
+  if (!Number.isFinite(entry) || !Number.isFinite(bid)) return false;
+  if (Math.round(bid) >= Math.round(entry)) return true;
+  const spreadStamp = Number(trade.modelEntrySpreadCents);
+  const bidStamp = Number(trade.modelEntryBidCents);
+  const pad = Number.isFinite(spreadStamp) && spreadStamp > 0
+    ? Math.max(1, Math.round(spreadStamp))
+    : Number.isFinite(bidStamp) && Number.isFinite(entry)
+      ? Math.max(1, Math.round(entry - bidStamp))
+      : 2;
+  return bid >= entry - pad;
+}
+
+/** Model scratch BE: at entry or within spread — not a red cut disguised as BE. */
+function modelBreakevenExitAllowed(trade, bookedExit) {
+  if (!isModelTrade(trade)) {
+    const entry = Number(trade && trade.entryPriceCents);
+    const exit = Number(bookedExit);
+    return Number.isFinite(entry) && Number.isFinite(exit) && exit >= entry;
+  }
+  return modelNearFlatCents(trade, bookedExit);
+}
+
+/** 50/50 tie or soft lean — scratch flat instead of waiting for a hard flip + min hold. */
+function modelLeanStaleForScratch(window, side, engineClearlyWithUs, config = {}) {
+  if (!window || !side || engineClearlyWithUs) return false;
+  if (modelLiveProbNotWithUs(window, side)) return true;
+  return !modelLiveLeanStillFavors(window, side, modelSoftLeanMarginPct(config));
 }
 
 /**
@@ -5587,13 +5620,23 @@ class TradingBot {
     try {
       const entryPx = Number(trade.entryPriceCents);
       if (
-        (reason === 'take_profit' || reason === 'breakeven') &&
+        reason === 'breakeven' &&
+        Number.isFinite(entryPx) &&
+        Number.isFinite(bookedExit) &&
+        !modelBreakevenExitAllowed(trade, bookedExit)
+      ) {
+        this.lastDecision =
+          `Blocked fake breakeven on ${trade.symbol}: bid ${Math.round(bookedExit)}¢ is below entry ${Math.round(entryPx)}¢ — holding.`;
+        return false;
+      }
+      if (
+        reason === 'take_profit' &&
         Number.isFinite(entryPx) &&
         Number.isFinite(bookedExit) &&
         bookedExit < entryPx
       ) {
         this.lastDecision =
-          `Blocked fake ${reason} on ${trade.symbol}: bid ${Math.round(bookedExit)}¢ is below entry ${Math.round(entryPx)}¢ — holding.`;
+          `Blocked fake take_profit on ${trade.symbol}: bid ${Math.round(bookedExit)}¢ is below entry ${Math.round(entryPx)}¢ — holding.`;
         return false;
       }
       // Model: never book TAKE_PROFIT under minTp (default +7¢). Blocks soft-lean
@@ -6604,6 +6647,8 @@ class TradingBot {
       let isDecentGreen = flatOrGreen && bankGreen > 0 && greenCents >= bankGreen;
       const exactlyFlat =
         bidOk && Number.isFinite(entry) && Math.round(heldSideBidCents) === Math.round(entry);
+      const nearFlat = bidOk && modelNearFlatCents(trade, heldSideBidCents);
+      const scratchFlat = exactlyFlat || nearFlat;
       const underwater = bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents < entry;
       const adverseCents =
         underwater && Number.isFinite(entry) ? Math.round(entry - heldSideBidCents) : 0;
@@ -6759,26 +6804,45 @@ class TradingBot {
       const againstBeReady = !inOpenGrace && heldMs >= openGraceMs + againstBeDelay;
       const modelHardAgainst =
         !faded && bidOk && picked && picked.window && engineTurning;
+      const leanStaleScratch =
+        !faded &&
+        picked &&
+        picked.window &&
+        modelLeanStaleForScratch(picked.window, trade.side, engineClearlyWithUs, this.config);
+
+      const tryModelBreakevenScratch = async () => {
+        const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
+        const closed = await this._closePosition(trade, beFill, 'breakeven', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        if (!closed && this._isLiveTrade(trade)) {
+          trade.pendingForceExit = 'breakeven';
+          this.lastDecision =
+            `BE scratch missed on ${trade.symbol} — retrying every cycle until flat.`;
+          this._logActivity(this.lastDecision, {
+            kind: 'close',
+            symbol: trade.symbol,
+            side: trade.side,
+            tradeId: trade.id,
+          });
+          this._persist();
+        }
+        return closed;
+      };
 
       const exitModelAgainst = async () => {
-        if (flatOrGreen) {
+        if (flatOrGreen || nearFlat) {
           if (isBankableGreen && heldForBank) {
             await this._closePosition(trade, heldSideBidCents, 'take_profit', {
               liveSellPriceCents: heldSideBidCents,
             });
           } else {
-            const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
-            await this._closePosition(trade, beFill, 'breakeven', {
-              liveSellPriceCents: heldSideBidCents,
-            });
+            await tryModelBreakevenScratch();
           }
           return true;
         }
         if (underwater || econUnderwater) {
-          const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
-          await this._closePosition(trade, beFill, 'breakeven', {
-            liveSellPriceCents: heldSideBidCents,
-          });
+          await tryModelBreakevenScratch();
           return true;
         }
         return false;
@@ -6786,6 +6850,12 @@ class TradingBot {
 
       if (modelHardAgainst && againstBeReady) {
         if (await exitModelAgainst()) return;
+      }
+
+      // 50/50 / soft lean + econ-flat: scratch BE after open grace (skip min-hold).
+      if (bidOk && leanStaleScratch && scratchFlat && againstBeReady) {
+        await tryModelBreakevenScratch();
+        return;
       }
 
       // Bid-led dump: only act when hard lean against (firm holds ignore price slides).
@@ -6798,11 +6868,8 @@ class TradingBot {
             liveSellPriceCents: heldSideBidCents,
           });
           return;
-        } else if (exactlyFlat && heldLongEnough) {
-          const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
-          await this._closePosition(trade, beFill, 'breakeven', {
-            liveSellPriceCents: heldSideBidCents,
-          });
+        } else if (scratchFlat && (heldLongEnough || leanStaleScratch)) {
+          await tryModelBreakevenScratch();
           return;
         }
       }
@@ -6908,11 +6975,8 @@ class TradingBot {
         });
         return;
       }
-      if (bidOk && leanExit && heldLongEnough && exactlyFlat) {
-        const beFill = this.config.mode === 'paper' ? entry : heldSideBidCents;
-        await this._closePosition(trade, beFill, 'breakeven', {
-          liveSellPriceCents: heldSideBidCents,
-        });
+      if (bidOk && leanExit && scratchFlat && (heldLongEnough || leanStaleScratch)) {
+        await tryModelBreakevenScratch();
         return;
       }
 
@@ -6942,8 +7006,12 @@ class TradingBot {
         why = `hard lean against (${leanTxt}) — BE/cut after open grace + ${Math.round(againstBeDelay / 1000)}s`;
       else if (underwater && modelFirm)
         why = `model still firm (${leanTxt}) — holding (no price stop)`;
-      else if (underwater && !modelFirm && !modelHardAgainst)
+      else if (underwater && !modelFirm && !modelHardAgainst && !nearFlat)
         why = `lean soft/stale (${leanTxt}) — holding red until hard flip`;
+      else if (leanStaleScratch && scratchFlat && !againstBeReady)
+        why = `50/50/soft lean (${leanTxt}) — BE scratch after open grace + ${Math.round(againstBeDelay / 1000)}s`;
+      else if (leanStaleScratch && scratchFlat && againstBeReady)
+        why = `50/50/soft lean (${leanTxt}) — BE scratch armed (near flat)`;
       else if (!armed && flatOrGreen && !liveFavors)
         why = `lean soft — exit armed (${leanTxt})`;
       else if (!armed && flatOrGreen) why = `green but under trail arm (need +${armCents}¢)`;
@@ -9923,6 +9991,9 @@ module.exports = {
   modelEngineHardAgainst,
   modelEntryDumpRisk,
   modelEngineClearlyWithUs,
+  modelNearFlatCents,
+  modelBreakevenExitAllowed,
+  modelLeanStaleForScratch,
   modelDirectionSupportsHold,
   modelPriceAllowed,
   modelLowAskConvictionGate,

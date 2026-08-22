@@ -40,7 +40,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, scoreModelSetupsAgainstLog, modelSetupById, MODEL_SETUPS, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelEngineClearlyWithUs, modelPriceAllowed, modelEntryRoomToFloorGate, modelLowAskConvictionGate, modelKalshiFavoriteSide, modelKalshiFavoriteGate, MODEL_KALSHI_FAVORITE_CENTS_DEFAULT, checkModelPostExitCooldown, modelSignalDropCents, modelAdverseExitFillCents, modelEffectiveMaxLossCents, modelOnPaceBelowBarrier, modelShouldLeanStopRed, modelLeanStopMinAdverseCents, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT, MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT, modelSideSwitchConfirmMs, modelSideSwitchConfirmTicks, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_ARM_CENTS_DEFAULT, MODEL_MOMENTUM_STALL_MS_DEFAULT, MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, modelTakeProfitMeetsFloor, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel, summarizeLedgerCapital, rebuildLedgerSkimFromTrades, MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT, isForceRetryExitReason } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, scoreModelSetupsAgainstLog, modelSetupById, MODEL_SETUPS, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelEngineClearlyWithUs, modelNearFlatCents, modelBreakevenExitAllowed, modelLeanStaleForScratch, modelPriceAllowed, modelEntryRoomToFloorGate, modelLowAskConvictionGate, modelKalshiFavoriteSide, modelKalshiFavoriteGate, MODEL_KALSHI_FAVORITE_CENTS_DEFAULT, checkModelPostExitCooldown, modelSignalDropCents, modelAdverseExitFillCents, modelEffectiveMaxLossCents, modelOnPaceBelowBarrier, modelShouldLeanStopRed, modelLeanStopMinAdverseCents, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT, MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT, modelSideSwitchConfirmMs, modelSideSwitchConfirmTicks, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_ARM_CENTS_DEFAULT, MODEL_MOMENTUM_STALL_MS_DEFAULT, MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, modelTakeProfitMeetsFloor, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel, summarizeLedgerCapital, rebuildLedgerSkimFromTrades, MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT, isForceRetryExitReason } = require('./bot');
 const {
   KalshiClient,
   normalizeMarketPrices,
@@ -6784,6 +6784,52 @@ async function testModelStrategy() {
     };
     await bot._manageOpenTrade(trade, soft);
     checkEq(trade.exitReason, 'breakeven', '50/50 soft lean banks preemptive (flat BE)');
+  }
+
+  // 50/50 + spread-flat (bid below ask entry) — scratch without waiting min-hold
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 53,
+        no_bid: 47,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinHoldSeconds: 60,
+        modelMinConfidence: 55,
+        modelOpenGraceSeconds: 8,
+        modelLeanAgainstBeSeconds: 5,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      modelEntryBidCents: 53,
+      modelEntrySpreadCents: 2,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 15_000,
+      peakHeldBidCents: 55,
+    });
+    check(modelNearFlatCents(trade, 53), 'bid within entry spread counts as near-flat');
+    check(modelBreakevenExitAllowed(trade, 53), 'model BE allowed within spread');
+    const soft = {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(50, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    };
+    await bot._manageOpenTrade(trade, soft);
+    checkEq(trade.exitReason, 'breakeven', '50/50 spread-flat scratches without min-hold');
+    checkEq(trade.exitPriceCents, 53, 'paper BE books spread-flat bid');
   }
 
   // After model BE: same-cycle reopen allowed (scalp recycle). Sit-out is the ~30s cooldown.
