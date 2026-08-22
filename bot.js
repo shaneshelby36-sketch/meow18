@@ -26,7 +26,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 67;
+const SETTINGS_DEFAULTS_VERSION = 68;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -706,11 +706,19 @@ const MODEL_LEAN_STOP_PACE_DRAWDOWN_PCT_DEFAULT = 35;
 const MODEL_LEAN_STOP_PACE_ARM_CENTS_DEFAULT = 8;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
-/** Final barrier (minutes left). 0 = off (no forced late exits). */
-const MODEL_LATE_BARRIER_MINUTES_DEFAULT = 0;
-/** Start near-settle closes this many minutes before window end. 0 = off. */
-const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 0;
-/** Confidence required to extend a hold into/through the final 5-minute barrier. */
+/**
+ * Final barrier (minutes left). Inside this window, exit unless high-possibility
+ * extend. Default 2 — was 0 (off), which let firm holds ride into SETTLED losses.
+ */
+const MODEL_LATE_BARRIER_MINUTES_DEFAULT = 2;
+/**
+ * Start near-settle cash-outs this many minutes before window end.
+ * Default 3 — bank flat/green/small-red instead of gambling settlement.
+ */
+const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 3;
+/** Last N minutes: always sell (never wait for Kalshi 0/100). */
+const MODEL_PRE_CLOSE_FORCE_MINUTES_DEFAULT = 1;
+/** Confidence required to extend a hold into/through the final barrier. */
 const MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT = 78;
 /** After trail is armed, TP if bid sits at peak this long without a new high (ms). */
 const MODEL_MOMENTUM_STALL_MS_DEFAULT = 8_000;
@@ -963,16 +971,26 @@ function modelTrailArmCents(config = {}) {
 
 function modelSettleCloseMinutes(config = {}) {
   const n = Number(config.modelSettleCloseMinutes);
-  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n < 0) return MODEL_SETTLE_CLOSE_MINUTES_DEFAULT;
+  if (Number.isFinite(n) && n === 0) return 0;
   if (Number.isFinite(n) && n > 0) return n;
   return MODEL_SETTLE_CLOSE_MINUTES_DEFAULT;
 }
 
 function modelLateBarrierMinutes(config = {}) {
   const n = Number(config.modelLateBarrierMinutes);
-  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n < 0) return MODEL_LATE_BARRIER_MINUTES_DEFAULT;
+  if (Number.isFinite(n) && n === 0) return 0;
   if (Number.isFinite(n) && n > 0) return n;
   return MODEL_LATE_BARRIER_MINUTES_DEFAULT;
+}
+
+function modelPreCloseForceMinutes(config = {}) {
+  const n = Number(config.modelPreCloseForceMinutes);
+  if (Number.isFinite(n) && n < 0) return MODEL_PRE_CLOSE_FORCE_MINUTES_DEFAULT;
+  if (Number.isFinite(n) && n === 0) return 0;
+  if (Number.isFinite(n) && n > 0) return n;
+  return MODEL_PRE_CLOSE_FORCE_MINUTES_DEFAULT;
 }
 
 function modelLateExtendMinConfidence(config = {}) {
@@ -1689,6 +1707,8 @@ function checkModelPostExitCooldown({
       reason !== 'model_lean_stop' &&
       reason !== 'model_dip_stop' &&
       reason !== 'model_against' &&
+      reason !== 'model_late_exit' &&
+      reason !== 'model_pre_close' &&
       reason !== 'breakeven' &&
       reason !== 'take_profit' &&
       reason !== 'near_certain'
@@ -2020,6 +2040,8 @@ function isForceRetryExitReason(reason) {
     r === 'take_profit' ||
     r === 'breakeven' ||
     r === 'model_against' ||
+    r === 'model_late_exit' ||
+    r === 'model_pre_close' ||
     r === 'model_lean_stop' ||
     r === 'model_lean_flip' ||
     r === 'near_certain' ||
@@ -2482,6 +2504,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelSettleCloseLossCents',
   'modelSettleCloseMinutes',
   'modelLateBarrierMinutes',
+  'modelPreCloseForceMinutes',
   'modelLateExtendMinConfidence',
   'modelMomentumStallSeconds',
   'modelMomentumPullbackCents',
@@ -3579,6 +3602,7 @@ class TradingBot {
       modelSettleCloseLossCents: MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT,
       modelSettleCloseMinutes: MODEL_SETTLE_CLOSE_MINUTES_DEFAULT,
       modelLateBarrierMinutes: MODEL_LATE_BARRIER_MINUTES_DEFAULT,
+      modelPreCloseForceMinutes: MODEL_PRE_CLOSE_FORCE_MINUTES_DEFAULT,
       modelLateExtendMinConfidence: MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT,
       modelMomentumStallSeconds: MODEL_MOMENTUM_STALL_MS_DEFAULT / 1000,
       modelMomentumPullbackCents: MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT,
@@ -6991,66 +7015,72 @@ class TradingBot {
         }
       }
 
-      // Late forced exits off by default (barrier + settle-close minutes = 0).
-      // Keep the hooks so they can be re-enabled via config later.
+      // ── Pre-settle cash-outs (avoid SETTLED 0/100 wipeouts) ─────────────
+      // Defaults: force exit in last 1m; barrier at 2m; settle-close from 3m.
+      // High-possibility extend can ride the barrier, but never the last minute.
       const lateBarrierMins = modelLateBarrierMinutes(this.config);
       const settleCloseMins = modelSettleCloseMinutes(this.config);
+      const preCloseForceMins = modelPreCloseForceMinutes(this.config);
       const settleCloseThresh = Number.isFinite(Number(this.config.modelSettleCloseLossCents))
         ? Number(this.config.modelSettleCloseLossCents)
         : MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT;
       const inLateBarrier = lateBarrierMins > 0 && minutesRemaining <= lateBarrierMins;
+      const inSettleClose = settleCloseMins > 0 && minutesRemaining <= settleCloseMins;
+      const inPreCloseForce = preCloseForceMins > 0 && minutesRemaining <= preCloseForceMins;
       const canExtendLate = !!(
         inLateBarrier &&
+        !inPreCloseForce &&
         picked &&
         picked.window &&
         modelLateExtendOk(picked.window, trade.side, this.config)
       );
-      if (inLateBarrier && bidOk && !canExtendLate) {
-        // Late forced exit: only label take_profit when minTp is met; else model_late_exit.
-        const reason = flatOrGreen
-          ? isDecentGreen || isBankableGreen
-            ? 'take_profit'
-            : exactlyFlat
-              ? 'breakeven'
-              : 'model_late_exit'
-          : 'model_late_exit';
-        const lateReason =
-          reason === 'take_profit' && !modelTakeProfitMeetsFloor(trade, heldSideBidCents, this.config)
-            ? exactlyFlat
-              ? 'breakeven'
-              : 'model_late_exit'
-            : reason;
-        await this._closePosition(trade, heldSideBidCents, lateReason, {
+
+      const exitModelPreSettle = async (forceReason) => {
+        if (!bidOk) return false;
+        if (flatOrGreen || nearFlat) {
+          if (isBankableGreen && heldForBank) {
+            await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+          } else if (scratchFlat || flatOrGreen) {
+            await tryModelBreakevenScratch();
+          } else {
+            await this._closePosition(trade, heldSideBidCents, forceReason, {
+              liveSellPriceCents: heldSideBidCents,
+            });
+          }
+          return true;
+        }
+        const redCents = underwater ? adverseCents : 0;
+        // Deep red beyond thresh: only force in the final minute (never settle at 0).
+        if (redCents > settleCloseThresh && !inPreCloseForce) return false;
+        const closed = await this._closePosition(trade, heldSideBidCents, forceReason, {
           liveSellPriceCents: heldSideBidCents,
         });
+        if (!closed && this._isLiveTrade(trade) && trade.status === 'open') {
+          trade.pendingForceExit = forceReason;
+          this._persist();
+        }
+        return true;
+      };
+
+      if (bidOk && inPreCloseForce) {
+        await exitModelPreSettle('model_pre_close');
+        return;
+      }
+      if (bidOk && inLateBarrier && !canExtendLate) {
+        await exitModelPreSettle('model_late_exit');
         return;
       }
       if (canExtendLate) {
         this.lastDecision =
           `Holding ${trade.symbol} into final ${lateBarrierMins}m — high possibility ` +
           `(conf ${Number.isFinite(picked.window.confidence) ? Math.round(picked.window.confidence) : '?'}%, lean with us).`;
-        // Fall through: still allow +7¢ momentum TP / lean rules while extending.
-      } else if (
-        settleCloseMins > 0 &&
-        settleCloseThresh > 0 &&
-        minutesRemaining <= settleCloseMins &&
-        bidOk
-      ) {
-        // Non-barrier late close (if barrier disabled): same as before.
+        // Fall through: still allow TP / lean rules while extending.
+      } else if (bidOk && inSettleClose) {
         const redCents = underwater ? adverseCents : 0;
-        if (redCents <= settleCloseThresh) {
-          const reason = flatOrGreen
-            ? isBankableGreen || isDecentGreen
-              ? 'take_profit'
-              : exactlyFlat
-                ? 'breakeven'
-                : 'model_late_exit'
-            : exactlyFlat
-              ? 'breakeven'
-              : 'model_late_exit';
-          await this._closePosition(trade, heldSideBidCents, reason, {
-            liveSellPriceCents: heldSideBidCents,
-          });
+        if (redCents <= settleCloseThresh || flatOrGreen || nearFlat) {
+          await exitModelPreSettle('model_late_exit');
           return;
         }
       }
@@ -7129,6 +7159,8 @@ class TradingBot {
         why = `50/50/soft lean (${leanTxt}) — BE scratch after open grace + ${Math.round(againstBeDelay / 1000)}s`;
       else if (leanStaleScratch && scratchFlat && againstBeReady)
         why = `50/50/soft lean (${leanTxt}) — BE scratch armed (near flat)`;
+      else if (inSettleClose || inLateBarrier)
+        why = `nearing settle (${minutesRemaining.toFixed(1)}m left) — cash-out armed`;
       else if (!armed && flatOrGreen && !liveFavors)
         why = `lean soft — exit armed (${leanTxt})`;
       else if (!armed && flatOrGreen) why = `green but under trail arm (need +${armCents}¢)`;
@@ -10183,6 +10215,7 @@ module.exports = {
   modelTrailArmCents,
   modelSettleCloseMinutes,
   modelLateBarrierMinutes,
+  modelPreCloseForceMinutes,
   modelLateExtendMinConfidence,
   modelLateExtendOk,
   modelMomentumStallMs,
@@ -10255,6 +10288,7 @@ module.exports = {
   MODEL_TRAIL_ARM_CENTS_DEFAULT,
   MODEL_SETTLE_CLOSE_MINUTES_DEFAULT,
   MODEL_LATE_BARRIER_MINUTES_DEFAULT,
+  MODEL_PRE_CLOSE_FORCE_MINUTES_DEFAULT,
   MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT,
   MODEL_MOMENTUM_STALL_MS_DEFAULT,
   MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT,

@@ -467,6 +467,27 @@
             </div>
             <span class="field-hint">Trail from ~+<strong>5¢</strong>; bank on stall or at this green (default <strong>+7¢</strong>). While <strong>model still firm</strong>, holds ride; when lean turns → BE/cut quickly.</span>
           </label>
+          <label>MODEL cash out before settle (min left)
+            <div class="slider-row">
+              <input id="bot-model-settle-close" type="range" min="0" max="8" step="0.5" />
+              <span class="slider-value" id="bot-model-settle-close-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>3</strong>. In the last N minutes, bank flat/green or cut small reds instead of riding to SETTLED 0/100. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL late barrier (min left)
+            <div class="slider-row">
+              <input id="bot-model-late-barrier" type="range" min="0" max="6" step="0.5" />
+              <span class="slider-value" id="bot-model-late-barrier-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>2</strong>. Force exit in this window unless conf is very high and lean still with you. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL never-settle window (min left)
+            <div class="slider-row">
+              <input id="bot-model-preclose-force" type="range" min="0" max="3" step="0.25" />
+              <span class="slider-value" id="bot-model-preclose-force-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>1</strong>. Last N minutes: always sell at the bid — never wait for Kalshi settlement. <strong>0</strong> = off.</span>
+          </label>
           <label>MODEL max loss (¢ below entry)
             <div class="slider-row">
               <input id="bot-model-max-loss" type="range" min="4" max="20" step="1" />

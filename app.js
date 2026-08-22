@@ -1556,6 +1556,9 @@ const SLIDER_UNITS = {
   'bot-model-low-ask-conf': (v) => (Number(v) <= 0 ? 'off' : `≤69¢ need ≥${Math.round(v)}%`),
   'bot-model-max-entry': (v) => `${Math.round(v)}¢`,
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
+  'bot-model-settle-close': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
+  'bot-model-late-barrier': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
+  'bot-model-preclose-force': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(2)} min`),
   'bot-model-max-loss': (v) => `−${Math.round(v)}¢`,
   'bot-model-hard-floor': (v) => `${Math.round(v)}¢ floor`,
   'bot-model-pace-drawdown': (v) => `${Math.round(v)}% of room`,
@@ -1949,6 +1952,9 @@ function wireSliderDisplays() {
     'bot-model-low-ask-conf',
     'bot-model-max-entry',
     'bot-model-bank-green',
+    'bot-model-settle-close',
+    'bot-model-late-barrier',
+    'bot-model-preclose-force',
     'bot-model-max-loss',
     'bot-model-hard-floor',
     'bot-model-pace-drawdown',
@@ -2071,6 +2077,9 @@ function wireBotConfigAutoSave() {
     'bot-model-low-ask-conf',
     'bot-model-max-entry',
     'bot-model-bank-green',
+    'bot-model-settle-close',
+    'bot-model-late-barrier',
+    'bot-model-preclose-force',
     'bot-model-sitout',
     'bot-settle-min',
     'bot-settle-max',
@@ -2203,6 +2212,21 @@ async function loadBotConfigIntoForm() {
     if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 93;
     const modelBankGreen = document.getElementById('bot-model-bank-green');
     if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 7;
+    const modelSettleClose = document.getElementById('bot-model-settle-close');
+    if (modelSettleClose) {
+      modelSettleClose.value =
+        c.modelSettleCloseMinutes != null ? c.modelSettleCloseMinutes : 3;
+    }
+    const modelLateBarrier = document.getElementById('bot-model-late-barrier');
+    if (modelLateBarrier) {
+      modelLateBarrier.value =
+        c.modelLateBarrierMinutes != null ? c.modelLateBarrierMinutes : 2;
+    }
+    const modelPreCloseForce = document.getElementById('bot-model-preclose-force');
+    if (modelPreCloseForce) {
+      modelPreCloseForce.value =
+        c.modelPreCloseForceMinutes != null ? c.modelPreCloseForceMinutes : 1;
+    }
     const modelMaxLoss = document.getElementById('bot-model-max-loss');
     if (modelMaxLoss) modelMaxLoss.value = c.modelMaxLossCents != null ? c.modelMaxLossCents : 8;
     const modelHardFloor = document.getElementById('bot-model-hard-floor');
@@ -2306,6 +2330,9 @@ async function loadBotConfigIntoForm() {
       'bot-model-low-ask-conf',
       'bot-model-max-entry',
       'bot-model-bank-green',
+      'bot-model-settle-close',
+      'bot-model-late-barrier',
+      'bot-model-preclose-force',
       'bot-model-max-loss',
       'bot-model-hard-floor',
       'bot-model-pace-drawdown',
@@ -2481,6 +2508,11 @@ async function saveBotConfig(opts = {}) {
     modelLowPriceStakeQuarters: 2,
     modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
     modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
+    modelSettleCloseMinutes: parseFloat(document.getElementById('bot-model-settle-close')?.value || '3'),
+    modelLateBarrierMinutes: parseFloat(document.getElementById('bot-model-late-barrier')?.value || '2'),
+    modelPreCloseForceMinutes: parseFloat(
+      document.getElementById('bot-model-preclose-force')?.value || '1'
+    ),
     modelMaxLossCents: parseFloat(document.getElementById('bot-model-max-loss')?.value || '8'),
     modelHardAdverseCents: parseFloat(document.getElementById('bot-model-max-loss')?.value || '8'),
     modelHardStopFloorCents: parseFloat(document.getElementById('bot-model-hard-floor')?.value || '55'),

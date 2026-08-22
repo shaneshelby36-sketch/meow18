@@ -8096,6 +8096,101 @@ async function testModelStrategy() {
   }
 
 
+  // Pre-settle: last minute always cash out (never ride to SETTLED)
+  {
+    const now = Date.now();
+    const closeMs = now + 45 * 1000;
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(closeMs).toISOString(),
+        yes_bid: 52,
+        no_bid: 48,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinHoldSeconds: 0,
+        modelPreCloseForceMinutes: 1,
+        modelSettleCloseMinutes: 3,
+        modelLateBarrierMinutes: 2,
+        modelOpenGraceSeconds: 0,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      modelEntryBidCents: 53,
+      modelEntrySpreadCents: 2,
+      windowCloseTime: closeMs,
+      openedAt: now - 6 * 60 * 1000,
+      modelEntryHeldProb: 62,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(62, 80), tracking: { predictedDirection: 'UP' } },
+          w10: win(60, 75),
+          w15: win(58, 70),
+        },
+      },
+    });
+    check(
+      trade.status === 'closed' &&
+        (trade.exitReason === 'model_pre_close' || trade.exitReason === 'model_late_exit'),
+      'last minute forces pre-settle exit even when lean still firm'
+    );
+  }
+
+  // Settle-close window (~3m left): cash out red instead of holding to settlement
+  {
+    const now = Date.now();
+    const closeMs = now + 2.5 * 60 * 1000;
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(closeMs).toISOString(),
+        yes_bid: 50,
+        no_bid: 50,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinHoldSeconds: 0,
+        modelSettleCloseMinutes: 3,
+        modelLateBarrierMinutes: 2,
+        modelPreCloseForceMinutes: 1,
+        modelLateExtendMinConfidence: 95,
+        modelOpenGraceSeconds: 0,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 65,
+      windowCloseTime: closeMs,
+      openedAt: now - 5 * 60 * 1000,
+      modelEntryHeldProb: 62,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(58, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 65),
+          w15: win(55, 60),
+        },
+      },
+    });
+    checkEq(trade.status, 'closed', 'settle-close window exits before settlement');
+    check(
+      trade.exitReason === 'model_late_exit' || trade.exitReason === 'model_pre_close',
+      'late exit reason is model_late_exit/pre_close'
+    );
+  }
+
   // Flat/green + confidence collapse → model exit (green → TP, flat → BE)
   {
     const now = Date.now();
