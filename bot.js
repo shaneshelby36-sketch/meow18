@@ -9070,8 +9070,6 @@ class TradingBot {
       return null;
     }
 
-    const entryHeldProb =
-      side === 'yes' ? Number(window.probabilityUp) : Number(window.probabilityDown);
     const preDir = modelDirectionSupportsHold({
       window,
       direction,

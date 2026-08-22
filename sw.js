@@ -1,7 +1,7 @@
 'use strict';
 
 // Bump this on every deploy so old clients pick up the new shell.
-const CACHE_NAME = 'crypto-dashboard-shell-v255';
+const CACHE_NAME = 'crypto-dashboard-shell-v256';
 
 const SHELL_FILES = [
   './',
