@@ -21,7 +21,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 63;
+const SETTINGS_DEFAULTS_VERSION = 64;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -641,7 +641,7 @@ const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 60_000;
 /** After MODEL lean/dip stop (red), longer sit-out — stops knife-catch churn. */
 const MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT = 120_000;
 /** After open grace: when model is not firm, wait this long then BE/cut (avoid ask→bid flicker). */
-const MODEL_LEAN_AGAINST_BE_MS_DEFAULT = 2_000;
+const MODEL_LEAN_AGAINST_BE_MS_DEFAULT = 5_000;
 /** First N ms after open: only hard lean-turning exits (ignore soft + ask/bid haircut). */
 const MODEL_OPEN_GRACE_MS_DEFAULT = 8_000;
 /** Lean-exit / momentum TP floor — no micro-banks under this. */
@@ -1344,6 +1344,25 @@ function modelEngineTurningAgainst({
   if (modelLiveProbNotWithUs(window, side)) return true;
   if (modelSignalTurningAgainst(window, side, config)) return true;
   if (modelProbDriftAgainst(window, side, entryHeldProb, modelProbDriftPts(config))) return true;
+  const conf = Number(window.confidence);
+  if (Number.isFinite(minConf) && Number.isFinite(conf) && conf < minConf) return true;
+  return false;
+}
+
+/**
+ * Exit-only: real lean flip (not 50/50 tie or 3pt prob wick). Used to BE/cut reds.
+ */
+function modelEngineHardAgainst({
+  window,
+  direction,
+  side,
+  minConf,
+  config = {},
+} = {}) {
+  if (!window || !side) return false;
+  if (direction && modelDirectionAgainstHeld(direction, side)) return true;
+  if (modelLiveLeanAgainstHeld(window, side, modelLiveLeanMarginPct(config))) return true;
+  if (modelSignalTurningAgainst(window, side, config)) return true;
   const conf = Number(window.confidence);
   if (Number.isFinite(minConf) && Number.isFinite(conf) && conf < minConf) return true;
   return false;
@@ -6611,6 +6630,16 @@ class TradingBot {
       const engineTurning =
         picked &&
         picked.window &&
+        modelEngineHardAgainst({
+          window: picked.window,
+          direction: picked.direction,
+          side: trade.side,
+          minConf,
+          config: this.config,
+        });
+      const engineSoftTurning =
+        picked &&
+        picked.window &&
         modelEngineTurningAgainst({
           window: picked.window,
           direction: picked.direction,
@@ -6645,7 +6674,7 @@ class TradingBot {
       const leanExit = faded
         ? !!weakConf
         : !!(
-            engineTurning ||
+            engineSoftTurning ||
             (!inOpenGrace && picked && picked.window && !engineClearlyWithUs)
           );
 
@@ -6727,18 +6756,9 @@ class TradingBot {
 
       const modelFirm = !!(picked && picked.window && engineClearlyWithUs);
       const againstBeDelay = modelLeanAgainstBeMs(this.config);
-      const againstBeReady =
-        !inOpenGrace &&
-        (engineTurning ? heldMs >= openGraceMs : heldMs >= openGraceMs + againstBeDelay);
-      const postFillAgainstReady = trade.modelFillAgainst === true && heldMs >= againstBeDelay;
-      const modelAgainst =
-        !faded &&
-        bidOk &&
-        picked &&
-        picked.window &&
-        (trade.modelFillAgainst === true ||
-          engineTurning ||
-          (!engineClearlyWithUs && !inOpenGrace));
+      const againstBeReady = !inOpenGrace && heldMs >= openGraceMs + againstBeDelay;
+      const modelHardAgainst =
+        !faded && bidOk && picked && picked.window && engineTurning;
 
       const exitModelAgainst = async () => {
         if (flatOrGreen) {
@@ -6764,14 +6784,14 @@ class TradingBot {
         return false;
       };
 
-      if (modelAgainst && (postFillAgainstReady || againstBeReady)) {
+      if (modelHardAgainst && againstBeReady) {
         if (await exitModelAgainst()) return;
       }
 
-      // Bid-led dump: only act when model is not firm (firm holds ignore price slides).
+      // Bid-led dump: only act when hard lean against (firm holds ignore price slides).
       const dumpPullback = modelDumpPullbackCents(this.config);
       if (!faded && bidOk && dumpPullback > 0 && pullback >= dumpPullback) {
-        if (modelAgainst && (postFillAgainstReady || againstBeReady)) {
+        if (modelHardAgainst && againstBeReady) {
           if (await exitModelAgainst()) return;
         } else if (isBankableGreen && heldForBank) {
           await this._closePosition(trade, heldSideBidCents, 'take_profit', {
@@ -6915,17 +6935,15 @@ class TradingBot {
       if (!bidOk) why = 'no usable bid yet';
       else if (faded) why = 'fade hold — engine-against does not stop this ticket';
       else if (engineTurning && underwater)
-        why = `model lean turning (${leanTxt}) — cut before deeper loss`;
+        why = `hard lean against (${leanTxt}) — BE/cut on red`;
       else if (engineTurning && flatOrGreen)
-        why = `model lean turning (${leanTxt}) — banking before dump`;
-      else if (modelAgainst && !againstBeReady && !postFillAgainstReady)
-        why = `model not firm (${leanTxt}) — BE/cut after brief wait`;
-      else if (modelAgainst && (underwater || econUnderwater))
-        why = `model against (${leanTxt}) — cutting red toward BE`;
+        why = `hard lean against (${leanTxt}) — banking before dump`;
+      else if (modelHardAgainst && !againstBeReady)
+        why = `hard lean against (${leanTxt}) — BE/cut after open grace + ${Math.round(againstBeDelay / 1000)}s`;
       else if (underwater && modelFirm)
-        why = `model still firm (${leanTxt}) — holding (no price lean-stop)`;
-      else if (underwater && !modelFirm)
-        why = `model not firm (${leanTxt}) — BE when timer elapses`;
+        why = `model still firm (${leanTxt}) — holding (no price stop)`;
+      else if (underwater && !modelFirm && !modelHardAgainst)
+        why = `lean soft/stale (${leanTxt}) — holding red until hard flip`;
       else if (!armed && flatOrGreen && !liveFavors)
         why = `lean soft — exit armed (${leanTxt})`;
       else if (!armed && flatOrGreen) why = `green but under trail arm (need +${armCents}¢)`;
@@ -9904,6 +9922,7 @@ module.exports = {
   modelProbDriftAgainst,
   modelProbDriftPts,
   modelEngineTurningAgainst,
+  modelEngineHardAgainst,
   modelEntryDumpRisk,
   modelEngineClearlyWithUs,
   modelDirectionSupportsHold,
