@@ -7670,7 +7670,44 @@ async function testModelStrategy() {
     checkEq(trade.exitPriceCents, 55, 'paper BE books entry');
   }
 
-  // Post-exit cooldown blocks reopen briefly (~30s scalp recycle)
+  // Red + model against → cut (don't hold for pace)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 52,
+        no_bid: 48,
+      }),
+      { strategyMode: 'model', modelMinConfidence: 55, modelMinHoldSeconds: 0, modelOpenGraceSeconds: 0 }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 15_000,
+      modelEntryHeldProb: 62,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(35, 70), tracking: { predictedDirection: 'DOWN' } },
+          w10: win(40, 70),
+          w15: win(45, 60),
+        },
+      },
+    });
+    check(
+      trade.exitReason === 'model_lean_stop' || trade.exitReason === 'breakeven',
+      'red + lean against → BE/cut (not firm hold)'
+    );
+  }
+
+  // Post-exit cooldown blocks reopen briefly (~60s scalp recycle)
   {
     const now = Date.now();
     check(
@@ -7685,10 +7722,10 @@ async function testModelStrategy() {
           },
         ],
         symbol: 'ETH',
-        cooldownMs: 30_000,
+        cooldownMs: 60_000,
         now,
       }).ok,
-      'post-exit cooldown active (~30s)'
+      'post-exit cooldown active (~60s)'
     );
     check(
       checkModelPostExitCooldown({
@@ -7698,14 +7735,14 @@ async function testModelStrategy() {
             symbol: 'ETH',
             status: 'closed',
             exitReason: 'take_profit',
-            closedAt: now - 35_000,
+            closedAt: now - 65_000,
           },
         ],
         symbol: 'ETH',
-        cooldownMs: 30_000,
+        cooldownMs: 60_000,
         now,
       }).ok,
-      'post-exit cooldown clears after ~30s'
+      'post-exit cooldown clears after ~60s'
     );
     check(
       !checkModelPostExitCooldown({

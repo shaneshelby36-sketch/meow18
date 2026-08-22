@@ -465,7 +465,7 @@
               <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
-            <span class="field-hint">Trail from ~+<strong>5¢</strong>; bank on <strong>2¢</strong> stall / ~<strong>8s</strong> flat, or <strong>immediately at this green</strong> (default <strong>+7¢</strong>). If model turns, sells immediately (BE or lean-stop).</span>
+            <span class="field-hint">Trail from ~+<strong>5¢</strong>; bank on stall or at this green (default <strong>+7¢</strong>). While <strong>model still firm</strong>, holds ride; when lean turns → BE/cut quickly.</span>
           </label>
           <label>MODEL max loss (¢ below entry)
             <div class="slider-row">
@@ -507,7 +507,7 @@
               <input id="bot-model-sitout" type="range" min="0" max="120" step="5" />
               <span class="slider-value" id="bot-model-sitout-value">—</span>
             </div>
-            <span class="field-hint">After BE/TP wait before rebuy (default 30s). After a red lean-stop, sit-out is <strong>2 min</strong> so it doesn’t knife-catch the same coin.</span>
+            <span class="field-hint">After BE/TP wait before rebuy (default <strong>60s</strong> / 1 min). After a red lean-stop, sit-out is <strong>2 min</strong>.</span>
           </label>
         </div>
 

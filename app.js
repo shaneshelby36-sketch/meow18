@@ -2228,7 +2228,7 @@ async function loadBotConfigIntoForm() {
     const modelSitout = document.getElementById('bot-model-sitout');
     if (modelSitout) {
       const mins =
-        c.modelPostExitCooldownMinutes != null ? Number(c.modelPostExitCooldownMinutes) : 0.5;
+        c.modelPostExitCooldownMinutes != null ? Number(c.modelPostExitCooldownMinutes) : 1;
       modelSitout.value = Math.round(Math.max(0, mins * 60));
     }
     const settleMin = document.getElementById('bot-settle-min');
@@ -2447,7 +2447,7 @@ async function saveBotConfig(opts = {}) {
   const skimMode = document.getElementById('bot-skim-mode').value;
   const skimAmount = parseFloat(document.getElementById('bot-skim-amount').value);
   const trading = readTradingSlidersFromForm();
-  const modelSitoutSec = parseFloat(document.getElementById('bot-model-sitout')?.value || '30');
+  const modelSitoutSec = parseFloat(document.getElementById('bot-model-sitout')?.value || '60');
   const payload = {
     symbol: document.getElementById('bot-symbol').value,
     strategyMode: document.getElementById('bot-strategy-mode')?.value || 'model',
