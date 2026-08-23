@@ -37,7 +37,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 70;
+const SETTINGS_DEFAULTS_VERSION = 71;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -681,6 +681,8 @@ const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 2;
 const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
 /** After Model BE/TP, sit out that coin this long before rebuy. */
 const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 45_000;
+/** After any model close, block ALL new entries this long (regime cool-down). */
+const MODEL_GLOBAL_POST_EXIT_COOLDOWN_MS_DEFAULT = 20_000;
 /** After MODEL lean/dip stop (red), longer sit-out — stops knife-catch churn. */
 const MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT = 120_000;
 /** After open grace: when model is not firm, wait this long then BE/cut (avoid ask→bid flicker). */
@@ -793,6 +795,29 @@ function modelPostExitCooldownMs(config = {}) {
   if (Number.isFinite(mins) && mins <= 0) return 0;
   if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 60 * 1000);
   return MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT;
+}
+
+function modelGlobalPostExitCooldownMs(config = {}) {
+  const sec = Number(config.modelGlobalPostExitCooldownSeconds);
+  if (Number.isFinite(sec) && sec >= 0) return Math.round(sec * 1000);
+  const ms = Number(config.modelGlobalPostExitCooldownMs);
+  if (Number.isFinite(ms) && ms >= 0) return Math.round(ms);
+  return MODEL_GLOBAL_POST_EXIT_COOLDOWN_MS_DEFAULT;
+}
+
+function isModelPostExitCooldownReason(reason) {
+  const r = String(reason || '');
+  return (
+    r === 'model_lean_flip' ||
+    r === 'model_lean_stop' ||
+    r === 'model_dip_stop' ||
+    r === 'model_against' ||
+    r === 'model_late_exit' ||
+    r === 'model_pre_close' ||
+    r === 'breakeven' ||
+    r === 'take_profit' ||
+    r === 'near_certain'
+  );
 }
 
 function modelPostLeanStopCooldownMs(config = {}) {
@@ -1896,19 +1921,7 @@ function checkModelPostExitCooldown({
     if (String(t.symbol || '').toUpperCase() !== sym) continue;
     if (t.status && String(t.status) !== 'closed') continue;
     const reason = String(t.exitReason || '');
-    if (
-      reason !== 'model_lean_flip' &&
-      reason !== 'model_lean_stop' &&
-      reason !== 'model_dip_stop' &&
-      reason !== 'model_against' &&
-      reason !== 'model_late_exit' &&
-      reason !== 'model_pre_close' &&
-      reason !== 'breakeven' &&
-      reason !== 'take_profit' &&
-      reason !== 'near_certain'
-    ) {
-      continue;
-    }
+    if (!isModelPostExitCooldownReason(reason)) continue;
     const at = Number(t.closedAt);
     const score = Number.isFinite(at) ? at : -Infinity;
     if (score >= bestAt) {
@@ -1934,6 +1947,46 @@ function checkModelPostExitCooldown({
     return {
       ok: false,
       reason: `Waiting: ${sym} model sit-out after ${reason} (~${remainSec}s left) — avoids chop reopen.`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * After ANY model close (TP/BE/cut/…), pause ALL new entries briefly so we don't
+ * hop ETH→BTC in the same regime the same second.
+ */
+function checkModelGlobalPostExitCooldown({
+  trades,
+  cooldownMs,
+  now = Date.now(),
+} = {}) {
+  const cd = Number(cooldownMs);
+  if (!Number.isFinite(cd) || cd <= 0) return { ok: true };
+  let best = null;
+  let bestAt = -Infinity;
+  for (const t of trades || []) {
+    if (!t || String(t.strategy || '').toLowerCase() !== 'model') continue;
+    if (t.status && String(t.status) !== 'closed') continue;
+    if (!isModelPostExitCooldownReason(t.exitReason)) continue;
+    const at = Number(t.closedAt);
+    const score = Number.isFinite(at) ? at : -Infinity;
+    if (score >= bestAt) {
+      bestAt = score;
+      best = t;
+    }
+  }
+  if (!best || !Number.isFinite(bestAt)) return { ok: true };
+  const elapsed = Number(now) - bestAt;
+  if (elapsed < cd) {
+    const remainSec = Math.max(1, Math.ceil((cd - elapsed) / 1000));
+    const sym = String(best.symbol || '?').toUpperCase();
+    const reason = String(best.exitReason || 'exit');
+    return {
+      ok: false,
+      reason:
+        `Waiting: global sit-out after ${sym} ${reason} (~${remainSec}s left) — ` +
+        `lets the regime settle before any new entry.`,
     };
   }
   return { ok: true };
@@ -2731,6 +2784,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMinHoldSeconds',
   'modelPostExitCooldownSeconds',
   'modelPostExitCooldownMinutes',
+  'modelGlobalPostExitCooldownSeconds',
   'modelPostLeanStopCooldownMinutes',
   'modelLeanAgainstBeSeconds',
   'modelOpenGraceMs',
@@ -3826,6 +3880,7 @@ class TradingBot {
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
       modelPostExitCooldownSeconds: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
+      modelGlobalPostExitCooldownSeconds: MODEL_GLOBAL_POST_EXIT_COOLDOWN_MS_DEFAULT / 1000,
       modelPostLeanStopCooldownMinutes: MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT / 60000,
       modelLeanAgainstBeSeconds: MODEL_LEAN_AGAINST_BE_MS_DEFAULT / 1000,
       modelOpenGraceMs: MODEL_OPEN_GRACE_MS_DEFAULT,
@@ -9489,6 +9544,16 @@ class TradingBot {
       return null;
     }
 
+    const globalCd = checkModelGlobalPostExitCooldown({
+      trades: this.ledger.trades,
+      cooldownMs: modelGlobalPostExitCooldownMs(this.config),
+      now: Date.now(),
+    });
+    if (!globalCd.ok) {
+      say(globalCd.reason);
+      return null;
+    }
+
     const cooldown = checkModelPostExitCooldown({
       trades: this.ledger.trades,
       symbol,
@@ -9936,6 +10001,15 @@ class TradingBot {
    */
   async _openModelRanked(ranked) {
     if (!ranked || ranked.length === 0) return;
+    const globalCd = checkModelGlobalPostExitCooldown({
+      trades: this.ledger.trades,
+      cooldownMs: modelGlobalPostExitCooldownMs(this.config),
+      now: Date.now(),
+    });
+    if (!globalCd.ok) {
+      this.lastDecision = globalCd.reason;
+      return;
+    }
     const slotsFree = () =>
       Math.max(0, this._effectiveMaxOpenPositions() - this.openTrades.length);
     if (slotsFree() <= 0) return;
@@ -10668,8 +10742,10 @@ module.exports = {
   MODEL_LOW_ASK_LIVE_FAVOR_DEFAULT,
   MODEL_LOW_ASK_HELD_PROB_DEFAULT,
   checkModelPostExitCooldown,
+  checkModelGlobalPostExitCooldown,
   modelMinHoldMs,
   modelPostExitCooldownMs,
+  modelGlobalPostExitCooldownMs,
   modelPostLeanStopCooldownMs,
   modelLeanAgainstBeMs,
   modelOpenGraceMs,
@@ -10768,6 +10844,7 @@ module.exports = {
   MODEL_SOFT_BANK_MS_DEFAULT,
   MODEL_MIN_HOLD_MS_DEFAULT,
   MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT,
+  MODEL_GLOBAL_POST_EXIT_COOLDOWN_MS_DEFAULT,
   MODEL_LEAN_AGAINST_BE_MS_DEFAULT,
   MODEL_MIN_TP_CENTS_DEFAULT,
   MODEL_BANK_GREEN_CENTS_DEFAULT,

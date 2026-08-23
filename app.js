@@ -856,6 +856,146 @@ function closeBotOverlay() {
   document.getElementById('bot-overlay').classList.add('hidden');
 }
 
+const EXIT_SOUND_ENABLED_KEY = 'botExitSoundEnabled';
+const EXIT_SOUND_SEEN_KEY = 'botExitSoundSeenCloses';
+const seenExitCloseKeys = new Set();
+let exitSoundInitialized = false;
+let exitAudioCtx = null;
+
+function isExitSoundEnabled() {
+  const raw = localStorage.getItem(EXIT_SOUND_ENABLED_KEY);
+  if (raw === null) return false;
+  return raw === '1' || raw === 'true';
+}
+
+function setExitSoundEnabled(on) {
+  localStorage.setItem(EXIT_SOUND_ENABLED_KEY, on ? '1' : '0');
+  const checkbox = document.getElementById('bot-exit-sound');
+  if (checkbox) checkbox.checked = !!on;
+}
+
+function loadExitSoundSeenKeys() {
+  try {
+    const raw = localStorage.getItem(EXIT_SOUND_SEEN_KEY);
+    if (!raw) return;
+    JSON.parse(raw).forEach((key) => seenExitCloseKeys.add(String(key)));
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function saveExitSoundSeenKeys() {
+  const keys = Array.from(seenExitCloseKeys).slice(-100);
+  localStorage.setItem(EXIT_SOUND_SEEN_KEY, JSON.stringify(keys));
+}
+
+function resetExitSoundSeenCloses() {
+  seenExitCloseKeys.clear();
+  exitSoundInitialized = false;
+  localStorage.removeItem(EXIT_SOUND_SEEN_KEY);
+}
+
+function tradeCloseKey(trade) {
+  if (trade && trade.id) return String(trade.id);
+  return `${trade?.symbol || 'x'}-${trade?.closedAt || ''}-${trade?.exitReason || ''}`;
+}
+
+function exitSoundKind(trade) {
+  const reason = String(trade?.exitReason || '').toLowerCase();
+  if (reason === 'breakeven') return 'flat';
+  const pnl = Number(trade?.pnlCents);
+  if (Number.isFinite(pnl)) {
+    if (pnl > 0) return 'win';
+    if (pnl < 0) return 'loss';
+  }
+  if (reason === 'take_profit' || reason === 'near_certain') return 'win';
+  if (reason === 'stop_loss' || reason === 'model_against') return 'loss';
+  return 'flat';
+}
+
+async function ensureExitAudioReady() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return false;
+    if (!exitAudioCtx) exitAudioCtx = new AudioCtx();
+    if (exitAudioCtx.state === 'suspended') await exitAudioCtx.resume();
+    return exitAudioCtx.state === 'running';
+  } catch (_) {
+    return false;
+  }
+}
+
+function playExitChime(kind) {
+  if (!exitAudioCtx || exitAudioCtx.state !== 'running') return;
+  const ctx = exitAudioCtx;
+  const now = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'sine';
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+
+  if (kind === 'win') {
+    osc.frequency.setValueAtTime(880, now);
+    osc.frequency.linearRampToValueAtTime(1174, now + 0.09);
+  } else if (kind === 'loss') {
+    osc.frequency.setValueAtTime(440, now);
+    osc.frequency.linearRampToValueAtTime(330, now + 0.12);
+  } else {
+    osc.frequency.setValueAtTime(660, now);
+  }
+
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.12, now + 0.015);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+  osc.start(now);
+  osc.stop(now + 0.2);
+}
+
+function processExitSounds(tradeLog) {
+  if (!isExitSoundEnabled()) return;
+  const trades = Array.isArray(tradeLog) ? tradeLog : [];
+  const closed = trades.filter((t) => t && t.status === 'closed' && t.closedAt);
+
+  if (!exitSoundInitialized) {
+    closed.forEach((t) => seenExitCloseKeys.add(tradeCloseKey(t)));
+    exitSoundInitialized = true;
+    saveExitSoundSeenKeys();
+    return;
+  }
+
+  const fresh = [];
+  for (const trade of closed) {
+    const key = tradeCloseKey(trade);
+    if (seenExitCloseKeys.has(key)) continue;
+    seenExitCloseKeys.add(key);
+    fresh.push(trade);
+  }
+  if (!fresh.length) return;
+
+  saveExitSoundSeenKeys();
+  fresh.sort((a, b) => Number(b.closedAt) - Number(a.closedAt));
+  ensureExitAudioReady().then((ready) => {
+    if (!ready) return;
+    playExitChime(exitSoundKind(fresh[0]));
+  });
+}
+
+function initExitSoundUi() {
+  loadExitSoundSeenKeys();
+  const checkbox = document.getElementById('bot-exit-sound');
+  if (!checkbox) return;
+  checkbox.checked = isExitSoundEnabled();
+  checkbox.addEventListener('change', async () => {
+    const on = checkbox.checked;
+    setExitSoundEnabled(on);
+    if (on) {
+      const ready = await ensureExitAudioReady();
+      if (ready) playExitChime('win');
+    }
+  });
+}
+
 async function refreshBotStatus() {
   const { engineUrl } = loadSettings();
   const modeLine = document.getElementById('bot-mode-line');
@@ -885,6 +1025,7 @@ async function refreshBotStatus() {
     const res = await fetch(`${engineUrl}/api/bot/status`, { cache: 'no-store' });
     const data = await res.json();
     setAppVersion(data.version);
+    processExitSounds(data.tradeLog);
     if (!data.enabled) {
       modeLine.textContent = data.message || 'Bot is not enabled on the engine.';
       body.innerHTML = '';
@@ -1570,6 +1711,7 @@ const SLIDER_UNITS = {
   'bot-model-pace-sample': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s sample`),
   'bot-model-rich-floor': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}¢ floor`),
   'bot-model-sitout': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
+  'bot-model-global-sitout': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-settle-min': (v) => `${Math.round(v)}¢`,
   'bot-settle-max': (v) => `${Math.round(v)}¢`,
   'bot-settle-stoploss': (v) => `−${Math.round(v)}¢`,
@@ -1967,6 +2109,8 @@ function wireSliderDisplays() {
     'bot-model-pace-sample',
     'bot-model-rich-floor',
     'bot-model-late-extend-conf',
+    'bot-model-sitout',
+    'bot-model-global-sitout',
     'bot-settle-min',
     'bot-settle-max',
     'bot-settle-stoploss',
@@ -2088,6 +2232,7 @@ function wireBotConfigAutoSave() {
     'bot-model-late-barrier',
     'bot-model-preclose-force',
     'bot-model-sitout',
+    'bot-model-global-sitout',
     'bot-settle-min',
     'bot-settle-max',
     'bot-settle-stoploss',
@@ -2271,6 +2416,13 @@ async function loadBotConfigIntoForm() {
         modelSitout.value = Math.round(Math.max(0, mins * 60));
       }
     }
+    const modelGlobalSitout = document.getElementById('bot-model-global-sitout');
+    if (modelGlobalSitout) {
+      modelGlobalSitout.value =
+        c.modelGlobalPostExitCooldownSeconds != null
+          ? Math.round(Math.max(0, Number(c.modelGlobalPostExitCooldownSeconds)))
+          : 20;
+    }
     const settleMin = document.getElementById('bot-settle-min');
     if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 80;
     const settleMax = document.getElementById('bot-settle-max');
@@ -2356,6 +2508,7 @@ async function loadBotConfigIntoForm() {
       'bot-model-pace-sample',
       'bot-model-rich-floor',
       'bot-model-sitout',
+      'bot-model-global-sitout',
       'bot-settle-min',
       'bot-settle-max',
       'bot-settle-stoploss',
@@ -2492,6 +2645,9 @@ async function saveBotConfig(opts = {}) {
   const skimAmount = parseFloat(document.getElementById('bot-skim-amount').value);
   const trading = readTradingSlidersFromForm();
   const modelSitoutSec = parseFloat(document.getElementById('bot-model-sitout')?.value || '45');
+  const modelGlobalSitoutSec = parseFloat(
+    document.getElementById('bot-model-global-sitout')?.value || '20'
+  );
   const payload = {
     symbol: document.getElementById('bot-symbol').value,
     strategyMode: document.getElementById('bot-strategy-mode')?.value || 'model',
@@ -2546,6 +2702,10 @@ async function saveBotConfig(opts = {}) {
       Number.isFinite(modelSitoutSec) && modelSitoutSec > 0 ? Math.round(modelSitoutSec) : 0,
     modelPostExitCooldownMinutes:
       Number.isFinite(modelSitoutSec) && modelSitoutSec > 0 ? modelSitoutSec / 60 : 0,
+    modelGlobalPostExitCooldownSeconds:
+      Number.isFinite(modelGlobalSitoutSec) && modelGlobalSitoutSec > 0
+        ? Math.round(modelGlobalSitoutSec)
+        : 0,
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '80'),
     settleEntryMaxCents: parseFloat(document.getElementById('bot-settle-max')?.value || '94'),
     settleStopLossCents: Math.max(
@@ -2633,6 +2793,7 @@ async function resetPaperHistory() {
     if (!res.ok || !data.ok) throw new Error(data.message || 'Reset failed.');
     feedback.textContent = data.message;
     feedback.style.color = 'var(--up)';
+    resetExitSoundSeenCloses();
     await refreshBotStatus();
     await loadCalibration();
   } catch (err) {
@@ -2958,6 +3119,7 @@ async function switchMode(requestedMode) {
 }
 
 function wireBotUI() {
+  initExitSoundUi();
   document.getElementById('bot-btn').addEventListener('click', openBotOverlay);
   document.getElementById('bot-overlay-close').addEventListener('click', closeBotOverlay);
   document.getElementById('bot-settings-refresh').addEventListener('click', () => {

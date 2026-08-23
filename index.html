@@ -314,6 +314,11 @@
               <option value="off">Off — fill up to max anytime</option>
             </select>
           </label>
+          <label class="bot-exit-sound-toggle">
+            <span>Exit sound</span>
+            <input type="checkbox" id="bot-exit-sound" />
+            <span class="field-hint">Short chime when a position closes (TP, breakeven, cut, settle, etc.). Saved in this browser only.</span>
+          </label>
         </div>
 
         <div id="bot-settings-edge" class="bot-field-grid" hidden>
@@ -535,7 +540,14 @@
               <input id="bot-model-sitout" type="range" min="0" max="120" step="15" value="45" />
               <span class="slider-value" id="bot-model-sitout-value">—</span>
             </div>
-            <span class="field-hint">After BE/TP/cut wait before rebuy (default <strong>45s</strong>). Applies to <code>MODEL_AGAINST</code> too — not the old 120s lean-stop timer.</span>
+            <span class="field-hint"><strong>Per coin</strong> — after BE/TP/cut on that coin, wait before rebuying it (default <strong>45s</strong>).</span>
+          </label>
+          <label>MODEL global sit-out (sec)
+            <div class="slider-row">
+              <input id="bot-model-global-sitout" type="range" min="0" max="60" step="5" value="20" />
+              <span class="slider-value" id="bot-model-global-sitout-value">—</span>
+            </div>
+            <span class="field-hint"><strong>All coins</strong> — after any TP/BE/cut, block <em>every</em> new entry this long so you don’t hop BTC→ETH in the same regime (default <strong>20s</strong>). <strong>0</strong> = off.</span>
           </label>
         </div>
 
