@@ -9,6 +9,7 @@
   "modelLowAskMinConfidence": 75,
   "modelLowAskLiveFavorPts": 4,
   "modelLowAskHeldProbMin": 72,
+  "modelLiveLeanMarginPct": 1,
   "modelEntryLiveLeanMarginPct": 3,
   "modelSignalDominanceMin": 0,
   "modelBankGreenCents": 7,

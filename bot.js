@@ -648,8 +648,8 @@ function modelSignalDropCents(signalEntryCents, signalBidCents) {
   return Math.max(0, Math.round(entry - bid));
 }
 
-/** Live lean against held side — low so stops fire early (preemptive). */
-const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 2;
+/** Live lean against held side — one point so red exits fire preemptively. */
+const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 1;
 /** Entry: live lean must favor the locked side by at least this many pts (0 = any lead). */
 const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 2;
 /** Don't early-exit a Model hold until it's been open at least this long. */
