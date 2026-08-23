@@ -26,7 +26,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 68;
+const SETTINGS_DEFAULTS_VERSION = 69;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -655,13 +655,13 @@ const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 2;
 /** Don't early-exit a Model hold until it's been open at least this long. */
 const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
 /** After Model BE/TP, sit out that coin this long before rebuy. */
-const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 60_000;
+const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 45_000;
 /** After MODEL lean/dip stop (red), longer sit-out — stops knife-catch churn. */
 const MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT = 120_000;
 /** After open grace: when model is not firm, wait this long then BE/cut (avoid ask→bid flicker). */
-const MODEL_LEAN_AGAINST_BE_MS_DEFAULT = 5_000;
+const MODEL_LEAN_AGAINST_BE_MS_DEFAULT = 2_000;
 /** First N ms after open: only hard lean-turning exits (ignore soft + ask/bid haircut). */
-const MODEL_OPEN_GRACE_MS_DEFAULT = 8_000;
+const MODEL_OPEN_GRACE_MS_DEFAULT = 5_000;
 /** Lean-exit / momentum TP floor — no micro-banks under this. */
 const MODEL_MIN_TP_CENTS_DEFAULT = 7;
 /** Unconditional bank once this many ¢ green (don't wait for a stall). */
@@ -762,6 +762,8 @@ function modelMinHoldMs(config = {}) {
 }
 
 function modelPostExitCooldownMs(config = {}) {
+  const sec = Number(config.modelPostExitCooldownSeconds);
+  if (Number.isFinite(sec) && sec >= 0) return Math.round(sec * 1000);
   const mins = Number(config.modelPostExitCooldownMinutes);
   if (Number.isFinite(mins) && mins <= 0) return 0;
   if (Number.isFinite(mins) && mins > 0) return Math.round(mins * 60 * 1000);
@@ -1727,8 +1729,7 @@ function checkModelPostExitCooldown({
   const isLeanStop =
     reason === 'model_lean_stop' ||
     reason === 'model_lean_flip' ||
-    reason === 'model_dip_stop' ||
-    reason === 'model_against';
+    reason === 'model_dip_stop';
   const cd = isLeanStop
     ? Number.isFinite(cdLean) && cdLean > 0
       ? cdLean
@@ -2535,6 +2536,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelRichMaxSpreadCents',
   'modelRichMinConfidence',
   'modelMinHoldSeconds',
+  'modelPostExitCooldownSeconds',
   'modelPostExitCooldownMinutes',
   'modelPostLeanStopCooldownMinutes',
   'modelLeanAgainstBeSeconds',
@@ -3628,6 +3630,7 @@ class TradingBot {
       modelRichMaxSpreadCents: MODEL_RICH_MAX_SPREAD_CENTS_DEFAULT,
       modelRichMinConfidence: MODEL_RICH_MIN_CONFIDENCE_DEFAULT,
       modelMinHoldSeconds: MODEL_MIN_HOLD_MS_DEFAULT / 1000,
+      modelPostExitCooldownSeconds: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 1000,
       modelPostExitCooldownMinutes: MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT / 60000,
       modelPostLeanStopCooldownMinutes: MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT / 60000,
       modelLeanAgainstBeSeconds: MODEL_LEAN_AGAINST_BE_MS_DEFAULT / 1000,
@@ -7042,6 +7045,17 @@ class TradingBot {
         if (await exitModelAgainst()) return;
       }
 
+      // Soft/50-50 lean + red: cut at bid (don't wait for hard flip or min-hold).
+      if (
+        bidOk &&
+        leanStaleScratch &&
+        (underwater || econUnderwater) &&
+        againstBeReady
+      ) {
+        await tryModelAgainstCut();
+        return;
+      }
+
       // 50/50 / soft lean + econ-flat: scratch BE after open grace (skip min-hold).
       if (bidOk && leanStaleScratch && scratchFlat && againstBeReady) {
         await tryModelBreakevenScratch();
@@ -7202,8 +7216,10 @@ class TradingBot {
         why = `hard lean against (${leanTxt}) — BE/cut after open grace + ${Math.round(againstBeDelay / 1000)}s`;
       else if (underwater && modelFirm)
         why = `model still firm (${leanTxt}) — holding (no price stop)`;
-      else if (underwater && !modelFirm && !modelHardAgainst && !nearFlat)
-        why = `lean soft/stale (${leanTxt}) — holding red until hard flip`;
+      else if (underwater && leanStaleScratch && !againstBeReady)
+        why = `soft/50-50 lean (${leanTxt}) + red — cut after open grace + ${Math.round(againstBeDelay / 1000)}s`;
+      else if (underwater && leanStaleScratch && againstBeReady)
+        why = `soft/50-50 lean (${leanTxt}) + red — cut armed`;
       else if (leanStaleScratch && scratchFlat && !againstBeReady)
         why = `50/50/soft lean (${leanTxt}) — BE scratch after open grace + ${Math.round(againstBeDelay / 1000)}s`;
       else if (leanStaleScratch && scratchFlat && againstBeReady)

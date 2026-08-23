@@ -2255,9 +2255,13 @@ async function loadBotConfigIntoForm() {
     }
     const modelSitout = document.getElementById('bot-model-sitout');
     if (modelSitout) {
-      const mins =
-        c.modelPostExitCooldownMinutes != null ? Number(c.modelPostExitCooldownMinutes) : 1;
-      modelSitout.value = Math.round(Math.max(0, mins * 60));
+      if (c.modelPostExitCooldownSeconds != null && Number.isFinite(Number(c.modelPostExitCooldownSeconds))) {
+        modelSitout.value = Math.round(Math.max(0, Number(c.modelPostExitCooldownSeconds)));
+      } else {
+        const mins =
+          c.modelPostExitCooldownMinutes != null ? Number(c.modelPostExitCooldownMinutes) : 45 / 60;
+        modelSitout.value = Math.round(Math.max(0, mins * 60));
+      }
     }
     const settleMin = document.getElementById('bot-settle-min');
     if (settleMin) settleMin.value = c.settleEntryMinCents != null ? c.settleEntryMinCents : 80;
@@ -2478,7 +2482,7 @@ async function saveBotConfig(opts = {}) {
   const skimMode = document.getElementById('bot-skim-mode').value;
   const skimAmount = parseFloat(document.getElementById('bot-skim-amount').value);
   const trading = readTradingSlidersFromForm();
-  const modelSitoutSec = parseFloat(document.getElementById('bot-model-sitout')?.value || '60');
+  const modelSitoutSec = parseFloat(document.getElementById('bot-model-sitout')?.value || '45');
   const payload = {
     symbol: document.getElementById('bot-symbol').value,
     strategyMode: document.getElementById('bot-strategy-mode')?.value || 'model',
@@ -2528,6 +2532,8 @@ async function saveBotConfig(opts = {}) {
       document.getElementById('bot-model-pace-sample')?.value || '8'
     ),
     modelRichStopFloorCents: parseFloat(document.getElementById('bot-model-rich-floor')?.value || '0'),
+    modelPostExitCooldownSeconds:
+      Number.isFinite(modelSitoutSec) && modelSitoutSec > 0 ? Math.round(modelSitoutSec) : 0,
     modelPostExitCooldownMinutes:
       Number.isFinite(modelSitoutSec) && modelSitoutSec > 0 ? modelSitoutSec / 60 : 0,
     settleEntryMinCents: parseFloat(document.getElementById('bot-settle-min')?.value || '80'),
