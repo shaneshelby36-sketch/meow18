@@ -292,7 +292,7 @@
               <label class="auto-coin-chip"><input type="checkbox" data-coin="DOGE" /> DOGE</label>
               <label class="auto-coin-chip"><input type="checkbox" data-coin="NEAR" /> NEAR</label>
             </div>
-            <span class="field-hint">Recommended <strong>BTC · BNB · SOL</strong> (Core setup). Tap a setup card in the MODEL tab instead of guessing.</span>
+            <span class="field-hint">Recommended <strong>BTC · ETH</strong> (Core setup). Tap a setup card in the MODEL tab instead of guessing.</span>
           </div>
           <label>Stake per trade
             <div class="slider-row">
@@ -306,7 +306,7 @@
               <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
               <span class="slider-value" id="bot-maxpos-value">—</span>
             </div>
-            <span class="field-hint">Default 3 parallel coins. Still one open per coin.</span>
+            <span class="field-hint">Default <strong>1</strong> open at a time. Still one open per coin when max &gt; 1.</span>
           </label>
           <label>Second open only if holding green
             <select id="bot-second-green">
@@ -461,7 +461,7 @@
               <input id="bot-model-low-ask-conf" type="range" min="0" max="95" step="1" />
               <span class="slider-value" id="bot-model-low-ask-conf-value">—</span>
             </div>
-            <span class="field-hint"><strong>0 = off</strong>. Asks ≤69¢ only when: conf ≥ this (default <strong>75</strong>), live favor ≥<strong>4</strong>pts, held-side live ≥<strong>72</strong>%. ≥70¢ uses normal conf. Under 70¢ stake stays <strong>half</strong>.</span>
+            <span class="field-hint"><strong>Off by default (0)</strong> — no near-certain gate on ≤69¢ asks. Raise to re-enable (conf + live favor + held lean). Under 70¢ stake still stays <strong>half</strong>.</span>
           </label>
           <label>MODEL max entry (¢)
             <div class="slider-row">
@@ -477,7 +477,7 @@
               <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
-            <span class="field-hint">Bank when bid hits this green (default <strong>+7¢</strong>). Trail arms ~+<strong>5¢</strong> — if bid stalls, next slider banks at the live bid even below target.</span>
+            <span class="field-hint">Bank when bid hits this green (default <strong>+11¢</strong>). Trail arms ~+<strong>5¢</strong> — if bid stalls, next slider banks at the live bid even below target.</span>
           </label>
           <label>MODEL green stall bank (sec)
             <div class="slider-row">

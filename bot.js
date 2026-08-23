@@ -37,7 +37,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 73;
+const SETTINGS_DEFAULTS_VERSION = 74;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -127,8 +127,8 @@ function pickLiveOpenMarket(markets, nowMs = Date.now(), minMsLeft = 5000) {
 // Opt-in coins historically: DOGE / NEAR. Now every coin is gated by autoTradeSymbols.
 const OPTIONAL_TRADE_SYMBOLS = new Set(['DOGE', 'NEAR']);
 
-/** Default AUTO universe — BTC / SOL (fewer Kalshi GETs; add BNB back when 429s calm). */
-const DEFAULT_AUTO_TRADE_SYMBOLS = ['BTC', 'SOL'];
+/** Default AUTO universe — BTC / ETH. */
+const DEFAULT_AUTO_TRADE_SYMBOLS = ['BTC', 'ETH'];
 
 /** Default opt-outs when config knobs are unset (export for tests / legacy). */
 const DISABLED_TRADE_SYMBOLS = new Set(
@@ -236,14 +236,15 @@ const MODEL_SETUPS = [
   {
     id: 'core',
     recommended: true,
-    label: 'Core BTC / SOL',
-    why: 'BTC + SOL only for now — fewer Kalshi GETs / 429s. Add BNB back when rate limits calm.',
-    autoTradeSymbols: 'BTC,SOL',
+    label: 'Core BTC / ETH',
+    why: 'BTC + ETH, one slot, bank at +11¢. Low-ask near-certain gate off.',
+    autoTradeSymbols: 'BTC,ETH',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
-    modelBankGreenCents: 7,
-    modelMinTpCents: 7,
-    maxOpenPositions: 2,
+    modelBankGreenCents: 11,
+    modelMinTpCents: 11,
+    maxOpenPositions: 1,
+    modelLowAskMinConfidence: 0,
     modelConfirmCrossCents: 0,
     modelMaxLossCents: 8,
   },
@@ -692,9 +693,9 @@ const MODEL_LEAN_AGAINST_BE_MS_DEFAULT = 2_000;
 /** First N ms after open: only hard lean-turning exits (ignore soft + ask/bid haircut). */
 const MODEL_OPEN_GRACE_MS_DEFAULT = 5_000;
 /** Lean-exit / momentum TP floor — no micro-banks under this. */
-const MODEL_MIN_TP_CENTS_DEFAULT = 7;
+const MODEL_MIN_TP_CENTS_DEFAULT = 11;
 /** Unconditional bank once this many ¢ green (don't wait for a stall). */
-const MODEL_BANK_GREEN_CENTS_DEFAULT = 7;
+const MODEL_BANK_GREEN_CENTS_DEFAULT = 11;
 /** Start trailing / allow stall-TP once at least this many ¢ green. */
 const MODEL_TRAIL_ARM_CENTS_DEFAULT = 5;
 /** Held bid at/above this → bank immediately (don't sit 96→100). */
@@ -1880,8 +1881,8 @@ function modelLowAskHeldProbMin(config = {}) {
 }
 
 /**
- * Asks ≤69¢ (e.g. 65¢) only when direction is firm enough:
- * conf ≥ slider (default 75; 0 = off) + live favor ≥4pts + held-side ≥72%.
+ * Asks ≤69¢: optional near-certain gate (off by default).
+ * conf ≥ slider when on + live favor ≥4pts + held-side ≥72%.
  * Stake under 70¢ stays half regardless.
  */
 function modelLowAskConvictionGate({ priceCents, window, signalSide, config = {} } = {}) {
@@ -2194,7 +2195,7 @@ const MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS = 65;
 /** Asks at/below this need near-certain direction (under the 70¢ half-stake line). */
 const MODEL_LOW_ASK_CEILING_CENTS_DEFAULT = 69;
 /** Min engine conf for low-ask (≤69¢) entries. 0 = off (use normal min conf only). */
-const MODEL_LOW_ASK_MIN_CONFIDENCE_DEFAULT = 75;
+const MODEL_LOW_ASK_MIN_CONFIDENCE_DEFAULT = 0;
 /** Live favor pts required for low-ask conviction (UP ≥ DOWN + N). */
 const MODEL_LOW_ASK_LIVE_FAVOR_DEFAULT = 4;
 /** Held-side live prob % required for low-ask conviction. */
@@ -3965,11 +3966,11 @@ class TradingBot {
       // Settle NEAR only: risk half stake (thinner book / choppier). Other coins full size.
       halfStakeNear: 'on',
       stakingStrategy: 'fixed', // 'fixed' | 'halve-after-win' — see _computeNextStake for the logic
-      maxOpenPositions: 2, // Core: 2 coins — correlated dumps were stacking at 3
+      maxOpenPositions: 1, // Core: one ticket at a time
       // With ≥1 open: only allow another if an existing hold is green (bid ≥ entry).
       // Model ignores this — windows + confirm gate decide.
       secondOpenRequiresGreen: 'on',
-      // AUTO universe — which coins may open (default BTC/BNB/SOL). Editable in settings.
+      // AUTO universe — which coins may open (default BTC/ETH). Editable in settings.
       autoTradeSymbols: DEFAULT_AUTO_TRADE_SYMBOLS.join(','),
       activeSetupId: 'core',
       modelAutoSwitchSetup: 'off',

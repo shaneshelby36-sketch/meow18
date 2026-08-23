@@ -4950,28 +4950,29 @@ async function testBotTradingFlow() {
   check(Object.keys(SERIES_BY_SYMBOL).includes('HYPE'), 'HYPE series kept for exit management');
   check(Object.keys(SERIES_BY_SYMBOL).includes('NEAR'), 'NEAR series kept for exit management');
   check(isKalshiTradeEnabled('BTC'), 'BTC tradeable by default');
-  check(!isKalshiTradeEnabled('BNB'), 'BNB opted out by default (rate-limit trim)');
-  check(isKalshiTradeEnabled('SOL'), 'SOL tradeable by default');
-  check(!isKalshiTradeEnabled('ETH'), 'ETH opted out by default');
+  check(!isKalshiTradeEnabled('BNB'), 'BNB opted out by default');
+  check(!isKalshiTradeEnabled('SOL'), 'SOL opted out by default');
+  check(isKalshiTradeEnabled('ETH'), 'ETH tradeable by default');
   check(!isKalshiTradeEnabled('DOGE'), 'DOGE opted out by default');
   check(!isKalshiTradeEnabled('NEAR'), 'NEAR opted out by default');
   check(!isKalshiTradeEnabled('HYPE'), 'HYPE opted out by default');
-  check(!tradeableKalshiSymbols().includes('ETH'), 'AUTO excludes ETH by default');
+  check(tradeableKalshiSymbols().includes('ETH'), 'AUTO includes ETH by default');
   check(!tradeableKalshiSymbols().includes('BNB'), 'AUTO excludes BNB by default');
-  check(tradeableKalshiSymbols().includes('SOL'), 'AUTO includes SOL');
+  check(!tradeableKalshiSymbols().includes('SOL'), 'AUTO excludes SOL by default');
+  check(tradeableKalshiSymbols().includes('BTC'), 'AUTO includes BTC by default');
   {
     const onlyTrade = symbolsNeedingKalshiTargets({
-      config: { autoTradeSymbols: 'BTC,SOL', symbol: 'AUTO' },
+      config: { autoTradeSymbols: 'BTC,ETH', symbol: 'AUTO' },
       openTrades: [],
     });
-    checkEq(onlyTrade.join(','), 'BTC,SOL', 'trade-active symbol set is BTC,SOL');
-    check(!onlyTrade.includes('ETH'), 'trade-active set skips ETH when not traded');
+    checkEq(onlyTrade.join(','), 'BTC,ETH', 'trade-active symbol set is BTC,ETH');
+    check(!onlyTrade.includes('SOL'), 'trade-active set skips SOL when not traded');
     const withOpen = symbolsNeedingKalshiTargets({
-      config: { autoTradeSymbols: 'BTC,SOL', symbol: 'AUTO' },
-      openTrades: [{ symbol: 'ETH', status: 'open' }],
+      config: { autoTradeSymbols: 'BTC,ETH', symbol: 'AUTO' },
+      openTrades: [{ symbol: 'SOL', status: 'open' }],
     });
-    check(withOpen.includes('ETH'), 'open ETH stays in trade-active set while held');
-    check(withOpen.includes('BTC') && withOpen.includes('SOL'), 'tradeable kept with open hold');
+    check(withOpen.includes('SOL'), 'open SOL stays in trade-active set while held');
+    check(withOpen.includes('BTC') && withOpen.includes('ETH'), 'tradeable kept with open hold');
     const engineSol = symbolsNeedingEngineCompute({
       config: { autoTradeSymbols: 'SOL', symbol: 'AUTO' },
       openTrades: [],
@@ -6109,8 +6110,8 @@ async function testModelStrategy() {
   }
   checkEq(MODEL_MAX_ADVERSE_CENTS_DEFAULT, 0, 'soft dip off by default');
   checkEq(MODEL_HARD_ADVERSE_CENTS_DEFAULT, 8, 'hard max-loss cliff 8¢');
-  checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 7, 'bank / momentum arm at ≥7¢ green');
-  checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 7, 'min TP 7¢ — no micro banks');
+  checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 11, 'bank / momentum arm at ≥11¢ green');
+  checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 11, 'min TP 11¢ — no micro banks');
   checkEq(MODEL_TRAIL_ARM_CENTS_DEFAULT, 5, 'trail arm at ≥5¢ green');
   checkEq(
     modelTakeProfitMeetsFloor({ entryPriceCents: 85 }, 87, { modelMinTpCents: 7 }),
@@ -6209,22 +6210,29 @@ async function testModelStrategy() {
   );
   check(!modelPriceAllowed(20, { ...win(70, 85), confidence: 85 }, {}).ok, '20¢ under perfect floor');
 
-  // 65¢ only with near-certain direction
+  // Low-ask near-certain gate is off by default; can be re-enabled via slider
   {
-    const weak = modelLowAskConvictionGate({
+    const off = modelLowAskConvictionGate({
       priceCents: 65,
       window: { ...win(56, 60), confidence: 60 },
       signalSide: 'yes',
       config: {},
     });
-    check(weak.ok === false, '65¢ blocked when conf/favor are soft');
+    check(off.ok === true && off.skipped === true, '65¢ allowed when near-certain gate off');
+    const weak = modelLowAskConvictionGate({
+      priceCents: 65,
+      window: { ...win(56, 60), confidence: 60 },
+      signalSide: 'yes',
+      config: { modelLowAskMinConfidence: 75 },
+    });
+    check(weak.ok === false, '65¢ blocked when gate on and conf/favor are soft');
     const strong = modelLowAskConvictionGate({
       priceCents: 65,
       window: { ...win(72, 75), confidence: 75 },
       signalSide: 'yes',
-      config: {},
+      config: { modelLowAskMinConfidence: 75 },
     });
-    check(strong.ok === true, '65¢ allowed at conf 75 / favor≥4 / held≥72');
+    check(strong.ok === true, '65¢ allowed at conf 75 / favor≥4 / held≥72 when gate on');
     const softFavor = modelLowAskConvictionGate({
       priceCents: 65,
       window: { ...win(72, 80), confidence: 80 },
@@ -7192,7 +7200,7 @@ async function testModelStrategy() {
       '50/50 live lean does not flip YES (needs ≥2pts against)'
     );
     checkEq(MODEL_LIVE_LEAN_MARGIN_DEFAULT, 1, 'live lean margin default 1pt (preemptive)');
-    checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 7, 'model min TP 7¢');
+    checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 11, 'model min TP 11¢');
     const liveFlip = {
       ETH: {
         ready: true,

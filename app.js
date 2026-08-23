@@ -1730,7 +1730,7 @@ function syncTradingSlidersFromConfig(c) {
   const stakeEl = document.getElementById('bot-stake');
   if (stakeEl) stakeEl.value = c.stakeDollars != null ? c.stakeDollars : 5;
   const maxEl = document.getElementById('bot-maxpos');
-  if (maxEl) maxEl.value = c.maxOpenPositions != null ? c.maxOpenPositions : 3;
+  if (maxEl) maxEl.value = c.maxOpenPositions != null ? c.maxOpenPositions : 1;
   const secondGreen = document.getElementById('bot-second-green');
   if (secondGreen) {
     secondGreen.value = c.secondOpenRequiresGreen === 'off' ? 'off' : 'on';
@@ -1740,19 +1740,19 @@ function syncTradingSlidersFromConfig(c) {
 function readTradingSlidersFromForm() {
   return {
     stakeDollars: parseFloat(document.getElementById('bot-stake')?.value || '5'),
-    maxOpenPositions: parseFloat(document.getElementById('bot-maxpos')?.value || '3'),
+    maxOpenPositions: parseFloat(document.getElementById('bot-maxpos')?.value || '1'),
     secondOpenRequiresGreen: document.getElementById('bot-second-green')?.value || 'on',
   };
 }
 
 function readAutoTradeSymbolsFromForm() {
   const boxes = document.querySelectorAll('#bot-auto-coins input[data-coin]');
-  if (!boxes.length) return 'BTC,BNB,SOL';
+  if (!boxes.length) return 'BTC,ETH';
   const picked = Array.from(boxes)
     .filter((el) => el.checked)
     .map((el) => String(el.dataset.coin || '').toUpperCase())
     .filter(Boolean);
-  return picked.length ? picked.join(',') : 'BTC,BNB,SOL';
+  return picked.length ? picked.join(',') : 'BTC,ETH';
 }
 
 function syncAutoTradeSymbolsToForm(c) {
@@ -1769,7 +1769,7 @@ function syncAutoTradeSymbolsToForm(c) {
     if (c && (c.tradeDoge === 'on' || c.tradeDoge === true)) enabled.push('DOGE');
     if (c && (c.tradeNear === 'on' || c.tradeNear === true)) enabled.push('NEAR');
   }
-  if (!enabled.length) enabled = ['BTC', 'BNB', 'SOL'];
+  if (!enabled.length) enabled = ['BTC', 'ETH'];
   const set = new Set(enabled);
   wrap.querySelectorAll('input[data-coin]').forEach((el) => {
     el.checked = set.has(String(el.dataset.coin || '').toUpperCase());
@@ -2369,12 +2369,12 @@ async function loadBotConfigIntoForm() {
     const modelLowAskConf = document.getElementById('bot-model-low-ask-conf');
     if (modelLowAskConf) {
       modelLowAskConf.value =
-        c.modelLowAskMinConfidence != null ? c.modelLowAskMinConfidence : 75;
+        c.modelLowAskMinConfidence != null ? c.modelLowAskMinConfidence : 0;
     }
     const modelMaxEntry = document.getElementById('bot-model-max-entry');
     if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 93;
     const modelBankGreen = document.getElementById('bot-model-bank-green');
-    if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 7;
+    if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 11;
     const modelStallSec = document.getElementById('bot-model-stall-sec');
     if (modelStallSec) {
       modelStallSec.value =
@@ -2687,12 +2687,12 @@ async function saveBotConfig(opts = {}) {
     modelMinRoomToFloorCents: parseFloat(
       document.getElementById('bot-model-min-room-floor')?.value || '10'
     ),
-    modelLowAskMinConfidence: parseFloat(document.getElementById('bot-model-low-ask-conf')?.value || '75'),
+    modelLowAskMinConfidence: parseFloat(document.getElementById('bot-model-low-ask-conf')?.value || '0'),
     modelMaxEntryCents: parseFloat(document.getElementById('bot-model-max-entry')?.value || '93'),
     modelLowPriceMaxCents: 70,
     modelLowPriceStakeQuarters: 2,
-    modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
-    modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
+    modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '11'),
+    modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '11'),
     modelMomentumStallSeconds: parseFloat(document.getElementById('bot-model-stall-sec')?.value || '8'),
     modelSettleCloseMinutes: parseFloat(document.getElementById('bot-model-settle-close')?.value || '2.5'),
     modelLateBarrierMinutes: parseFloat(document.getElementById('bot-model-late-barrier')?.value || '2'),
