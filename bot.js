@@ -26,7 +26,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 69;
+const SETTINGS_DEFAULTS_VERSION = 70;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -519,12 +519,12 @@ function settleSideEntryBand(config = {}, side = 'yes', minutesRemaining = null)
   return { min: eff.min, max: eff.max, late: !!eff.late };
 }
 
-/** Minutes left at/under which settle may dip below the primary min (0 = off). Default 3.5. */
+/** Minutes left at/under which settle may dip below the primary min (0 = off). Default 2.5. */
 function settleLateEntryMinutes(config = {}) {
   const m = Number(config.settleLateEntryMinutes);
   if (Number.isFinite(m) && m <= 0) return 0;
   if (Number.isFinite(m) && m > 0) return m;
-  return 3.5;
+  return 2.5;
 }
 
 /** Floor ask when late fallback is active (default 70¢). Never above primary min. */
@@ -652,6 +652,16 @@ function modelSignalDropCents(signalEntryCents, signalBidCents) {
 const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 1;
 /** Cash out either contract when the live model becomes this one-sided. */
 const MODEL_EXTREME_LIVE_LEAN_EXIT_PCT_DEFAULT = 96;
+/** Lean decay cut: must have peaked at/above this (e.g. 99/1). */
+const MODEL_LEAN_DECAY_PEAK_MIN_DEFAULT = 90;
+/** Cut when held-side lean falls to/below this (~85/15). */
+const MODEL_LEAN_DECAY_FLOOR_DEFAULT = 85;
+/** Or peak − current ≥ this many pts (99→85). */
+const MODEL_LEAN_DECAY_DROP_PTS_DEFAULT = 14;
+/** Lean bounce this many pts off trough = recovery (reset timer). */
+const MODEL_LEAN_DECAY_RECOVERY_PTS_DEFAULT = 3;
+/** In decay zone with no recovery this long → cut. */
+const MODEL_LEAN_DECAY_STALL_MS_DEFAULT = 6_000;
 /** Entry: live lean must favor the locked side by at least this many pts (0 = any lead). */
 const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 2;
 /** Don't early-exit a Model hold until it's been open at least this long. */
@@ -715,9 +725,9 @@ const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 const MODEL_LATE_BARRIER_MINUTES_DEFAULT = 2;
 /**
  * Start near-settle cash-outs this many minutes before window end.
- * Default 2 — bank flat/green/small-red instead of gambling settlement.
+ * Default 2.5 — bank flat/green/small-red instead of gambling settlement.
  */
-const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 2;
+const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 2.5;
 /** Last N minutes: always sell (never wait for Kalshi 0/100). */
 const MODEL_PRE_CLOSE_FORCE_MINUTES_DEFAULT = 1;
 /** Confidence required to extend a hold into/through the final barrier. */
@@ -1173,6 +1183,118 @@ function modelExtremeLeanWithUs(window, side, config = {}) {
   if (side === 'yes') return Number.isFinite(up) && up >= threshold;
   if (side === 'no') return Number.isFinite(down) && down >= threshold;
   return false;
+}
+
+function modelHeldSideProb(window, side) {
+  if (!window || !side) return NaN;
+  const up = Number(window.probabilityUp);
+  const down = Number(window.probabilityDown);
+  if (side === 'yes') return Number.isFinite(up) ? up : NaN;
+  if (side === 'no') return Number.isFinite(down) ? down : NaN;
+  return NaN;
+}
+
+function modelLeanDecayPeakMin(config = {}) {
+  const n = Number(config.modelLeanDecayPeakMin);
+  if (Number.isFinite(n) && n > 0) return Math.min(99, Math.round(n));
+  return MODEL_LEAN_DECAY_PEAK_MIN_DEFAULT;
+}
+
+function modelLeanDecayFloor(config = {}) {
+  const n = Number(config.modelLeanDecayFloor);
+  if (Number.isFinite(n) && n > 0) return Math.min(99, Math.round(n));
+  return MODEL_LEAN_DECAY_FLOOR_DEFAULT;
+}
+
+function modelLeanDecayDropPts(config = {}) {
+  const n = Number(config.modelLeanDecayDropPts);
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_LEAN_DECAY_DROP_PTS_DEFAULT;
+}
+
+function modelLeanDecayRecoveryPts(config = {}) {
+  const n = Number(config.modelLeanDecayRecoveryPts);
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_LEAN_DECAY_RECOVERY_PTS_DEFAULT;
+}
+
+function modelLeanDecayStallMs(config = {}) {
+  const sec = Number(config.modelLeanDecayStallSeconds);
+  if (Number.isFinite(sec) && sec >= 0) return Math.round(sec * 1000);
+  const ms = Number(config.modelLeanDecayStallMs);
+  if (Number.isFinite(ms) && ms >= 0) return Math.round(ms);
+  return MODEL_LEAN_DECAY_STALL_MS_DEFAULT;
+}
+
+/**
+ * Strong lean rotting (99/1 → 85/15): track peak/trough; cut when decay zone
+ * persists without recovery. Mutates trade peak/decay timestamps.
+ */
+function modelLeanDecayCutState(trade, window, side, now = Date.now(), config = {}) {
+  const heldProb = modelHeldSideProb(window, side);
+  if (!Number.isFinite(heldProb)) {
+    return { inDecayZone: false, cutReady: false, heldProb: NaN, peakLean: NaN };
+  }
+  const peakMin = modelLeanDecayPeakMin(config);
+  const floor = modelLeanDecayFloor(config);
+  const dropPts = modelLeanDecayDropPts(config);
+  const recoveryPts = modelLeanDecayRecoveryPts(config);
+  const stallMs = modelLeanDecayStallMs(config);
+  const entryHeld = Number(trade && trade.modelEntryHeldProb);
+  const prevPeak = Number(trade && trade.peakModelHeldProb);
+  const peakLean = Math.max(
+    Number.isFinite(prevPeak) ? prevPeak : -Infinity,
+    Number.isFinite(entryHeld) ? entryHeld : -Infinity,
+    heldProb
+  );
+  if (trade) trade.peakModelHeldProb = peakLean;
+
+  const wasStrong = peakLean >= peakMin;
+  const dropped = peakLean - heldProb;
+  const inDecayZone = wasStrong && (heldProb <= floor || dropped >= dropPts);
+
+  if (!inDecayZone) {
+    if (trade) {
+      delete trade.modelLeanDecaySince;
+      delete trade.modelLeanDecayTroughProb;
+    }
+    return { inDecayZone: false, cutReady: false, heldProb, peakLean, wasStrong };
+  }
+
+  const prevTrough = Number(trade && trade.modelLeanDecayTroughProb);
+  const trough = Number.isFinite(prevTrough) ? Math.min(prevTrough, heldProb) : heldProb;
+  if (trade) {
+    trade.modelLeanDecayTroughProb = trough;
+    if (!Number.isFinite(Number(trade.modelLeanDecaySince))) {
+      trade.modelLeanDecaySince = now;
+    }
+  }
+
+  const recovered =
+    heldProb >= trough + recoveryPts && heldProb > floor && dropped < dropPts;
+  if (recovered) {
+    if (trade) {
+      delete trade.modelLeanDecaySince;
+      delete trade.modelLeanDecayTroughProb;
+    }
+    return { inDecayZone: false, cutReady: false, heldProb, peakLean, recovered: true };
+  }
+
+  const decayAge = trade && Number.isFinite(Number(trade.modelLeanDecaySince))
+    ? now - Number(trade.modelLeanDecaySince)
+    : 0;
+  const atFloor = heldProb <= floor;
+  const cutReady = atFloor || decayAge >= stallMs;
+
+  return {
+    inDecayZone: true,
+    cutReady,
+    heldProb,
+    peakLean,
+    trough,
+    decayAgeMs: decayAge,
+    atFloor,
+  };
 }
 
 /** Entry-only live favor margin (stricter than the exit lean-against margin). */
@@ -1863,11 +1985,11 @@ const SETTLE_EXIT_TIERS = [
     minEntry: 70,
     maxEntry: 74,
     targetCents: 88,
-    staleMinutesLeft: 3.5,
+    staleMinutesLeft: 2.5,
     tier: 'late',
     entryLabel: '70–74¢ (late)',
     aimLabel: '88¢',
-    staleLabel: '≤3.5m left',
+    staleLabel: '≤2.5m left',
   },
   {
     minEntry: 1,
@@ -3728,7 +3850,7 @@ class TradingBot {
       // After settle_stale / settle TP: don't reopen same coin+side for a few minutes.
       settlePostStaleSameSideCooldownMinutes: 3,
       // Late fallback: if nothing in primary band and ≤ this many min left, allow down to late min.
-      settleLateEntryMinutes: 3.5,
+      settleLateEntryMinutes: 2.5,
       settleLateEntryMinCents: 70,
       // Entry-tiered TP/stale (settleExitPlan). 'off' = stop + hold to settlement only.
       settleTieredExits: 'on',
@@ -7140,6 +7262,37 @@ class TradingBot {
         return;
       }
 
+      // Strong lean rotting (99/1 → 85/15): cut if no recovery — smaller loss beats cliff.
+      if (bidOk && picked && picked.window && !faded) {
+        const decay = modelLeanDecayCutState(trade, picked.window, trade.side, now, this.config);
+        if (decay.inDecayZone && decay.cutReady) {
+          const up = Number(picked.window.probabilityUp);
+          const down = Number(picked.window.probabilityDown);
+          const leanTxt =
+            Number.isFinite(up) && Number.isFinite(down)
+              ? `${Math.round(up)}/${Math.round(down)} (peak ${Math.round(decay.peakLean)})`
+              : 'lean n/a';
+          this.lastDecision =
+            `Lean decay ${leanTxt} on ${trade.symbol} — no recovery, cashing out.`;
+          if (underwater || econUnderwater) {
+            await tryModelAgainstCut();
+            return;
+          }
+          if (isBankableGreen && heldForBank) {
+            await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+              liveSellPriceCents: heldSideBidCents,
+            });
+            return;
+          }
+          if (scratchFlat || flatOrGreen) {
+            await tryModelBreakevenScratch();
+            return;
+          }
+          await tryModelAgainstCut();
+          return;
+        }
+      }
+
       if (modelHardAgainst && againstBeReady) {
         if (await exitModelAgainst()) return;
       }
@@ -7178,7 +7331,7 @@ class TradingBot {
       }
 
       // ── Pre-settle cash-outs (avoid SETTLED 0/100 wipeouts) ─────────────
-      // Defaults: force exit in last 1m; barrier at 2m; settle-close from 3m.
+      // Defaults: force exit in last 1m; barrier at 2m; settle-close from 2.5m.
       // High-possibility extend can ride the barrier, but never the last minute.
       const lateBarrierMins = modelLateBarrierMinutes(this.config);
       const settleCloseMins = modelSettleCloseMinutes(this.config);
@@ -7319,28 +7472,41 @@ class TradingBot {
         modelExtremeLeanWithUs(picked.window, trade.side, this.config)
       )
         why = `extreme lean with us (${leanTxt}) — bank armed`;
-      else if (engineTurning && underwater)
+      else if (picked && picked.window) {
+        const decayHint = modelLeanDecayCutState(
+          trade,
+          picked.window,
+          trade.side,
+          now,
+          this.config
+        );
+        if (decayHint.inDecayZone && decayHint.cutReady)
+          why = `lean decay ${Math.round(decayHint.peakLean)}→${Math.round(decayHint.heldProb)} (${leanTxt}) — cut armed`;
+        else if (decayHint.inDecayZone)
+          why = `lean decay ${Math.round(decayHint.peakLean)}→${Math.round(decayHint.heldProb)} (${leanTxt}) — cut if no recovery`;
+      }
+      if (!why && engineTurning && underwater)
         why = `hard lean against (${leanTxt}) — BE/cut on red`;
-      else if (engineTurning && flatOrGreen)
+      else if (!why && engineTurning && flatOrGreen)
         why = `hard lean against (${leanTxt}) — banking before dump`;
-      else if (modelHardAgainst && !againstBeReady)
+      else if (!why && modelHardAgainst && !againstBeReady)
         why = `hard lean against (${leanTxt}) — BE/cut after open grace + ${Math.round(againstBeDelay / 1000)}s`;
-      else if (underwater && modelFirm)
+      else if (!why && underwater && modelFirm)
         why = `model still firm (${leanTxt}) — holding (no price stop)`;
-      else if (underwater && leanStaleScratch && !againstBeReady)
+      else if (!why && underwater && leanStaleScratch && !againstBeReady)
         why = `soft/50-50 lean (${leanTxt}) + red — cut after open grace + ${Math.round(againstBeDelay / 1000)}s`;
-      else if (underwater && leanStaleScratch && againstBeReady)
+      else if (!why && underwater && leanStaleScratch && againstBeReady)
         why = `soft/50-50 lean (${leanTxt}) + red — cut armed`;
-      else if (leanStaleScratch && scratchFlat && !againstBeReady)
+      else if (!why && leanStaleScratch && scratchFlat && !againstBeReady)
         why = `50/50/soft lean (${leanTxt}) — BE scratch after open grace + ${Math.round(againstBeDelay / 1000)}s`;
-      else if (leanStaleScratch && scratchFlat && againstBeReady)
+      else if (!why && leanStaleScratch && scratchFlat && againstBeReady)
         why = `50/50/soft lean (${leanTxt}) — BE scratch armed (near flat)`;
-      else if (inSettleClose || inLateBarrier)
+      else if (!why && (inSettleClose || inLateBarrier))
         why = `nearing settle (${minutesRemaining.toFixed(1)}m left) — cash-out armed`;
-      else if (!armed && flatOrGreen && !liveFavors)
+      else if (!why && !armed && flatOrGreen && !liveFavors)
         why = `lean soft — exit armed (${leanTxt})`;
-      else if (!armed && flatOrGreen) why = `green but under trail arm (need +${armCents}¢)`;
-      else why = `holding — model firm (${leanTxt})`;
+      else if (!why && !armed && flatOrGreen) why = `green but under trail arm (need +${armCents}¢)`;
+      else if (!why) why = `holding — model firm (${leanTxt})`;
       const holdMsg = `Holding ${trade.symbol} ${String(trade.side || '').toUpperCase()} ${pxTxt} — ${why}.`;
       trade.holdReason = holdMsg;
       this.lastDecision = holdMsg;
@@ -10437,6 +10603,14 @@ module.exports = {
   modelExtremeLeanAgainstHeld,
   modelExtremeLeanWithUs,
   MODEL_EXTREME_LIVE_LEAN_EXIT_PCT_DEFAULT,
+  modelHeldSideProb,
+  modelLeanDecayCutState,
+  modelLeanDecayPeakMin,
+  modelLeanDecayFloor,
+  modelLeanDecayDropPts,
+  MODEL_LEAN_DECAY_PEAK_MIN_DEFAULT,
+  MODEL_LEAN_DECAY_FLOOR_DEFAULT,
+  MODEL_LEAN_DECAY_DROP_PTS_DEFAULT,
   modelEntryLiveLeanMarginPct,
   modelSoftLeanMarginPct,
   modelTrailCents,

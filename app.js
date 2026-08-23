@@ -1845,7 +1845,7 @@ const SETTLE_EXIT_TIERS_FALLBACK = [
   { entryLabel: '85–89¢', aimLabel: '96¢', staleLabel: '≤2m left' },
   { entryLabel: '80–84¢', aimLabel: '94¢', staleLabel: '≤2.5m left' },
   { entryLabel: '75–79¢', aimLabel: '93¢', staleLabel: '≤3m left' },
-  { entryLabel: '70–74¢ (late)', aimLabel: '88¢', staleLabel: '≤3.5m left' },
+  { entryLabel: '70–74¢ (late)', aimLabel: '88¢', staleLabel: '≤2.5m left' },
   { entryLabel: '<70¢ (late)', aimLabel: '85¢', staleLabel: '≤4m left' },
 ];
 
@@ -2219,7 +2219,7 @@ async function loadBotConfigIntoForm() {
     const modelSettleClose = document.getElementById('bot-model-settle-close');
     if (modelSettleClose) {
       modelSettleClose.value =
-        c.modelSettleCloseMinutes != null ? c.modelSettleCloseMinutes : 3;
+        c.modelSettleCloseMinutes != null ? c.modelSettleCloseMinutes : 2.5;
     }
     const modelLateBarrier = document.getElementById('bot-model-late-barrier');
     if (modelLateBarrier) {
@@ -2281,7 +2281,7 @@ async function loadBotConfigIntoForm() {
     }
     const settleLateMin = document.getElementById('bot-settle-late-min');
     if (settleLateMin) {
-      settleLateMin.value = c.settleLateEntryMinutes != null ? c.settleLateEntryMinutes : 3.5;
+      settleLateMin.value = c.settleLateEntryMinutes != null ? c.settleLateEntryMinutes : 2.5;
     }
     const settleLateFloor = document.getElementById('bot-settle-late-floor');
     if (settleLateFloor) {
@@ -2516,7 +2516,7 @@ async function saveBotConfig(opts = {}) {
     modelLowPriceStakeQuarters: 2,
     modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
     modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
-    modelSettleCloseMinutes: parseFloat(document.getElementById('bot-model-settle-close')?.value || '3'),
+    modelSettleCloseMinutes: parseFloat(document.getElementById('bot-model-settle-close')?.value || '2.5'),
     modelLateBarrierMinutes: parseFloat(document.getElementById('bot-model-late-barrier')?.value || '2'),
     modelPreCloseForceMinutes: parseFloat(
       document.getElementById('bot-model-preclose-force')?.value || '1'
@@ -2546,7 +2546,7 @@ async function saveBotConfig(opts = {}) {
     settlePostStopSameSideCooldownMinutes: parseFloat(
       document.getElementById('bot-settle-cooldown')?.value || '2.5'
     ),
-    settleLateEntryMinutes: parseFloat(document.getElementById('bot-settle-late-min')?.value || '3.5'),
+    settleLateEntryMinutes: parseFloat(document.getElementById('bot-settle-late-min')?.value || '2.5'),
     settleLateEntryMinCents: parseFloat(document.getElementById('bot-settle-late-floor')?.value || '70'),
     settleStuckHoldMinutes: parseFloat(document.getElementById('bot-settle-stuck')?.value || '3'),
     halfStakeNear: document.getElementById('bot-half-stake-near')?.value || 'on',

@@ -116,7 +116,7 @@ const bot = KALSHI_ENABLED
           process.env.KALSHI_SETTLE_POST_STOP_SAME_SIDE_COOLDOWN_MINUTES || '2.5'
         ),
         settleStuckHoldMinutes: parseFloat(process.env.KALSHI_SETTLE_STUCK_HOLD_MINUTES || '3'),
-        settleLateEntryMinutes: parseFloat(process.env.KALSHI_SETTLE_LATE_ENTRY_MINUTES || '3.5'),
+        settleLateEntryMinutes: parseFloat(process.env.KALSHI_SETTLE_LATE_ENTRY_MINUTES || '2.5'),
         settleLateEntryMinCents: parseFloat(process.env.KALSHI_SETTLE_LATE_ENTRY_MIN_CENTS || '70'),
         settleTieredExits: process.env.KALSHI_SETTLE_TIERED_EXITS || 'on',
         maxEntryCents: parseInt(process.env.KALSHI_MAX_ENTRY_CENTS || '95', 10),
