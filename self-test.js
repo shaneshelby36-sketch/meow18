@@ -49,6 +49,13 @@ const {
 } = require('./backtest');
 const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, scoreModelSetupsAgainstLog, modelSetupById, MODEL_SETUPS, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelEngineClearlyWithUs, modelNearFlatCents, modelBreakevenExitAllowed, modelLeanStaleForScratch, modelPriceAllowed, modelEntryRoomToFloorGate, modelLowAskConvictionGate, modelKalshiFavoriteSide, modelKalshiFavoriteGate, MODEL_KALSHI_FAVORITE_CENTS_DEFAULT, checkModelPostExitCooldown, modelPostExitCooldownMs, modelLeanDecayCutState, modelHeldSideProb, modelSignalDropCents, modelAdverseExitFillCents, modelEffectiveMaxLossCents, modelOnPaceBelowBarrier, modelShouldLeanStopRed, modelLeanStopMinAdverseCents, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT, MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT, modelSideSwitchConfirmMs, modelSideSwitchConfirmTicks, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_ARM_CENTS_DEFAULT, MODEL_MOMENTUM_STALL_MS_DEFAULT, MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, modelTakeProfitMeetsFloor, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel, summarizeLedgerCapital, rebuildLedgerSkimFromTrades, MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT, isForceRetryExitReason } = require('./bot');
 const {
+  publishPrimaryCoordination,
+  loadCoordination,
+  checkBackupEntryAllowed,
+  backupRescueCandidates,
+  isCoordinationFresh,
+} = require('./botCoordination');
+const {
   KalshiClient,
   normalizeMarketPrices,
   priceInCents,
@@ -8721,6 +8728,48 @@ async function testOnlinePublicApis() {
 
 // ───────────────────────────── run ─────────────────────────────
 
+function testBotCoordination() {
+  section('bot coordination (primary / backup)');
+  const prevRole = process.env.BOT_ROLE;
+  const now = Date.now();
+  process.env.BOT_ROLE = 'primary';
+  publishPrimaryCoordination({
+    openTrades: [
+      {
+        id: 't1',
+        ticker: 'KXETH15M-TEST',
+        symbol: 'ETH',
+        side: 'yes',
+        status: 'open',
+        windowCloseTime: now + 600_000,
+        pendingForceExit: 'take_profit',
+        pendingForceExitSince: now - 20_000,
+        entryPriceCents: 75,
+        contracts: 4,
+        strategy: 'model',
+        mode: 'live',
+      },
+    ],
+  });
+  const coord = loadCoordination();
+  check(isCoordinationFresh(coord, now), 'primary coordination fresh');
+  checkEq(coord.openTrades.length, 1, 'primary publishes one open');
+
+  process.env.BOT_ROLE = 'backup';
+  const blocked = checkBackupEntryAllowed({
+    coord,
+    ticker: 'KXETH15M-TEST',
+    symbol: 'ETH',
+    windowCloseTime: now + 600_000,
+    now,
+  });
+  check(!blocked.ok, 'backup blocked on same ticker/window');
+  const rescue = backupRescueCandidates(coord, { now });
+  check(rescue.length === 1, 'backup sees stuck TP rescue candidate');
+
+  process.env.BOT_ROLE = prevRole;
+}
+
 async function run() {
   console.log(`Full self-test`);
   console.log(`DATA_DIR=${tmpDir}`);
@@ -8738,6 +8787,7 @@ async function run() {
   await testBotExits();
   await testBotTradingFlow();
   await testModelStrategy();
+  testBotCoordination();
   testCountdownLogic();
   if (ONLINE) await testOnlinePublicApis();
 

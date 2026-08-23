@@ -9,6 +9,17 @@ const {
   windowConsensusSupportsSide,
   modelCalibrationEntryGate,
 } = require('./engineCalibration');
+const {
+  isPrimaryBotRole,
+  isBackupBotRole,
+  botInstanceId,
+  loadCoordination,
+  publishPrimaryCoordination,
+  checkBackupEntryAllowed,
+  backupRescueCandidates,
+  coordinationTradeStub,
+  noteBackupRescueAttempt,
+} = require('./botCoordination');
 
 ensureDataDir();
 pruneArchiveFiles();
@@ -4791,6 +4802,24 @@ class TradingBot {
       return;
     }
     saveLedger(this.ledger);
+    if (isPrimaryBotRole()) {
+      try {
+        publishPrimaryCoordination({
+          openTrades: this.openTrades,
+          instanceId: botInstanceId(),
+        });
+      } catch (err) {
+        console.warn('[bot] coordination publish failed:', err.message);
+      }
+    }
+  }
+
+  _armPendingForceExit(trade, reason) {
+    if (!trade) return;
+    trade.pendingForceExit = reason;
+    if (!Number.isFinite(Number(trade.pendingForceExitSince))) {
+      trade.pendingForceExitSince = Date.now();
+    }
   }
 
   _upsertTradeLog(entry) {
@@ -6008,6 +6037,9 @@ class TradingBot {
           console.error('[bot]', this.lastError);
           if (isForceRetryExitReason(reason)) {
             trade.pendingForceExit = reason;
+            if (!Number.isFinite(Number(trade.pendingForceExitSince))) {
+              trade.pendingForceExitSince = Date.now();
+            }
             this.lastDecision =
               `${reason} sell blocked (no valid bid) — will retry next cycle until flat.`;
             this._logActivity(this.lastDecision, {
@@ -6142,7 +6174,7 @@ class TradingBot {
           this.lastError = `Failed live exit (${reason}) on ${trade.ticker}: ${msg}. Position left OPEN.`;
           console.error('[bot]', this.lastError);
           if (forceRetry) {
-            trade.pendingForceExit = reason;
+            this._armPendingForceExit(trade, reason);
             this.lastDecision =
               `${reason} sell missed — forcing retry every cycle until flat.`;
             this._logActivity(this.lastDecision, {
@@ -6158,6 +6190,7 @@ class TradingBot {
       }
 
       delete trade.pendingForceExit;
+      delete trade.pendingForceExitSince;
       trade.status = 'closed';
       trade.closedAt = Date.now();
       trade.exitPriceCents = bookedExit;
@@ -6958,6 +6991,9 @@ class TradingBot {
       ) {
         forceReason = 'model_against';
         trade.pendingForceExit = forceReason;
+        if (!Number.isFinite(Number(trade.pendingForceExitSince))) {
+          trade.pendingForceExitSince = Date.now();
+        }
       }
       if (
         heldSideBidCents != null &&
@@ -7172,6 +7208,9 @@ class TradingBot {
         });
         if (!closed && this._isLiveTrade(trade) && trade.status === 'open') {
           trade.pendingForceExit = 'breakeven';
+          if (!Number.isFinite(Number(trade.pendingForceExitSince))) {
+            trade.pendingForceExitSince = Date.now();
+          }
           this.lastDecision =
             `BE scratch missed on ${trade.symbol} — retrying every cycle until flat.`;
           this._logActivity(this.lastDecision, {
@@ -7193,6 +7232,9 @@ class TradingBot {
         });
         if (!closed && this._isLiveTrade(trade) && trade.status === 'open') {
           trade.pendingForceExit = 'model_against';
+          if (!Number.isFinite(Number(trade.pendingForceExitSince))) {
+            trade.pendingForceExitSince = Date.now();
+          }
           this.lastDecision =
             `Model-against cut missed on ${trade.symbol} — retrying every cycle until flat.`;
           this._logActivity(this.lastDecision, {
@@ -7335,7 +7377,7 @@ class TradingBot {
           liveSellPriceCents: heldSideBidCents,
         });
         if (!closed && this._isLiveTrade(trade) && trade.status === 'open') {
-          trade.pendingForceExit = forceReason;
+          this._armPendingForceExit(trade, forceReason);
           this._persist();
         }
         return true;
@@ -7757,6 +7799,97 @@ class TradingBot {
     return Boolean(ticker) && this.openTrades.some((t) => t.ticker === ticker);
   }
 
+  /**
+   * Backup bot only: if primary is stuck on a force-retry exit (e.g. TP miss),
+   * place the sell on Kalshi. Primary ledger stays authoritative — primary
+   * should detect flat inventory on the next cycle and book the close.
+   */
+  async _runBackupRescue() {
+    if (!isBackupBotRole()) return;
+    if (this.config.mode !== 'live' || !this.client.hasCredentials) return;
+    const coord = loadCoordination();
+    const candidates = backupRescueCandidates(coord, { config: this.config });
+    if (!candidates.length) return;
+
+    for (const row of candidates) {
+      const stub = coordinationTradeStub(row);
+      if (!stub || !Number.isFinite(stub.contracts) || stub.contracts <= 0) continue;
+      let market = null;
+      try {
+        market = await this._getMarketBounded(stub.ticker, 2500);
+      } catch (err) {
+        noteBackupRescueAttempt({
+          tradeId: row.id,
+          ticker: row.ticker,
+          reason: row.pendingForceExit,
+          ok: false,
+          detail: err.message,
+        });
+        continue;
+      }
+      const bid = market ? this._heldSideBidCents(stub, market) : null;
+      if (!Number.isFinite(bid) || bid < 1 || bid > 99) {
+        noteBackupRescueAttempt({
+          tradeId: row.id,
+          ticker: row.ticker,
+          reason: row.pendingForceExit,
+          ok: false,
+          detail: 'no tradable bid',
+        });
+        continue;
+      }
+      const reason = String(row.pendingForceExit || 'take_profit');
+      let soldOk = false;
+      let lastErr = null;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const sellPrice = Math.max(1, Math.min(99, Math.round(bid) - attempt));
+        try {
+          const order = await this.client.createOrder({
+            ticker: stub.ticker,
+            side: stub.side,
+            action: 'sell',
+            count: stub.contracts,
+            priceCents: sellPrice,
+            timeInForce: 'immediate_or_cancel',
+          });
+          const orderId = this._extractOrderId(order);
+          if (!orderId) throw new Error('sell response missing order_id');
+          const fill = await this._awaitOrderFill(orderId, {
+            minFill: stub.contracts,
+            attempts: 3,
+            delayMs: 120,
+            seedOrder: order,
+            heldSide: stub.side,
+            action: 'sell',
+          });
+          const filled = Math.max(0, Number(fill.filled) || 0);
+          if (filled > 0) {
+            soldOk = true;
+            this.lastDecision =
+              `Backup rescue: sold ${stub.symbol} ${String(stub.side).toUpperCase()} ` +
+              `${filled}@${sellPrice}¢ (${reason}) for stuck primary exit.`;
+            this._logActivity(this.lastDecision, {
+              kind: 'close',
+              symbol: stub.symbol,
+              side: stub.side,
+              tradeId: row.id,
+            });
+            break;
+          }
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      noteBackupRescueAttempt({
+        tradeId: row.id,
+        ticker: row.ticker,
+        reason,
+        ok: soldOk,
+        detail: soldOk ? 'filled' : (lastErr && lastErr.message) || 'sell missed',
+      });
+    }
+  }
+
   async _openPosition({
     symbol,
     ticker,
@@ -7784,6 +7917,21 @@ class TradingBot {
     // appear in the dashboard as e.g. "BTC @ NO null".
     if (!Number.isFinite(priceCents) || priceCents < 1 || priceCents > 99) {
       this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: no valid Kalshi quote is available.`;
+      return false;
+    }
+    if (isBackupBotRole()) {
+      this.lastDecision = 'Backup bot: entries disabled — rescue-only mode.';
+      return false;
+    }
+    const coord = loadCoordination();
+    const backupGate = checkBackupEntryAllowed({
+      coord,
+      ticker,
+      symbol,
+      windowCloseTime: closeTime,
+    });
+    if (!backupGate.ok) {
+      this.lastDecision = backupGate.reason;
       return false;
     }
     const isModel = strategy === 'model';
@@ -8519,10 +8667,20 @@ class TradingBot {
     // regardless of what symbol is currently selected to trade next ---
     await this.manageOpenPositions(predictions);
     await this._reviewPendingStopVerdicts();
+    if (isBackupBotRole()) {
+      await this._runBackupRescue();
+    }
 
     try {
     if (!this.isRunning) {
       this.lastDecision = 'Bot is stopped; it will continue monitoring any already-open positions but will not open new ones.';
+      return;
+    }
+    if (isBackupBotRole()) {
+      this.lastDecision =
+        this.lastDecision && /backup rescue/i.test(this.lastDecision)
+          ? this.lastDecision
+          : 'Backup bot: monitoring primary — no new entries.';
       return;
     }
     // Don't burn Kalshi GETs or open risk if Available can't fund even one contract.
