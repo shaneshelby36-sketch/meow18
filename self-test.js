@@ -8187,7 +8187,7 @@ async function testModelStrategy() {
     checkEq(trade.exitReason, 'model_stagnation', '45s no progress + soft lean → stagnation cut');
   }
 
-  // Lean decay 99→85 while red → cut (peak tracked on trade)
+  // Lean decay 99→85 while still favoring → zone only (no cut); mushy lean → cut
   {
     const now = Date.now();
     const trade = {
@@ -8196,10 +8196,20 @@ async function testModelStrategy() {
       modelEntryHeldProb: 99,
       peakModelHeldProb: 99,
     };
-    const w = { probabilityUp: 85, probabilityDown: 15, confidence: 80 };
-    const state = modelLeanDecayCutState(trade, w, 'yes', now, {});
-    check(state.inDecayZone, '99→85 in decay zone');
-    check(state.cutReady, 'at floor 85 → cut ready immediately');
+    const stillStrong = { probabilityUp: 85, probabilityDown: 15, confidence: 80 };
+    const stateStrong = modelLeanDecayCutState(trade, stillStrong, 'yes', now, {});
+    check(stateStrong.inDecayZone, '99→85 in decay zone');
+    check(!stateStrong.cutReady, '99→85 still favoring → do not cut yet');
+    const mush = { probabilityUp: 50, probabilityDown: 50, confidence: 80 };
+    const trade2 = {
+      strategy: 'model',
+      side: 'yes',
+      modelEntryHeldProb: 99,
+      peakModelHeldProb: 99,
+    };
+    const stateMush = modelLeanDecayCutState(trade2, mush, 'yes', now, {});
+    check(stateMush.inDecayZone, '99→50 in decay zone');
+    check(stateMush.cutReady, '99→50 soft lean → cut ready');
     const bot = makeBot(
       mockClient({
         status: 'open',
@@ -8207,7 +8217,13 @@ async function testModelStrategy() {
         yes_bid: 72,
         no_bid: 28,
       }),
-      { strategyMode: 'model', modelMinHoldSeconds: 60, modelOpenGraceSeconds: 0, modelStagnationSeconds: 0, modelRapidAdverseCents: 0 }
+      {
+        strategyMode: 'model',
+        modelMinHoldSeconds: 60,
+        modelOpenGraceSeconds: 0,
+        modelStagnationSeconds: 0,
+        modelRapidAdverseCents: 0,
+      }
     );
     const open = openTrade(bot, {
       strategy: 'model',
@@ -8223,13 +8239,13 @@ async function testModelStrategy() {
         ready: true,
         price: 3000,
         windows: {
-          w5: { ...win(85, 80), probabilityUp: 85, probabilityDown: 15 },
-          w10: { ...win(85, 80), probabilityUp: 85, probabilityDown: 15 },
-          w15: { ...win(85, 80), probabilityUp: 85, probabilityDown: 15 },
+          w5: { ...win(50, 80), probabilityUp: 50, probabilityDown: 50 },
+          w10: { ...win(50, 80), probabilityUp: 50, probabilityDown: 50 },
+          w15: { ...win(50, 80), probabilityUp: 50, probabilityDown: 50 },
         },
       },
     });
-    checkEq(open.exitReason, 'model_against', 'lean decay 99→85 + red → cut');
+    checkEq(open.exitReason, 'model_against', 'lean decay 99→50 soft + red → cut');
   }
 
   checkEq(modelPostExitCooldownMs({ modelPostExitCooldownSeconds: 45 }), 45_000, 'post-exit cooldown reads seconds first');

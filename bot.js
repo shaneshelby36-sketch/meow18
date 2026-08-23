@@ -37,7 +37,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 78;
+const SETTINGS_DEFAULTS_VERSION = 79;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -1340,7 +1340,14 @@ function modelLeanDecayCutState(trade, window, side, now = Date.now(), config = 
     ? now - Number(trade.modelLeanDecaySince)
     : 0;
   const atFloor = heldProb <= floor;
-  const cutReady = atFloor || decayAge >= stallMs;
+  const stalled = stallMs > 0 && decayAge >= stallMs;
+  // Still clearly favoring (e.g. 90→85 NO) is "decay zone" for tracking only —
+  // don't MODEL_AGAINST until the thesis is actually soft/50-50 or flipped.
+  const thesisBroken =
+    modelLiveProbNotWithUs(window, side) ||
+    modelLiveLeanAgainstHeld(window, side, modelLiveLeanMarginPct(config)) ||
+    !modelLiveLeanStillFavors(window, side, modelSoftLeanMarginPct(config));
+  const cutReady = thesisBroken && (atFloor || stalled);
 
   return {
     inDecayZone: true,
@@ -1350,6 +1357,7 @@ function modelLeanDecayCutState(trade, window, side, now = Date.now(), config = 
     trough,
     decayAgeMs: decayAge,
     atFloor,
+    thesisBroken,
   };
 }
 
@@ -7482,11 +7490,16 @@ class TradingBot {
       const modelDeteriorating =
         !faded &&
         !!(
-          engineSoftTurning ||
-          leanStaleScratch ||
           modelHardAgainst ||
-          (picked && picked.window && !engineClearlyWithUs)
+          leanStaleScratch ||
+          // Soft turning only counts when lean is actually mushy/against —
+          // a 3pt drift from 90→87 while still 87/13 must NOT force cuts.
+          (engineSoftTurning && leanStaleScratch)
         );
+
+      // Soft/50-50 + red: need real adverse beyond haircut (not −1¢ noise).
+      const softRedMinAdverse = 3;
+      const softRedDeepEnough = trueAdverse >= softRedMinAdverse;
 
       // Rapid dump + thesis rotting — cut before 81→20 cliffs (time not required).
       const peakProgress = modelPeakProgressCents(trade, peak);
@@ -7564,9 +7577,11 @@ class TradingBot {
       }
 
       // Soft/50-50 lean + red: cut at bid (don't wait for hard flip or min-hold).
+      // Require ≥3¢ true adverse so ask→bid haircut / −1¢ wicks don't fake MODEL_AGAINST.
       if (
         bidOk &&
         leanStaleScratch &&
+        softRedDeepEnough &&
         (underwater || econUnderwater) &&
         againstBeReady
       ) {
