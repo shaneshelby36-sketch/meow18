@@ -713,9 +713,9 @@ const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 const MODEL_LATE_BARRIER_MINUTES_DEFAULT = 2;
 /**
  * Start near-settle cash-outs this many minutes before window end.
- * Default 3 — bank flat/green/small-red instead of gambling settlement.
+ * Default 2 — bank flat/green/small-red instead of gambling settlement.
  */
-const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 3;
+const MODEL_SETTLE_CLOSE_MINUTES_DEFAULT = 2;
 /** Last N minutes: always sell (never wait for Kalshi 0/100). */
 const MODEL_PRE_CLOSE_FORCE_MINUTES_DEFAULT = 1;
 /** Confidence required to extend a hold into/through the final barrier. */
@@ -997,7 +997,7 @@ function modelPreCloseForceMinutes(config = {}) {
 
 /**
  * A model entry must have enough time to trade before the late-exit policy
- * begins. Keep a one-minute buffer so an entry cannot be opened and then
+ * begins. Keep a 30-second buffer so an entry cannot be opened and then
  * immediately closed by the next management pass.
  */
 function modelEntryCutoffMinutes(config = {}) {
@@ -1006,7 +1006,7 @@ function modelEntryCutoffMinutes(config = {}) {
     Number.isFinite(configured) && configured > 0
       ? configured
       : MODEL_MIN_MINUTES_TO_OPEN_DEFAULT;
-  return Math.max(requested, modelSettleCloseMinutes(config) + 1);
+  return Math.max(requested, modelSettleCloseMinutes(config) + 0.5);
 }
 
 function modelLateExtendMinConfidence(config = {}) {
@@ -1996,8 +1996,8 @@ function modelKalshiFavoriteGate({ market, side, priceCents, config = {} } = {})
   };
 }
 
-/** Default model-entry cutoff. It must sit outside the 3-minute late-exit zone. */
-const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 4;
+/** Default model-entry cutoff. It must sit outside the 2-minute late-exit zone. */
+const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 2.5;
 /** Confidence required to allow entries below the normal min. */
 const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
