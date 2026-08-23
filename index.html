@@ -477,14 +477,14 @@
               <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
-            <span class="field-hint">Bank when bid hits this green (default <strong>+11¢</strong>). Trail arms ~+<strong>5¢</strong> — if bid stalls, next slider banks at the live bid even below target.</span>
+            <span class="field-hint">Bank when bid hits this green (default <strong>+11¢</strong>). Trail arms ~+<strong>3¢</strong> — if bid stalls, next slider banks at the live bid even below target.</span>
           </label>
           <label>MODEL green stall bank (sec)
             <div class="slider-row">
               <input id="bot-model-stall-sec" type="range" min="3" max="60" step="1" value="8" />
               <span class="slider-value" id="bot-model-stall-sec-value">—</span>
             </div>
-            <span class="field-hint">While green (+5¢ trail armed), bank at the <strong>live bid</strong> if peak is flat this long or pulls back <strong>2¢</strong> — even if under the TP target above. Default <strong>8s</strong>.</span>
+            <span class="field-hint">While green (+3¢ trail armed), bank at the <strong>live bid</strong> if peak is flat this long or pulls back <strong>2¢</strong> — even if under the TP target above. Default <strong>8s</strong>.</span>
           </label>
           <label>MODEL cash out before settle (min left)
             <div class="slider-row">

@@ -6112,7 +6112,7 @@ async function testModelStrategy() {
   checkEq(MODEL_HARD_ADVERSE_CENTS_DEFAULT, 8, 'hard max-loss cliff 8¢');
   checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 11, 'bank / momentum arm at ≥11¢ green');
   checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 11, 'min TP 11¢ — no micro banks');
-  checkEq(MODEL_TRAIL_ARM_CENTS_DEFAULT, 5, 'trail arm at ≥5¢ green');
+  checkEq(MODEL_TRAIL_ARM_CENTS_DEFAULT, 3, 'trail arm at ≥3¢ green');
   checkEq(
     modelTakeProfitMeetsFloor({ entryPriceCents: 85 }, 87, { modelMinTpCents: 7 }),
     false,
@@ -6714,7 +6714,7 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'take_profit', '+5¢ stalled below +7 target → bank at bid');
+    checkEq(trade.exitReason, 'take_profit', '+3¢ stalled below +7 target → bank at bid');
     checkEq(trade.exitPriceCents, 60, 'stall bank at live bid');
   }
 

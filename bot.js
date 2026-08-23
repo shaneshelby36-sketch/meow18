@@ -37,7 +37,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 74;
+const SETTINGS_DEFAULTS_VERSION = 75;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -697,7 +697,7 @@ const MODEL_MIN_TP_CENTS_DEFAULT = 11;
 /** Unconditional bank once this many ¢ green (don't wait for a stall). */
 const MODEL_BANK_GREEN_CENTS_DEFAULT = 11;
 /** Start trailing / allow stall-TP once at least this many ¢ green. */
-const MODEL_TRAIL_ARM_CENTS_DEFAULT = 5;
+const MODEL_TRAIL_ARM_CENTS_DEFAULT = 3;
 /** Held bid at/above this → bank immediately (don't sit 96→100). */
 const MODEL_RICH_BANK_CENTS_DEFAULT = 96;
 /** Still red after this long, even if lean is with us → only stop if pace → ≤50. */
@@ -7521,7 +7521,7 @@ class TradingBot {
         return;
       }
 
-      // Trail armed (+5¢): bid flat or pulling back — bank at live bid if green,
+      // Trail armed (+3¢): bid flat or pulling back — bank at live bid if green,
       // even below the target (+7¢). Avoids riding +8→+4 while "waiting" for target.
       const armCents = modelTrailArmCents(this.config);
       const armed = flatOrGreen && greenCents >= armCents;
