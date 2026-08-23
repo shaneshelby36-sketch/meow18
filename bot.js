@@ -995,6 +995,20 @@ function modelPreCloseForceMinutes(config = {}) {
   return MODEL_PRE_CLOSE_FORCE_MINUTES_DEFAULT;
 }
 
+/**
+ * A model entry must have enough time to trade before the late-exit policy
+ * begins. Keep a one-minute buffer so an entry cannot be opened and then
+ * immediately closed by the next management pass.
+ */
+function modelEntryCutoffMinutes(config = {}) {
+  const configured = Number(config.modelMinMinutesToOpen);
+  const requested =
+    Number.isFinite(configured) && configured > 0
+      ? configured
+      : MODEL_MIN_MINUTES_TO_OPEN_DEFAULT;
+  return Math.max(requested, modelSettleCloseMinutes(config) + 1);
+}
+
 function modelLateExtendMinConfidence(config = {}) {
   const n = Number(config.modelLateExtendMinConfidence);
   if (Number.isFinite(n) && n > 0) return n;
@@ -1982,8 +1996,8 @@ function modelKalshiFavoriteGate({ market, side, priceCents, config = {} } = {})
   };
 }
 
-/** Don't open Model entries in the last this many minutes. 0 = no late cutoff (off for now). */
-const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 0;
+/** Default model-entry cutoff. It must sit outside the 3-minute late-exit zone. */
+const MODEL_MIN_MINUTES_TO_OPEN_DEFAULT = 4;
 /** Confidence required to allow entries below the normal min. */
 const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
@@ -7616,9 +7630,7 @@ class TradingBot {
     const thirdSlot = isSettle && this.openTrades.length >= 2 && this._hasTouched90Open();
     const minutesLeft = (closeAt - Date.now()) / 60000;
     if (isModel) {
-      const minMinutesToOpen = Number.isFinite(Number(this.config.modelMinMinutesToOpen))
-        ? Number(this.config.modelMinMinutesToOpen)
-        : MODEL_MIN_MINUTES_TO_OPEN_DEFAULT;
+      const minMinutesToOpen = modelEntryCutoffMinutes(this.config);
       if (minMinutesToOpen > 0 && minutesLeft < minMinutesToOpen) {
         this.lastDecision =
           `Skipped ${symbol}: only ${minutesLeft.toFixed(1)} min left (model: no new entries in last ${minMinutesToOpen}m).`;
@@ -9133,9 +9145,7 @@ class TradingBot {
     }
 
     const minutesRemaining = Math.max(0.1, (closeTime - now) / 60000);
-    const minMinutesToOpen = Number.isFinite(Number(this.config.modelMinMinutesToOpen))
-      ? Number(this.config.modelMinMinutesToOpen)
-      : MODEL_MIN_MINUTES_TO_OPEN_DEFAULT;
+    const minMinutesToOpen = modelEntryCutoffMinutes(this.config);
     if (minMinutesToOpen > 0 && minutesRemaining < minMinutesToOpen) {
       say(
         `Waiting: ${symbol} model — only ${minutesRemaining.toFixed(1)} min left (no new entries in last ${minMinutesToOpen}m).`
