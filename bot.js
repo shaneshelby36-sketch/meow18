@@ -650,6 +650,8 @@ function modelSignalDropCents(signalEntryCents, signalBidCents) {
 
 /** Live lean against held side — one point so red exits fire preemptively. */
 const MODEL_LIVE_LEAN_MARGIN_DEFAULT = 1;
+/** Cash out either contract when the live model becomes this one-sided. */
+const MODEL_EXTREME_LIVE_LEAN_EXIT_PCT_DEFAULT = 96;
 /** Entry: live lean must favor the locked side by at least this many pts (0 = any lead). */
 const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 2;
 /** Don't early-exit a Model hold until it's been open at least this long. */
@@ -1128,6 +1130,49 @@ function modelLiveLeanMarginPct(config = {}) {
   const n = Number(config.modelLiveLeanMarginPct);
   if (Number.isFinite(n) && n >= 0) return n;
   return MODEL_LIVE_LEAN_MARGIN_DEFAULT;
+}
+
+/** 96/1, 1/96, 96/2, etc. all trigger a cash-out; 0 disables the rule. */
+function modelExtremeLiveLeanExitPct(config = {}) {
+  const n = Number(config.modelExtremeLiveLeanExitPct);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.min(100, n);
+  return MODEL_EXTREME_LIVE_LEAN_EXIT_PCT_DEFAULT;
+}
+
+function modelExtremeLiveLeanHit(window, config = {}) {
+  if (!window) return false;
+  const up = Number(window.probabilityUp);
+  const down = Number(window.probabilityDown);
+  const threshold = modelExtremeLiveLeanExitPct(config);
+  return (
+    threshold > 0 &&
+    ((Number.isFinite(up) && up >= threshold) || (Number.isFinite(down) && down >= threshold))
+  );
+}
+
+/** Opposing live lean ≥ threshold (1/96 on YES, 96/1 on NO, etc.). */
+function modelExtremeLeanAgainstHeld(window, side, config = {}) {
+  if (!window || !side) return false;
+  const threshold = modelExtremeLiveLeanExitPct(config);
+  if (threshold <= 0) return false;
+  const up = Number(window.probabilityUp);
+  const down = Number(window.probabilityDown);
+  if (side === 'yes') return Number.isFinite(down) && down >= threshold;
+  if (side === 'no') return Number.isFinite(up) && up >= threshold;
+  return false;
+}
+
+/** Held-side live lean ≥ threshold (96/1 on YES, 1/96 on NO). */
+function modelExtremeLeanWithUs(window, side, config = {}) {
+  if (!window || !side) return false;
+  const threshold = modelExtremeLiveLeanExitPct(config);
+  if (threshold <= 0) return false;
+  const up = Number(window.probabilityUp);
+  const down = Number(window.probabilityDown);
+  if (side === 'yes') return Number.isFinite(up) && up >= threshold;
+  if (side === 'no') return Number.isFinite(down) && down >= threshold;
+  return false;
 }
 
 /** Entry-only live favor margin (stricter than the exit lean-against margin). */
@@ -2522,6 +2567,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelMomentumStallSeconds',
   'modelMomentumPullbackCents',
   'modelLiveLeanMarginPct',
+  'modelExtremeLiveLeanExitPct',
   'modelEntryLiveLeanMarginPct',
   'modelSoftLeanMarginPct',
   'modelSignalDominanceMin',
@@ -3621,6 +3667,7 @@ class TradingBot {
       modelMomentumStallSeconds: MODEL_MOMENTUM_STALL_MS_DEFAULT / 1000,
       modelMomentumPullbackCents: MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT,
       modelLiveLeanMarginPct: MODEL_LIVE_LEAN_MARGIN_DEFAULT,
+      modelExtremeLiveLeanExitPct: MODEL_EXTREME_LIVE_LEAN_EXIT_PCT_DEFAULT,
       modelEntryLiveLeanMarginPct: MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT,
       modelSoftLeanMarginPct: MODEL_SOFT_LEAN_MARGIN_DEFAULT,
       modelSignalDominanceMin: MODEL_SIGNAL_DOMINANCE_MIN_DEFAULT,
@@ -7055,6 +7102,44 @@ class TradingBot {
         return false;
       };
 
+      // Extreme live lean (96/1, 1/96, 96/2, …) — cash out immediately; skip open grace.
+      if (bidOk && picked && picked.window && modelExtremeLiveLeanHit(picked.window, this.config)) {
+        const up = Number(picked.window.probabilityUp);
+        const down = Number(picked.window.probabilityDown);
+        const leanTxt =
+          Number.isFinite(up) && Number.isFinite(down)
+            ? `${Math.round(up)}/${Math.round(down)}`
+            : 'lean n/a';
+        const extremeAgainst = modelExtremeLeanAgainstHeld(
+          picked.window,
+          trade.side,
+          this.config
+        );
+        if (extremeAgainst) {
+          this.lastDecision =
+            `Extreme lean against (${leanTxt}) on ${trade.symbol} — cutting at bid now.`;
+          await tryModelAgainstCut();
+          return;
+        }
+        // Lean extreme with us — bank; don't ride 96→100 reversal or sit into settle.
+        this.lastDecision =
+          `Extreme lean with us (${leanTxt}) on ${trade.symbol} — banking at bid.`;
+        if (isBankableGreen && heldForBank) {
+          await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+            liveSellPriceCents: heldSideBidCents,
+          });
+          return;
+        }
+        if (scratchFlat || flatOrGreen) {
+          await tryModelBreakevenScratch();
+          return;
+        }
+        await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+          liveSellPriceCents: heldSideBidCents,
+        });
+        return;
+      }
+
       if (modelHardAgainst && againstBeReady) {
         if (await exitModelAgainst()) return;
       }
@@ -7222,6 +7307,18 @@ class TradingBot {
       let why;
       if (!bidOk) why = 'no usable bid yet';
       else if (faded) why = 'fade hold — engine-against does not stop this ticket';
+      else if (
+        picked &&
+        picked.window &&
+        modelExtremeLeanAgainstHeld(picked.window, trade.side, this.config)
+      )
+        why = `extreme lean against (${leanTxt}) — cut armed`;
+      else if (
+        picked &&
+        picked.window &&
+        modelExtremeLeanWithUs(picked.window, trade.side, this.config)
+      )
+        why = `extreme lean with us (${leanTxt}) — bank armed`;
       else if (engineTurning && underwater)
         why = `hard lean against (${leanTxt}) — BE/cut on red`;
       else if (engineTurning && flatOrGreen)
@@ -10335,6 +10432,11 @@ module.exports = {
   MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT,
   MODEL_CONFIRM_MIN_CONTINUE_CENTS_DEFAULT,
   modelLiveLeanMarginPct,
+  modelExtremeLiveLeanExitPct,
+  modelExtremeLiveLeanHit,
+  modelExtremeLeanAgainstHeld,
+  modelExtremeLeanWithUs,
+  MODEL_EXTREME_LIVE_LEAN_EXIT_PCT_DEFAULT,
   modelEntryLiveLeanMarginPct,
   modelSoftLeanMarginPct,
   modelTrailCents,
