@@ -2339,7 +2339,7 @@ async function loadBotConfigIntoForm() {
     const modelMinEntryLean = document.getElementById('bot-model-min-entry-lean');
     if (modelMinEntryLean) {
       modelMinEntryLean.value =
-        c.modelMinEntryLeanPct != null ? c.modelMinEntryLeanPct : 78;
+        c.modelMinEntryLeanPct != null ? c.modelMinEntryLeanPct : 65;
     }
     const modelSignalDom = document.getElementById('bot-model-signal-dom');
     if (modelSignalDom) {
@@ -2673,7 +2673,7 @@ async function saveBotConfig(opts = {}) {
     modelShadowBooks: document.getElementById('bot-model-shadow-books')?.value || 'off',
     modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '41'),
     modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '2'),
-    modelMinEntryLeanPct: parseFloat(document.getElementById('bot-model-min-entry-lean')?.value || '78'),
+    modelMinEntryLeanPct: parseFloat(document.getElementById('bot-model-min-entry-lean')?.value || '65'),
     modelSignalDominanceMin: (() => {
       const raw = parseFloat(document.getElementById('bot-model-signal-dom')?.value || '0');
       if (!Number.isFinite(raw) || raw <= 0) return 0;
