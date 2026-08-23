@@ -1560,6 +1560,7 @@ const SLIDER_UNITS = {
   'bot-model-low-ask-conf': (v) => (Number(v) <= 0 ? 'off' : `≤69¢ need ≥${Math.round(v)}%`),
   'bot-model-max-entry': (v) => `${Math.round(v)}¢`,
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
+  'bot-model-stall-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-model-settle-close': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
   'bot-model-late-barrier': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
   'bot-model-preclose-force': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(2)} min`),
@@ -1956,6 +1957,7 @@ function wireSliderDisplays() {
     'bot-model-low-ask-conf',
     'bot-model-max-entry',
     'bot-model-bank-green',
+    'bot-model-stall-sec',
     'bot-model-settle-close',
     'bot-model-late-barrier',
     'bot-model-preclose-force',
@@ -2081,6 +2083,7 @@ function wireBotConfigAutoSave() {
     'bot-model-low-ask-conf',
     'bot-model-max-entry',
     'bot-model-bank-green',
+    'bot-model-stall-sec',
     'bot-model-settle-close',
     'bot-model-late-barrier',
     'bot-model-preclose-force',
@@ -2216,6 +2219,11 @@ async function loadBotConfigIntoForm() {
     if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 93;
     const modelBankGreen = document.getElementById('bot-model-bank-green');
     if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 7;
+    const modelStallSec = document.getElementById('bot-model-stall-sec');
+    if (modelStallSec) {
+      modelStallSec.value =
+        c.modelMomentumStallSeconds != null ? c.modelMomentumStallSeconds : 8;
+    }
     const modelSettleClose = document.getElementById('bot-model-settle-close');
     if (modelSettleClose) {
       modelSettleClose.value =
@@ -2338,6 +2346,7 @@ async function loadBotConfigIntoForm() {
       'bot-model-low-ask-conf',
       'bot-model-max-entry',
       'bot-model-bank-green',
+    'bot-model-stall-sec',
       'bot-model-settle-close',
       'bot-model-late-barrier',
       'bot-model-preclose-force',
@@ -2516,6 +2525,7 @@ async function saveBotConfig(opts = {}) {
     modelLowPriceStakeQuarters: 2,
     modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
     modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '7'),
+    modelMomentumStallSeconds: parseFloat(document.getElementById('bot-model-stall-sec')?.value || '8'),
     modelSettleCloseMinutes: parseFloat(document.getElementById('bot-model-settle-close')?.value || '2.5'),
     modelLateBarrierMinutes: parseFloat(document.getElementById('bot-model-late-barrier')?.value || '2'),
     modelPreCloseForceMinutes: parseFloat(

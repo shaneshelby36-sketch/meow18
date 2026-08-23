@@ -6667,6 +6667,49 @@ async function testModelStrategy() {
     checkEq(trade.exitPriceCents, 63, 'TP at live bid');
   }
 
+  // Stall while green but below target → bank at spot
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 60,
+        no_bid: 40,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinHoldSeconds: 0,
+        modelBankGreenCents: 7,
+        modelMinTpCents: 7,
+        modelMomentumStallSeconds: 8,
+        modelMomentumPullbackCents: 2,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 20_000,
+      peakHeldBidCents: 63,
+      peakHeldBidAt: now - 10_000,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    });
+    checkEq(trade.exitReason, 'take_profit', '+5¢ stalled below +7 target → bank at bid');
+    checkEq(trade.exitPriceCents, 60, 'stall bank at live bid');
+  }
+
   // 96¢ held bid banks immediately
   {
     const now = Date.now();

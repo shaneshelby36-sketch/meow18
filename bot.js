@@ -6007,11 +6007,12 @@ class TradingBot {
         return false;
       }
       // Model: never book TAKE_PROFIT under minTp on first signal — but when
-      // pendingForceExit is already armed (IOC miss), bank at bid anyway.
+      // pendingForceExit is armed (IOC miss) or stall-bank while green, sell at bid.
       if (
         reason === 'take_profit' &&
         isModelTrade(trade) &&
         !opts.forcePendingExit &&
+        !opts.stallBank &&
         !modelTakeProfitMeetsFloor(trade, bookedExit, this.config)
       ) {
         const minTp = modelMinTpCents(this.config);
@@ -7422,8 +7423,7 @@ class TradingBot {
         }
       }
 
-      // Unconditional bank at the slider green — was missing: trail hold returned
-      // early while still climbing, so +10 never fired and greens gave it back.
+      // Target hit — bank at slider green only (the chosen TP point).
       if (bidOk && isDecentGreen && heldForBank) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
@@ -7431,22 +7431,25 @@ class TradingBot {
         return;
       }
 
-      // Follow the bid from trail arm (+5¢). Bank on stall only if still ≥ minTp
-      // (default +7¢) — never scratch a +2/+4 "TP". Unconditional bank at bankGreen.
+      // Trail armed (+5¢): bid flat or pulling back — bank at live bid if green,
+      // even below the target (+7¢). Avoids riding +8→+4 while "waiting" for target.
       const armCents = modelTrailArmCents(this.config);
       const armed = flatOrGreen && greenCents >= armCents;
       const priceStalled =
         (stallPullback > 0 && pullback >= stallPullback) ||
         (stallMs > 0 && peakAgeMs >= stallMs);
-      if (bidOk && armed && priceStalled && isBankableGreen && heldForBank) {
+      if (bidOk && armed && priceStalled && flatOrGreen && greenCents >= 1 && heldForBank) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
+          stallBank: true,
         });
         return;
       }
       if (bidOk && armed && !priceStalled) {
+        const stallSec = stallMs > 0 ? Math.round(stallMs / 1000) : 0;
         const holdMsg =
-          `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — following, TP on a stall at ≥+${minTp}¢ or bank at +${bankGreen}¢.`;
+          `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — ` +
+          `TP at +${bankGreen}¢; stall ${stallSec}s banks at bid.`;
         trade.holdReason = holdMsg;
         this.lastDecision = holdMsg;
         return;
