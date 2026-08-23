@@ -1016,13 +1016,11 @@ function modelLateExtendMinConfidence(config = {}) {
 }
 
 /**
- * High possibility to extend into the final barrier: live lean clearly favors
- * the held side (entry-strength margin) and confidence clears the late bar.
+ * Extend into the final barrier when the live lean still clearly favors the
+ * held side. The final one-minute forced cash-out remains in effect.
  */
 function modelLateExtendOk(window, side, config = {}) {
   if (!window || (side !== 'yes' && side !== 'no')) return false;
-  const conf = Number(window.confidence);
-  if (!Number.isFinite(conf) || conf < modelLateExtendMinConfidence(config)) return false;
   return modelLiveLeanStillFavors(window, side, modelEntryLiveLeanMarginPct(config));
 }
 
