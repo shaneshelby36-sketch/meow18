@@ -513,6 +513,12 @@ function testPrediction() {
   check(logistic(0) > 0.49 && logistic(0) < 0.51, 'logistic(0) ≈ 0.5');
   check(logistic(5) > 0.9, 'logistic(+large) high');
   check(logistic(-5) < 0.1, 'logistic(-large) low');
+  {
+    const modestDown = (1 - logistic(-1.7)) * 100;
+    check(modestDown >= 75 && modestDown <= 90, `modest bearish score ~${modestDown.toFixed(0)}% not 99`);
+    const modestUp = logistic(1.7) * 100;
+    check(modestUp >= 75 && modestUp <= 90, `modest bullish score ~${modestUp.toFixed(0)}% not 99`);
+  }
   checkEq(WINDOWS.length, 3, 'three prediction windows');
 
   const candles = makeCandles(240, { start: 50000, drift: 15, wobble: 40 });

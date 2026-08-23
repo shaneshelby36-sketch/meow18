@@ -27,8 +27,10 @@ function clamp(v, lo, hi) {
 }
 
 // Logistic squash: turns an unbounded score into a 0..1 probability.
-// Slightly softer than 2.2 so mid-range scores don't read as false certainty.
-function logistic(x, k = 2.0) {
+// Softer k (0.9 vs 2.0) so modest trend+distance scores read ~75–88%, not false 99/1.
+const LEAN_LOGISTIC_K = 0.9;
+
+function logistic(x, k = LEAN_LOGISTIC_K) {
   return 1 / (1 + Math.exp(-k * x));
 }
 
@@ -364,7 +366,7 @@ function buildWindowPrediction(windowDef, ind, otherInd, crossCorrelation, targe
 
   const { confidence, notes, riskPoints } = computeConfidence(ind, contributions, crossCorrelation, otherAgrees, symbol);
 
-  const pUp = logistic(score);
+  const pUp = logistic(score, LEAN_LOGISTIC_K);
   const pDown = 1 - pUp;
 
   const topReasons = contributions
@@ -562,4 +564,5 @@ module.exports = {
   buildWindowPrediction,
   computeConfidence,
   logistic,
+  LEAN_LOGISTIC_K,
 };
