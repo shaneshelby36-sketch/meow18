@@ -7224,44 +7224,6 @@ class TradingBot {
         return false;
       };
 
-      // Extreme live lean (96/1, 1/96, 96/2, …) — cash out immediately; skip open grace.
-      if (bidOk && picked && picked.window && modelExtremeLiveLeanHit(picked.window, this.config)) {
-        const up = Number(picked.window.probabilityUp);
-        const down = Number(picked.window.probabilityDown);
-        const leanTxt =
-          Number.isFinite(up) && Number.isFinite(down)
-            ? `${Math.round(up)}/${Math.round(down)}`
-            : 'lean n/a';
-        const extremeAgainst = modelExtremeLeanAgainstHeld(
-          picked.window,
-          trade.side,
-          this.config
-        );
-        if (extremeAgainst) {
-          this.lastDecision =
-            `Extreme lean against (${leanTxt}) on ${trade.symbol} — cutting at bid now.`;
-          await tryModelAgainstCut();
-          return;
-        }
-        // Lean extreme with us — bank; don't ride 96→100 reversal or sit into settle.
-        this.lastDecision =
-          `Extreme lean with us (${leanTxt}) on ${trade.symbol} — banking at bid.`;
-        if (isBankableGreen && heldForBank) {
-          await this._closePosition(trade, heldSideBidCents, 'take_profit', {
-            liveSellPriceCents: heldSideBidCents,
-          });
-          return;
-        }
-        if (scratchFlat || flatOrGreen) {
-          await tryModelBreakevenScratch();
-          return;
-        }
-        await this._closePosition(trade, heldSideBidCents, 'take_profit', {
-          liveSellPriceCents: heldSideBidCents,
-        });
-        return;
-      }
-
       // Strong lean rotting (99/1 → 85/15): cut if no recovery — smaller loss beats cliff.
       if (bidOk && picked && picked.window && !faded) {
         const decay = modelLeanDecayCutState(trade, picked.window, trade.side, now, this.config);
@@ -7460,18 +7422,6 @@ class TradingBot {
       let why;
       if (!bidOk) why = 'no usable bid yet';
       else if (faded) why = 'fade hold — engine-against does not stop this ticket';
-      else if (
-        picked &&
-        picked.window &&
-        modelExtremeLeanAgainstHeld(picked.window, trade.side, this.config)
-      )
-        why = `extreme lean against (${leanTxt}) — cut armed`;
-      else if (
-        picked &&
-        picked.window &&
-        modelExtremeLeanWithUs(picked.window, trade.side, this.config)
-      )
-        why = `extreme lean with us (${leanTxt}) — bank armed`;
       else if (picked && picked.window) {
         const decayHint = modelLeanDecayCutState(
           trade,
