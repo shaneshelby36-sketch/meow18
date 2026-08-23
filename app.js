@@ -1688,6 +1688,7 @@ const SLIDER_UNITS = {
   'bot-takeprofit': (v) => `+${Math.round(v)}¢`,
   'bot-minentries': (v) => `${Math.round(v)}¢`,
   'bot-model-confidence': (v) => `${Math.round(v)}%`,
+  'bot-model-min-entry-lean': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}%`),
   'bot-model-live-favor': (v) => (Number(v) <= 0 ? 'any lead' : `≥${Math.round(v)} pts`),
   'bot-model-min-room-floor': (v) => (Number(v) <= 0 ? 'off' : `≥${Math.round(v)}¢`),
   'bot-model-signal-dom': (v) => {
@@ -1787,6 +1788,9 @@ function formatSetupKnobs(s) {
   const bits = [];
   if (s.modelMinConfidence != null) bits.push(`conf ${s.modelMinConfidence}`);
   if (s.modelEntryLiveLeanMarginPct != null) bits.push(`favor ${s.modelEntryLiveLeanMarginPct}`);
+  if (s.modelMinEntryLeanPct != null) {
+    bits.push(Number(s.modelMinEntryLeanPct) > 0 ? `lean≥${s.modelMinEntryLeanPct}%` : 'lean off');
+  }
   if (s.modelSignalDominanceMin != null) {
     bits.push(
       Number(s.modelSignalDominanceMin) > 0
@@ -2091,6 +2095,7 @@ function wireSliderDisplays() {
     'bot-minentries',
     'bot-model-confidence',
     'bot-model-live-favor',
+    'bot-model-min-entry-lean',
     'bot-model-signal-dom',
     'bot-model-confirm-cross',
     'bot-model-confirm-ext',
@@ -2219,6 +2224,7 @@ function wireBotConfigAutoSave() {
     'bot-minentries',
     'bot-model-confidence',
     'bot-model-live-favor',
+    'bot-model-min-entry-lean',
     'bot-model-signal-dom',
     'bot-model-confirm-cross',
     'bot-model-confirm-ext',
@@ -2329,6 +2335,11 @@ async function loadBotConfigIntoForm() {
     if (modelLiveFavor) {
       modelLiveFavor.value =
         c.modelEntryLiveLeanMarginPct != null ? c.modelEntryLiveLeanMarginPct : 2;
+    }
+    const modelMinEntryLean = document.getElementById('bot-model-min-entry-lean');
+    if (modelMinEntryLean) {
+      modelMinEntryLean.value =
+        c.modelMinEntryLeanPct != null ? c.modelMinEntryLeanPct : 78;
     }
     const modelSignalDom = document.getElementById('bot-model-signal-dom');
     if (modelSignalDom) {
@@ -2662,6 +2673,7 @@ async function saveBotConfig(opts = {}) {
     modelShadowBooks: document.getElementById('bot-model-shadow-books')?.value || 'off',
     modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '41'),
     modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '2'),
+    modelMinEntryLeanPct: parseFloat(document.getElementById('bot-model-min-entry-lean')?.value || '78'),
     modelSignalDominanceMin: (() => {
       const raw = parseFloat(document.getElementById('bot-model-signal-dom')?.value || '0');
       if (!Number.isFinite(raw) || raw <= 0) return 0;

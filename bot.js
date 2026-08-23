@@ -37,7 +37,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 71;
+const SETTINGS_DEFAULTS_VERSION = 72;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -677,6 +677,8 @@ const MODEL_LEAN_DECAY_STALL_MS_DEFAULT = 6_000;
 const FORCE_EXIT_ESCALATE_MS_DEFAULT = 8_000;
 /** Entry: live lean must favor the locked side by at least this many pts (0 = any lead). */
 const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 2;
+/** Entry: held-side live prob must be at least this % (0 = off). */
+const MODEL_MIN_ENTRY_LEAN_PCT_DEFAULT = 78;
 /** Don't early-exit a Model hold until it's been open at least this long. */
 const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
 /** After Model BE/TP, sit out that coin this long before rebuy. */
@@ -1342,6 +1344,28 @@ function modelEntryLiveLeanMarginPct(config = {}) {
   return MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT;
 }
 
+function modelMinEntryLeanPct(config = {}) {
+  const n = Number(config.modelMinEntryLeanPct);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(Math.min(99, n));
+  return MODEL_MIN_ENTRY_LEAN_PCT_DEFAULT;
+}
+
+/** Block entries when held-side live lean is too soft (e.g. 72% NO on a 74¢ ticket). */
+function modelMinEntryLeanGate({ window, side, config = {} } = {}) {
+  const need = modelMinEntryLeanPct(config);
+  if (!(need > 0)) return { ok: true, skipped: true };
+  const held = modelHeldSideProb(window, side);
+  if (!Number.isFinite(held)) {
+    return { ok: false, reason: 'held-side lean unavailable' };
+  }
+  if (held >= need) return { ok: true, held };
+  return {
+    ok: false,
+    reason: `held-side lean ${Math.round(held)}% (need ≥${need}%)`,
+  };
+}
+
 function modelTrailCents(config = {}) {
   const n = Number(config.modelTrailCents);
   if (Number.isFinite(n) && n <= 0) return 0;
@@ -1717,6 +1741,14 @@ function modelEntryDumpRisk({
 
   if (!Number.isFinite(heldProb)) {
     return { dump: true, reason: 'no held-side probability' };
+  }
+
+  const leanNeed = modelMinEntryLeanPct(config);
+  if (leanNeed > 0 && heldProb < leanNeed) {
+    return {
+      dump: true,
+      reason: `held-side lean ${Math.round(heldProb)}% under ${leanNeed}%`,
+    };
   }
 
   // Extreme overpay only: e.g. model 55% vs 85¢ ask. Normal 60% vs 70¢ is allowed.
@@ -2757,6 +2789,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelLiveLeanMarginPct',
   'modelExtremeLiveLeanExitPct',
   'modelEntryLiveLeanMarginPct',
+  'modelMinEntryLeanPct',
   'modelSoftLeanMarginPct',
   'modelSignalDominanceMin',
   'modelTrailCents',
@@ -3858,6 +3891,7 @@ class TradingBot {
       modelLiveLeanMarginPct: MODEL_LIVE_LEAN_MARGIN_DEFAULT,
       modelExtremeLiveLeanExitPct: MODEL_EXTREME_LIVE_LEAN_EXIT_PCT_DEFAULT,
       modelEntryLiveLeanMarginPct: MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT,
+      modelMinEntryLeanPct: MODEL_MIN_ENTRY_LEAN_PCT_DEFAULT,
       modelSoftLeanMarginPct: MODEL_SOFT_LEAN_MARGIN_DEFAULT,
       modelSignalDominanceMin: MODEL_SIGNAL_DOMINANCE_MIN_DEFAULT,
       modelTrailCents: MODEL_TRAIL_CENTS_DEFAULT,
@@ -9749,6 +9783,11 @@ class TradingBot {
     }
 
     const entryHeldProb = side === 'yes' ? Number(window.probabilityUp) : Number(window.probabilityDown);
+    const leanGate = modelMinEntryLeanGate({ window, side, config: this.config });
+    if (!leanGate.ok) {
+      say(`Waiting: ${symbol} ${String(side).toUpperCase()} — ${leanGate.reason}.`);
+      return null;
+    }
     // Don't place if the model already thinks this ticket dumps (weakening / fair < ask / lean soft).
     const dumpRisk = modelEntryDumpRisk({
       window,
@@ -10722,6 +10761,9 @@ module.exports = {
   modelEngineTurningAgainst,
   modelEngineHardAgainst,
   modelEntryDumpRisk,
+  modelMinEntryLeanPct,
+  modelMinEntryLeanGate,
+  MODEL_MIN_ENTRY_LEAN_PCT_DEFAULT,
   modelEngineClearlyWithUs,
   modelNearFlatCents,
   modelBreakevenExitAllowed,

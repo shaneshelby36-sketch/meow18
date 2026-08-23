@@ -415,6 +415,13 @@
             </div>
             <span class="field-hint">Live UP vs DOWN must lead by this many pts to enter. Default <strong>2</strong>. <strong>0</strong> = any lead.</span>
           </label>
+          <label>MODEL min entry lean (%)
+            <div class="slider-row">
+              <input id="bot-model-min-entry-lean" type="range" min="0" max="95" step="1" />
+              <span class="slider-value" id="bot-model-min-entry-lean-value">—</span>
+            </div>
+            <span class="field-hint">Held-side live prob must be at least this to open (e.g. NO needs ≥78% DOWN). Default <strong>78%</strong>. <strong>0</strong> = off.</span>
+          </label>
           <label>MODEL signal score strength
             <div class="slider-row">
               <input id="bot-model-signal-dom" type="range" min="0" max="30" step="1" />

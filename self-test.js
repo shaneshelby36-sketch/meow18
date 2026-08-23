@@ -47,7 +47,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, scoreModelSetupsAgainstLog, modelSetupById, MODEL_SETUPS, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelEngineClearlyWithUs, modelNearFlatCents, modelBreakevenExitAllowed, modelLeanStaleForScratch, modelPriceAllowed, modelEntryRoomToFloorGate, modelLowAskConvictionGate, modelKalshiFavoriteSide, modelKalshiFavoriteGate, MODEL_KALSHI_FAVORITE_CENTS_DEFAULT, checkModelPostExitCooldown, modelPostExitCooldownMs, checkModelGlobalPostExitCooldown, modelGlobalPostExitCooldownMs, modelLeanDecayCutState, modelHeldSideProb, modelSignalDropCents, modelAdverseExitFillCents, modelEffectiveMaxLossCents, modelOnPaceBelowBarrier, modelShouldLeanStopRed, modelLeanStopMinAdverseCents, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT, MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT, modelSideSwitchConfirmMs, modelSideSwitchConfirmTicks, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_ARM_CENTS_DEFAULT, MODEL_MOMENTUM_STALL_MS_DEFAULT, MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, modelTakeProfitMeetsFloor, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel, summarizeLedgerCapital, rebuildLedgerSkimFromTrades, MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT, isForceRetryExitReason } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, scoreModelSetupsAgainstLog, modelSetupById, MODEL_SETUPS, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelMinEntryLeanGate, modelEngineClearlyWithUs, modelNearFlatCents, modelBreakevenExitAllowed, modelLeanStaleForScratch, modelPriceAllowed, modelEntryRoomToFloorGate, modelLowAskConvictionGate, modelKalshiFavoriteSide, modelKalshiFavoriteGate, MODEL_KALSHI_FAVORITE_CENTS_DEFAULT, checkModelPostExitCooldown, modelPostExitCooldownMs, checkModelGlobalPostExitCooldown, modelGlobalPostExitCooldownMs, modelLeanDecayCutState, modelHeldSideProb, modelSignalDropCents, modelAdverseExitFillCents, modelEffectiveMaxLossCents, modelOnPaceBelowBarrier, modelShouldLeanStopRed, modelLeanStopMinAdverseCents, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT, MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT, modelSideSwitchConfirmMs, modelSideSwitchConfirmTicks, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_ARM_CENTS_DEFAULT, MODEL_MOMENTUM_STALL_MS_DEFAULT, MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, modelTakeProfitMeetsFloor, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel, summarizeLedgerCapital, rebuildLedgerSkimFromTrades, MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT, isForceRetryExitReason } = require('./bot');
 const {
   publishPrimaryCoordination,
   loadCoordination,
@@ -7074,6 +7074,62 @@ async function testModelStrategy() {
     const blocked = await bot._evaluateSymbolForModel('ETH', preds);
     checkEq(blocked, null, 'confidence floor blocks entry');
     check(/confidence/i.test(bot.lastDecision || ''), 'decision cites confidence');
+  }
+
+  // Min entry lean blocks soft tickets (e.g. 72% NO when floor is 78%)
+  {
+    check(
+      !modelMinEntryLeanGate({
+        window: win(28, 70),
+        side: 'no',
+        config: { modelMinEntryLeanPct: 78 },
+      }).ok,
+      '72% held lean blocked at 78% floor'
+    );
+    check(
+      modelMinEntryLeanGate({
+        window: win(18, 70),
+        side: 'no',
+        config: { modelMinEntryLeanPct: 78 },
+      }).ok,
+      '82% held lean passes 78% floor'
+    );
+    check(
+      modelMinEntryLeanGate({
+        window: win(28, 70),
+        side: 'no',
+        config: { modelMinEntryLeanPct: 0 },
+      }).skipped,
+      '0 = lean floor off'
+    );
+    const closeMs = Date.now() + 12 * 60 * 1000;
+    const bot = makeBot(
+      mockClient({
+        ticker: 'KXBTC15M-LEAN',
+        status: 'open',
+        floor_strike: 90000,
+        close_time: new Date(closeMs).toISOString(),
+        yes_bid: 28,
+        yes_ask: 30,
+        no_bid: 70,
+        no_ask: 72,
+      }),
+      { strategyMode: 'model', modelMinConfidence: 41, modelMinEntryLeanPct: 78 }
+    );
+    const preds = {
+      BTC: {
+        ready: true,
+        price: 90100,
+        windows: {
+          w5: { ...win(28, 70), tracking: { predictedDirection: 'DOWN' } },
+          w10: win(28, 70),
+          w15: win(28, 70),
+        },
+      },
+    };
+    const blocked = await bot._evaluateSymbolForModel('BTC', preds);
+    checkEq(blocked, null, 'min entry lean blocks soft NO');
+    check(/held-side lean/i.test(bot.lastDecision || ''), 'decision cites lean floor');
   }
 
   // Underwater + locked lean against → stop ASAP (TP not happening)
