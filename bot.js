@@ -673,6 +673,8 @@ const MODEL_LEAN_DECAY_DROP_PTS_DEFAULT = 14;
 const MODEL_LEAN_DECAY_RECOVERY_PTS_DEFAULT = 3;
 /** In decay zone with no recovery this long → cut. */
 const MODEL_LEAN_DECAY_STALL_MS_DEFAULT = 6_000;
+/** Stuck force-exit (TP/BE miss): escalate IOC attempts after this long. */
+const FORCE_EXIT_ESCALATE_MS_DEFAULT = 8_000;
 /** Entry: live lean must favor the locked side by at least this many pts (0 = any lead). */
 const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 2;
 /** Don't early-exit a Model hold until it's been open at least this long. */
@@ -6004,11 +6006,12 @@ class TradingBot {
           `Blocked fake take_profit on ${trade.symbol}: bid ${Math.round(bookedExit)}¢ is below entry ${Math.round(entryPx)}¢ — holding.`;
         return false;
       }
-      // Model: never book TAKE_PROFIT under minTp (default +7¢). Blocks soft-lean
-      // scratches like 85→87 that used to label as TP for a few cents of edge.
+      // Model: never book TAKE_PROFIT under minTp on first signal — but when
+      // pendingForceExit is already armed (IOC miss), bank at bid anyway.
       if (
         reason === 'take_profit' &&
         isModelTrade(trade) &&
+        !opts.forcePendingExit &&
         !modelTakeProfitMeetsFloor(trade, bookedExit, this.config)
       ) {
         const minTp = modelMinTpCents(this.config);
@@ -6056,7 +6059,8 @@ class TradingBot {
         // Cash-outs / stops: up to 4 IOC sells in one call (−1¢ each, re-quote bid)
         // so a miss does not leave inventory sitting until the signal clears.
         const forceRetry = isForceRetryExitReason(reason);
-        const maxAttempts = forceRetry ? 4 : 2;
+        const escalated = opts.escalated === true;
+        const maxAttempts = forceRetry ? (escalated ? 6 : 4) : 2;
         let lastErr = null;
         let soldOk = false;
         let workingBase = baseSellPrice;
@@ -6976,10 +6980,14 @@ class TradingBot {
       heldSideBidCents != null &&
       heldSideBidCents >= trade.entryPriceCents;
 
-    // Failed protective exit: keep forcing sells every cycle until flat,
-    // even if the bid has bounced back above the stop level.
+    // Failed exit on THIS position: retry every cycle until flat — never open
+    // a second contract on the same window (backup = force-retry lane).
     if (trade.pendingForceExit) {
       let forceReason = String(trade.pendingForceExit);
+      const entryPx = Number(trade.entryPriceCents);
+      const stuckSince = Number(trade.pendingForceExitSince);
+      const stuckMs = Number.isFinite(stuckSince) ? now - stuckSince : 0;
+      const escalated = stuckMs >= FORCE_EXIT_ESCALATE_MS_DEFAULT;
       // Stale BE force-retry while truly red can never fill (fake-BE guard).
       // Promote to model_against so we actually cut instead of looping to settlement.
       if (
@@ -6990,10 +6998,18 @@ class TradingBot {
         !modelBreakevenExitAllowed(trade, heldSideBidCents)
       ) {
         forceReason = 'model_against';
-        trade.pendingForceExit = forceReason;
-        if (!Number.isFinite(Number(trade.pendingForceExitSince))) {
-          trade.pendingForceExitSince = Date.now();
-        }
+        this._armPendingForceExit(trade, forceReason);
+      }
+      // TP miss while already red → cut at bid (don't wait for +7¢ that won't come back).
+      if (
+        forceReason === 'take_profit' &&
+        isModelTrade(trade) &&
+        heldSideBidCents != null &&
+        Number.isFinite(entryPx) &&
+        heldSideBidCents < entryPx
+      ) {
+        forceReason = 'model_against';
+        this._armPendingForceExit(trade, forceReason);
       }
       if (
         heldSideBidCents != null &&
@@ -7003,6 +7019,8 @@ class TradingBot {
       ) {
         await this._closePosition(trade, heldSideBidCents, forceReason, {
           liveSellPriceCents: heldSideBidCents,
+          forcePendingExit: true,
+          escalated,
         });
       } else {
         this.lastDecision =

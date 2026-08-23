@@ -1,6 +1,6 @@
 {
   "name": "crypto-prediction-engine",
-  "version": "1.2.229",
+  "version": "1.2.230",
   "description": "Crypto prediction engine using Coinbase market data",
   "main": "server.js",
   "private": true,
