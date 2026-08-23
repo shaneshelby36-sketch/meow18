@@ -4571,8 +4571,9 @@ class TradingBot {
   }
 
   /**
-   * New entries must fit in Available. If not, stop the bot — do not spend
-   * Personal Wallet or Insurance Fund on positions.
+   * New entries must fit in Available. If cash is temporarily insufficient,
+   * wait for funds instead of permanently stopping the bot. Wallet and
+   * Insurance Fund remain unavailable for entries.
    */
   _assertEntryFundedFromAvailable(entryCostCents, label = '') {
     const cost = Math.round(Number(entryCostCents) || 0);
@@ -4587,13 +4588,14 @@ class TradingBot {
       this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents)
         ? ` · Kalshi cash $${(this.liveBalanceCents / 100).toFixed(2)}`
         : '';
-    this._haltTrading(
-      `STOPPED: need $${(cost / 100).toFixed(2)} from Available ` +
+    const waitMessage =
+      `Waiting for funds: need $${(cost / 100).toFixed(2)} from Available ` +
         `(have $${(available / 100).toFixed(2)}${liveBit}). ` +
         `Wallet $${(wallet / 100).toFixed(2)} + Insurance $${(insurance / 100).toFixed(2)} stay locked` +
         (label ? ` — ${label}` : '') +
-        '. Bot stopped; open positions still managed.'
-    );
+        '. New entries will resume automatically once funded.';
+    this.lastError = waitMessage;
+    this.lastDecision = waitMessage;
     return false;
   }
 
@@ -8313,6 +8315,8 @@ class TradingBot {
       return;
     }
     // Don't burn Kalshi GETs or open risk if Available can't fund even one contract.
+    // This is a temporary wait, not a permanent halt: a later deposit, settlement,
+    // or refreshed Kalshi balance can make the next cycle eligible again.
     {
       const minEntry = isModelStrategyMode(this.config)
         ? Number(this.config.modelMinEntryCents) || MODEL_MIN_ENTRY_DEFAULT_CENTS
@@ -8320,13 +8324,14 @@ class TradingBot {
       const floorCents = Math.max(1, Math.round(minEntry) || 65);
       if (this._tradingSpendableCents() < floorCents) {
         const capital = this._capitalStatus();
-        this._haltTrading(
-          `STOPPED: Available $${((Number(capital.paperAvailableCents) || 0) / 100).toFixed(2)} ` +
+        const waitMessage =
+          `Waiting for funds: Available $${((Number(capital.paperAvailableCents) || 0) / 100).toFixed(2)} ` +
             `can't fund a new contract (need ≥${floorCents}¢). ` +
             `Wallet $${((Number(capital.reserveCents) || 0) / 100).toFixed(2)} + ` +
             `Insurance $${((Number(capital.insuranceCents) || 0) / 100).toFixed(2)} stay locked. ` +
-            `Bot stopped; open positions still managed.`
-        );
+            `New entries will resume automatically once funded.`;
+        this.lastError = waitMessage;
+        this.lastDecision = waitMessage;
         return;
       }
     }
