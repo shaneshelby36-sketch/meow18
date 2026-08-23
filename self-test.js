@@ -6140,13 +6140,22 @@ async function testModelStrategy() {
       '40s + 0 peak but firm model → hold'
     );
     check(
-      !modelStagnationExitReady({
+      modelStagnationExitReady({
         heldMs: 45_000,
         peakProgressCents: 2,
         modelDeteriorating: true,
         config: {},
       }).ready,
-      '40s + peaked +2¢ → not stagnant'
+      '40s + peaked +2¢ (under +3 trail) + decaying → stagnation cut'
+    );
+    check(
+      !modelStagnationExitReady({
+        heldMs: 45_000,
+        peakProgressCents: 3,
+        modelDeteriorating: true,
+        config: {},
+      }).ready,
+      '40s + peaked +3¢ → not stagnant'
     );
     check(
       !modelStagnationExitReady({
@@ -8145,7 +8154,7 @@ async function testModelStrategy() {
         modelOpenGraceSeconds: 0,
         modelLeanAgainstBeSeconds: 0,
         modelStagnationSeconds: 40,
-        modelStagnationMinProgressCents: 1,
+        modelStagnationMinProgressCents: 3,
         modelRapidAdverseCents: 0,
       }
     );

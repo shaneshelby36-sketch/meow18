@@ -491,7 +491,7 @@
               <input id="bot-model-stagnation-sec" type="range" min="0" max="120" step="5" />
               <span class="slider-value" id="bot-model-stagnation-sec-value">—</span>
             </div>
-            <span class="field-hint">After this long with <strong>no peak progress</strong> toward TP (<strong>&lt;+1¢</strong>) <em>and</em> model decaying → exit. Time alone never cuts. Default <strong>40s</strong>. <strong>0</strong> = off.</span>
+            <span class="field-hint">After this long with peak never reaching trail arm (<strong>&lt;+3¢</strong>) <em>and</em> model decaying → exit. Below +3¢ the stall bank never arms. Time alone never cuts. Default <strong>40s</strong>. <strong>0</strong> = off.</span>
           </label>
           <label>MODEL rapid adverse (¢)
             <div class="slider-row">

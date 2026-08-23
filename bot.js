@@ -37,7 +37,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 77;
+const SETTINGS_DEFAULTS_VERSION = 78;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -740,8 +740,8 @@ const MODEL_LEAN_STOP_PACE_ARM_CENTS_DEFAULT = 8;
  * 0 = off.
  */
 const MODEL_STAGNATION_SECONDS_DEFAULT = 40;
-/** Peak must reach at least this many ¢ above entry to count as progress. */
-const MODEL_STAGNATION_MIN_PROGRESS_CENTS_DEFAULT = 1;
+/** Peak must reach at least this many ¢ above entry to count as progress (matches trail arm). */
+const MODEL_STAGNATION_MIN_PROGRESS_CENTS_DEFAULT = 3;
 /**
  * Rapid adverse: true ¢ below entry (beyond spread haircut) at/above this + model
  * against → cut immediately (after open grace). Caps cliffs like 81→20. 0 = off.
@@ -1730,7 +1730,8 @@ function modelStagnationMinProgressCents(config = {}) {
   const n = Number(config.modelStagnationMinProgressCents);
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return Math.round(n);
-  return MODEL_STAGNATION_MIN_PROGRESS_CENTS_DEFAULT;
+  // Default tracks trail arm: if peak never hit stall-bank green, no meaningful progress.
+  return modelTrailArmCents(config);
 }
 
 function modelRapidAdverseCents(config = {}) {
