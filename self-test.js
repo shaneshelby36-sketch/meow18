@@ -47,7 +47,7 @@ const {
   normalizeSettings,
   LOOKBACK_MIN,
 } = require('./backtest');
-const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, scoreModelSetupsAgainstLog, modelSetupById, MODEL_SETUPS, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelMinEntryLeanGate, modelEngineClearlyWithUs, modelNearFlatCents, modelBreakevenExitAllowed, modelLeanStaleForScratch, modelPriceAllowed, modelEntryRoomToFloorGate, modelLowAskConvictionGate, modelKalshiFavoriteSide, modelKalshiFavoriteGate, MODEL_KALSHI_FAVORITE_CENTS_DEFAULT, checkModelPostExitCooldown, modelPostExitCooldownMs, checkModelGlobalPostExitCooldown, modelGlobalPostExitCooldownMs, modelLeanDecayCutState, modelHeldSideProb, modelSignalDropCents, modelAdverseExitFillCents, modelEffectiveMaxLossCents, modelOnPaceBelowBarrier, modelShouldLeanStopRed, modelLeanStopMinAdverseCents, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT, MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT, modelSideSwitchConfirmMs, modelSideSwitchConfirmTicks, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_ARM_CENTS_DEFAULT, MODEL_MOMENTUM_STALL_MS_DEFAULT, MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, modelTakeProfitMeetsFloor, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel, summarizeLedgerCapital, rebuildLedgerSkimFromTrades, MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT, isForceRetryExitReason } = require('./bot');
+const { TradingBot, SERIES_BY_SYMBOL, isKalshiTradeEnabled, tradeableKalshiSymbols, symbolsNeedingKalshiTargets, symbolsNeedingEngineCompute, DEFAULT_AUTO_TRADE_SYMBOLS, resolveAutoTradeSymbols, scoreModelSetupsAgainstLog, modelSetupById, MODEL_SETUPS, settleEntryBand, settleEffectiveEntryBand, isSettleEntryPriceCents, isSettleStrategyMode, isSettleTrade, isModelStrategyMode, isModelTrade, pickModelWindowKey, pickModelWindow, modelWindowDirection, modelDirectionAgainstHeld, modelLiveLeanAgainstHeld, modelLiveLeanStillFavors, modelLiveProbNotWithUs, modelSignalTurningAgainst, modelProbDriftAgainst, modelEngineTurningAgainst, modelEntryDumpRisk, modelMinEntryLeanGate, modelEngineClearlyWithUs, modelNearFlatCents, modelBreakevenExitAllowed, modelLeanStaleForScratch, modelStagnationExitReady, modelRapidAdverseExitReady, modelPeakProgressCents, modelPriceAllowed, modelEntryRoomToFloorGate, modelLowAskConvictionGate, modelKalshiFavoriteSide, modelKalshiFavoriteGate, MODEL_KALSHI_FAVORITE_CENTS_DEFAULT, checkModelPostExitCooldown, modelPostExitCooldownMs, checkModelGlobalPostExitCooldown, modelGlobalPostExitCooldownMs, modelLeanDecayCutState, modelHeldSideProb, modelSignalDropCents, modelAdverseExitFillCents, modelEffectiveMaxLossCents, modelOnPaceBelowBarrier, modelShouldLeanStopRed, modelLeanStopMinAdverseCents, MODEL_MAX_LOSS_CENTS_DEFAULT, MODEL_RICH_STOP_FLOOR_CENTS_DEFAULT, MODEL_HARD_STOP_FLOOR_CENTS_DEFAULT, MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT, modelSideSwitchConfirmMs, modelSideSwitchConfirmTicks, MODEL_LIVE_LEAN_MARGIN_DEFAULT, MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT, MODEL_RED_GIVEUP_MS_DEFAULT, MODEL_SOFT_BANK_MS_DEFAULT, MODEL_DUMP_PULLBACK_CENTS_DEFAULT, MODEL_FAST_RED_CENTS_DEFAULT, MODEL_PROB_DRIFT_PTS_DEFAULT, MODEL_MIN_TP_CENTS_DEFAULT, MODEL_TRAIL_ARM_CENTS_DEFAULT, MODEL_MOMENTUM_STALL_MS_DEFAULT, MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, MODEL_TRAIL_CENTS_DEFAULT, MODEL_MAX_ADVERSE_CENTS_DEFAULT, MODEL_HARD_ADVERSE_CENTS_DEFAULT, MODEL_BANK_GREEN_CENTS_DEFAULT, MODEL_STAGNATION_SECONDS_DEFAULT, MODEL_RAPID_ADVERSE_CENTS_DEFAULT, modelTakeProfitMeetsFloor, MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS, MODEL_CONFIRM_CROSS_CENTS_DEFAULT, MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT, isSettleTieredExitsEnabled, settleExitPlan, settleExitTiersForDashboard, SETTLE_EXIT_TIERS, settleRankAskScore, settleMinUpsideCents, liquidityPriority, stopRecoveryCentsRequired, stopRecoveryMaxAgeMs, peerCascadeMaxAgeMs, postStopMaxOneAgeMs, isPostStopMaxOneActive, postStopSameSideCooldownMs, checkPostStopSameSideCooldown, checkSameSideExitCooldown, tradeWindowCloseMs, isPostStopRecoverySessionExpired, checkPostStopRecovery, checkPostStopPeerCascade, applyProfitBuckets, normalizeInsuranceThresholds, classifyStopVerdictFromResult, classifyStopVerdictFromBids, buildHourlyPnlBuckets, recommendSettleOpenWindow, strategyModeForLight, scoreSymbolFifteenMinuteWindow, scoreMarketRegime, EDGE_MAX_ENTRY_DEFAULT_CENTS, MODEL_MAX_ENTRY_DEFAULT_CENTS, MODEL_MIN_ENTRY_DEFAULT_CENTS, EDGE_PRE_CLOSE_SMALL_LOSS_DEFAULT_CENTS, EDGE_PRE_CLOSE_MINUTES_DEFAULT, stopVerdictLabel, summarizeLedgerCapital, rebuildLedgerSkimFromTrades, MODEL_AUTO_SWITCH_LOW_AVAIL_DEFAULT, isForceRetryExitReason } = require('./bot');
 const {
   publishPrimaryCoordination,
   loadCoordination,
@@ -5017,8 +5017,8 @@ async function testBotTradingFlow() {
     ];
     const scored = scoreModelSetupsAgainstLog(sample);
     const core = scored.find((s) => s.id === 'core');
-    check(core && core.score.trades === 3, 'core setup drops ETH fill');
-    check(core && core.score.pnlCents === 12 + 36 - 16, 'core setup PnL is BTC+SOL+BNB');
+    check(core && core.score.trades === 2, 'core setup keeps BTC+ETH fills');
+    check(core && core.score.pnlCents === 12 - 16, 'core setup PnL is BTC+ETH');
     check(modelSetupById('core').recommended === true, 'core is recommended setup');
   }
   checkEq(SERIES_BY_SYMBOL.NEAR, 'KXNEAR15M', 'NEAR Kalshi series');
@@ -6118,6 +6118,74 @@ async function testModelStrategy() {
   checkEq(MODEL_HARD_ADVERSE_CENTS_DEFAULT, 8, 'hard max-loss cliff 8¢');
   checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 11, 'bank / momentum arm at ≥11¢ green');
   checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 11, 'min TP 11¢ — no micro banks');
+  checkEq(MODEL_STAGNATION_SECONDS_DEFAULT, 40, 'stagnation check default 40s');
+  checkEq(MODEL_RAPID_ADVERSE_CENTS_DEFAULT, 6, 'rapid adverse default −6¢');
+  {
+    check(
+      modelStagnationExitReady({
+        heldMs: 45_000,
+        peakProgressCents: 0,
+        modelDeteriorating: true,
+        config: {},
+      }).ready,
+      '40s + 0 peak + decaying → stagnation cut'
+    );
+    check(
+      !modelStagnationExitReady({
+        heldMs: 45_000,
+        peakProgressCents: 0,
+        modelDeteriorating: false,
+        config: {},
+      }).ready,
+      '40s + 0 peak but firm model → hold'
+    );
+    check(
+      !modelStagnationExitReady({
+        heldMs: 45_000,
+        peakProgressCents: 2,
+        modelDeteriorating: true,
+        config: {},
+      }).ready,
+      '40s + peaked +2¢ → not stagnant'
+    );
+    check(
+      !modelStagnationExitReady({
+        heldMs: 20_000,
+        peakProgressCents: 0,
+        modelDeteriorating: true,
+        config: {},
+      }).ready,
+      '20s alone never cuts'
+    );
+    check(
+      modelRapidAdverseExitReady({
+        trueAdverseCents: 6,
+        modelAgainst: true,
+        inOpenGrace: false,
+        config: {},
+      }).ready,
+      '−6¢ + against → rapid cut'
+    );
+    check(
+      !modelRapidAdverseExitReady({
+        trueAdverseCents: 6,
+        modelAgainst: false,
+        inOpenGrace: false,
+        config: {},
+      }).ready,
+      '−6¢ but firm model → no rapid cut'
+    );
+    check(
+      !modelRapidAdverseExitReady({
+        trueAdverseCents: 6,
+        modelAgainst: true,
+        inOpenGrace: true,
+        config: {},
+      }).ready,
+      'rapid cut waits for open grace'
+    );
+    checkEq(modelPeakProgressCents({ entryPriceCents: 70 }, 72), 2, 'peak progress +2¢');
+  }
   checkEq(MODEL_TRAIL_ARM_CENTS_DEFAULT, 3, 'trail arm at ≥3¢ green');
   checkEq(
     modelTakeProfitMeetsFloor({ entryPriceCents: 85 }, 87, { modelMinTpCents: 7 }),
@@ -7156,7 +7224,7 @@ async function testModelStrategy() {
         yes_bid: 50,
         no_bid: 50,
       }),
-      { strategyMode: 'model', modelMinHoldSeconds: 0, modelMaxAdverseCents: 8 }
+      { strategyMode: 'model', modelMinHoldSeconds: 0, modelMaxAdverseCents: 8, modelStagnationSeconds: 0, modelRapidAdverseCents: 0 }
     );
     const trade = openTrade(bot, {
       strategy: 'model',
@@ -7192,7 +7260,7 @@ async function testModelStrategy() {
         yes_bid: 50,
         no_bid: 50,
       }),
-      { strategyMode: 'model', modelMinConfidence: 55, modelMinHoldSeconds: 0, modelMaxAdverseCents: 8 }
+      { strategyMode: 'model', modelMinConfidence: 55, modelMinHoldSeconds: 0, modelMaxAdverseCents: 8, modelStagnationSeconds: 0, modelRapidAdverseCents: 0 }
     );
     const trade = openTrade(bot, {
       strategy: 'model',
@@ -8018,6 +8086,98 @@ async function testModelStrategy() {
     checkEq(trade.exitReason, 'model_against', 'soft/50-50 lean + red → cut (not hold for hard flip)');
   }
 
+  // Rapid adverse −6¢ + model against → cut (cliff protection)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 62,
+        no_bid: 38,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinHoldSeconds: 0,
+        modelOpenGraceSeconds: 0,
+        modelLeanAgainstBeSeconds: 0,
+        modelRapidAdverseCents: 6,
+        modelStagnationSeconds: 0,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 70,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 10_000,
+      modelEntryBidCents: 70,
+      modelEntrySpreadCents: 0,
+      modelEntryHeldProb: 70,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(40, 70), tracking: { predictedDirection: 'DOWN' } },
+          w10: win(42, 70),
+          w15: win(45, 60),
+        },
+      },
+    });
+    checkEq(trade.exitReason, 'model_rapid_adverse', '−6¢ true adverse + against → rapid cut');
+  }
+
+  // Stagnation 40s + no peak progress + soft lean → cut
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 69,
+        no_bid: 31,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinHoldSeconds: 0,
+        modelOpenGraceSeconds: 0,
+        modelLeanAgainstBeSeconds: 0,
+        modelStagnationSeconds: 40,
+        modelStagnationMinProgressCents: 1,
+        modelRapidAdverseCents: 0,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 70,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 45_000,
+      peakHeldBidCents: 70,
+      peakHeldBidAt: now - 40_000,
+      modelEntryHeldProb: 70,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: {
+            ...win(50, 70),
+            probabilityUp: 49,
+            probabilityDown: 50,
+            tracking: { predictedDirection: 'UP' },
+          },
+          w10: { ...win(50, 70), probabilityUp: 49, probabilityDown: 50 },
+          w15: { ...win(50, 70), probabilityUp: 49, probabilityDown: 50 },
+        },
+      },
+    });
+    checkEq(trade.exitReason, 'model_stagnation', '45s no progress + soft lean → stagnation cut');
+  }
+
   // Lean decay 99→85 while red → cut (peak tracked on trade)
   {
     const now = Date.now();
@@ -8038,7 +8198,7 @@ async function testModelStrategy() {
         yes_bid: 72,
         no_bid: 28,
       }),
-      { strategyMode: 'model', modelMinHoldSeconds: 60, modelOpenGraceSeconds: 0 }
+      { strategyMode: 'model', modelMinHoldSeconds: 60, modelOpenGraceSeconds: 0, modelStagnationSeconds: 0, modelRapidAdverseCents: 0 }
     );
     const open = openTrade(bot, {
       strategy: 'model',
@@ -8294,7 +8454,7 @@ async function testModelStrategy() {
         yes_bid: 40,
         no_bid: 60,
       }),
-      { strategyMode: 'model', mode: 'paper', modelMinHoldSeconds: 0, modelMaxLossCents: 8 }
+      { strategyMode: 'model', mode: 'paper', modelMinHoldSeconds: 0, modelMaxLossCents: 8, modelStagnationSeconds: 0, modelRapidAdverseCents: 0 }
     );
     const trade = openTrade(bot, {
       strategy: 'model',

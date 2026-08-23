@@ -909,7 +909,7 @@ function exitSoundKind(trade) {
     if (pnl < 0) return 'loss';
   }
   if (reason === 'take_profit' || reason === 'near_certain') return 'win';
-  if (reason === 'stop_loss' || reason === 'model_against') return 'loss';
+  if (reason === 'stop_loss' || reason === 'model_against' || reason === 'model_stagnation' || reason === 'model_rapid_adverse') return 'loss';
   return 'flat';
 }
 
@@ -1702,6 +1702,8 @@ const SLIDER_UNITS = {
   'bot-model-low-ask-conf': (v) => (Number(v) <= 0 ? 'off' : `≤69¢ need ≥${Math.round(v)}%`),
   'bot-model-max-entry': (v) => `${Math.round(v)}¢`,
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
+  'bot-model-stagnation-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
+  'bot-model-rapid-adverse': (v) => (Number(v) <= 0 ? 'off' : `−${Math.round(v)}¢`),
   'bot-model-stall-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-model-settle-close': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
   'bot-model-late-barrier': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
@@ -2105,6 +2107,8 @@ function wireSliderDisplays() {
     'bot-model-max-entry',
     'bot-model-bank-green',
     'bot-model-stall-sec',
+    'bot-model-stagnation-sec',
+    'bot-model-rapid-adverse',
     'bot-model-settle-close',
     'bot-model-late-barrier',
     'bot-model-preclose-force',
@@ -2234,6 +2238,8 @@ function wireBotConfigAutoSave() {
     'bot-model-max-entry',
     'bot-model-bank-green',
     'bot-model-stall-sec',
+    'bot-model-stagnation-sec',
+    'bot-model-rapid-adverse',
     'bot-model-settle-close',
     'bot-model-late-barrier',
     'bot-model-preclose-force',
@@ -2380,6 +2386,16 @@ async function loadBotConfigIntoForm() {
       modelStallSec.value =
         c.modelMomentumStallSeconds != null ? c.modelMomentumStallSeconds : 8;
     }
+    const modelStagnationSec = document.getElementById('bot-model-stagnation-sec');
+    if (modelStagnationSec) {
+      modelStagnationSec.value =
+        c.modelStagnationSeconds != null ? c.modelStagnationSeconds : 40;
+    }
+    const modelRapidAdverse = document.getElementById('bot-model-rapid-adverse');
+    if (modelRapidAdverse) {
+      modelRapidAdverse.value =
+        c.modelRapidAdverseCents != null ? c.modelRapidAdverseCents : 6;
+    }
     const modelSettleClose = document.getElementById('bot-model-settle-close');
     if (modelSettleClose) {
       modelSettleClose.value =
@@ -2510,6 +2526,8 @@ async function loadBotConfigIntoForm() {
       'bot-model-max-entry',
       'bot-model-bank-green',
     'bot-model-stall-sec',
+    'bot-model-stagnation-sec',
+    'bot-model-rapid-adverse',
       'bot-model-settle-close',
       'bot-model-late-barrier',
       'bot-model-preclose-force',
@@ -2694,6 +2712,8 @@ async function saveBotConfig(opts = {}) {
     modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '11'),
     modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '11'),
     modelMomentumStallSeconds: parseFloat(document.getElementById('bot-model-stall-sec')?.value || '8'),
+    modelStagnationSeconds: parseFloat(document.getElementById('bot-model-stagnation-sec')?.value || '40'),
+    modelRapidAdverseCents: parseFloat(document.getElementById('bot-model-rapid-adverse')?.value || '6'),
     modelSettleCloseMinutes: parseFloat(document.getElementById('bot-model-settle-close')?.value || '2.5'),
     modelLateBarrierMinutes: parseFloat(document.getElementById('bot-model-late-barrier')?.value || '2'),
     modelPreCloseForceMinutes: parseFloat(

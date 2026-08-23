@@ -373,7 +373,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> — Core: BTC/SOL, conf <strong>55%</strong>, TP <strong>+7¢</strong>, max loss <strong>8¢</strong>, hard floor <strong>55¢</strong> for all entries (incl. 78+/80/85). Side-switch waits to confirm lean (longer early, faster late), then bids. Soft red holds unless pace → ≤55¢.</p>
+          <p class="settings-hint"><strong>MODEL</strong> — Core: BTC/ETH, one slot, TP <strong>+11¢</strong>, trail arm <strong>+3¢</strong>, stagnation + rapid-adverse cuts. Hard floor <strong>55¢</strong>.</p>
 
           <div class="model-setups" id="bot-model-setups">
             <h4 class="bot-panel-subhead">Paper setups</h4>
@@ -484,7 +484,21 @@
               <input id="bot-model-stall-sec" type="range" min="3" max="60" step="1" value="8" />
               <span class="slider-value" id="bot-model-stall-sec-value">—</span>
             </div>
-            <span class="field-hint">While green (+3¢ trail armed), bank at the <strong>live bid</strong> if peak is flat this long or pulls back <strong>2¢</strong> — even if under the TP target above. Default <strong>8s</strong>.</span>
+            <span class="field-hint">While green (trail armed), bank at the <strong>live bid</strong> if peak is flat this long or pulls back <strong>2¢</strong> — even if under the TP target above. Default <strong>8s</strong>.</span>
+          </label>
+          <label>MODEL stagnation check (sec)
+            <div class="slider-row">
+              <input id="bot-model-stagnation-sec" type="range" min="0" max="120" step="5" />
+              <span class="slider-value" id="bot-model-stagnation-sec-value">—</span>
+            </div>
+            <span class="field-hint">After this long with <strong>no peak progress</strong> toward TP (<strong>&lt;+1¢</strong>) <em>and</em> model decaying → exit. Time alone never cuts. Default <strong>40s</strong>. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL rapid adverse (¢)
+            <div class="slider-row">
+              <input id="bot-model-rapid-adverse" type="range" min="0" max="15" step="1" />
+              <span class="slider-value" id="bot-model-rapid-adverse-value">—</span>
+            </div>
+            <span class="field-hint">True red ≥ this many ¢ below entry <em>and</em> model decaying → cut immediately (after 4s open grace). Stops cliffs like 81→20. Default <strong>6¢</strong>. <strong>0</strong> = off.</span>
           </label>
           <label>MODEL cash out before settle (min left)
             <div class="slider-row">

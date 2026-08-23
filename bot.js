@@ -37,7 +37,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 75;
+const SETTINGS_DEFAULTS_VERSION = 77;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -681,7 +681,7 @@ const MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT = 2;
 /** Entry: held-side live prob must be at least this % (0 = off). */
 const MODEL_MIN_ENTRY_LEAN_PCT_DEFAULT = 65;
 /** Don't early-exit a Model hold until it's been open at least this long. */
-const MODEL_MIN_HOLD_MS_DEFAULT = 60_000;
+const MODEL_MIN_HOLD_MS_DEFAULT = 4_000;
 /** After Model BE/TP, sit out that coin this long before rebuy. */
 const MODEL_POST_EXIT_COOLDOWN_MS_DEFAULT = 45_000;
 /** After any model close, block ALL new entries this long (regime cool-down). */
@@ -691,7 +691,7 @@ const MODEL_POST_LEAN_STOP_COOLDOWN_MS_DEFAULT = 120_000;
 /** After open grace: when model is not firm, wait this long then BE/cut (avoid ask→bid flicker). */
 const MODEL_LEAN_AGAINST_BE_MS_DEFAULT = 2_000;
 /** First N ms after open: only hard lean-turning exits (ignore soft + ask/bid haircut). */
-const MODEL_OPEN_GRACE_MS_DEFAULT = 5_000;
+const MODEL_OPEN_GRACE_MS_DEFAULT = 4_000;
 /** Lean-exit / momentum TP floor — no micro-banks under this. */
 const MODEL_MIN_TP_CENTS_DEFAULT = 11;
 /** Unconditional bank once this many ¢ green (don't wait for a stall). */
@@ -734,6 +734,19 @@ const MODEL_LEAN_STOP_PACE_DRAWDOWN_PCT_DEFAULT = 35;
  * Absolute hit (bid ≤ floor) still stops immediately. Default 8 → arm at ≤63 when floor=55.
  */
 const MODEL_LEAN_STOP_PACE_ARM_CENTS_DEFAULT = 8;
+/**
+ * Progress/stagnation: after this many seconds with no meaningful peak green,
+ * exit only if the model is also deteriorating (time is context, not a timer cut).
+ * 0 = off.
+ */
+const MODEL_STAGNATION_SECONDS_DEFAULT = 40;
+/** Peak must reach at least this many ¢ above entry to count as progress. */
+const MODEL_STAGNATION_MIN_PROGRESS_CENTS_DEFAULT = 1;
+/**
+ * Rapid adverse: true ¢ below entry (beyond spread haircut) at/above this + model
+ * against → cut immediately (after open grace). Caps cliffs like 81→20. 0 = off.
+ */
+const MODEL_RAPID_ADVERSE_CENTS_DEFAULT = 6;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /**
@@ -815,6 +828,8 @@ function isModelPostExitCooldownReason(reason) {
     r === 'model_lean_stop' ||
     r === 'model_dip_stop' ||
     r === 'model_against' ||
+    r === 'model_stagnation' ||
+    r === 'model_rapid_adverse' ||
     r === 'model_late_exit' ||
     r === 'model_pre_close' ||
     r === 'breakeven' ||
@@ -1704,6 +1719,83 @@ function modelLeanStaleForScratch(window, side, engineClearlyWithUs, config = {}
   return !modelLiveLeanStillFavors(window, side, modelSoftLeanMarginPct(config));
 }
 
+function modelStagnationSeconds(config = {}) {
+  const n = Number(config.modelStagnationSeconds);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_STAGNATION_SECONDS_DEFAULT;
+}
+
+function modelStagnationMinProgressCents(config = {}) {
+  const n = Number(config.modelStagnationMinProgressCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_STAGNATION_MIN_PROGRESS_CENTS_DEFAULT;
+}
+
+function modelRapidAdverseCents(config = {}) {
+  const n = Number(config.modelRapidAdverseCents);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_RAPID_ADVERSE_CENTS_DEFAULT;
+}
+
+/** Peak ¢ above entry — how much favorable progress the trade actually made. */
+function modelPeakProgressCents(trade, peakHeldBidCents) {
+  const entry = Number(trade && trade.entryPriceCents);
+  const peak = Number(peakHeldBidCents);
+  if (!Number.isFinite(entry) || !Number.isFinite(peak)) return 0;
+  return Math.max(0, Math.round(peak - entry));
+}
+
+/**
+ * No meaningful progress toward TP after N seconds + thesis deteriorating.
+ * Time alone never exits — needs both stagnation and model decay.
+ */
+function modelStagnationExitReady({
+  heldMs,
+  peakProgressCents,
+  modelDeteriorating,
+  config = {},
+} = {}) {
+  const needSec = modelStagnationSeconds(config);
+  if (!(needSec > 0)) return { ready: false, skipped: true };
+  const held = Number(heldMs);
+  if (!Number.isFinite(held) || held < needSec * 1000) {
+    return { ready: false, needSec, peakProgress: Number(peakProgressCents) || 0 };
+  }
+  const needProgress = modelStagnationMinProgressCents(config);
+  const progress = Number(peakProgressCents);
+  const peaked = Number.isFinite(progress) ? progress : 0;
+  if (peaked >= needProgress) {
+    return { ready: false, needSec, peakProgress: peaked, progressed: true };
+  }
+  if (!modelDeteriorating) {
+    return { ready: false, needSec, peakProgress: peaked, waitingModel: true };
+  }
+  return { ready: true, needSec, peakProgress: peaked };
+}
+
+/**
+ * Sharp dump from entry + model against → cut (does not wait for barrier/pace).
+ */
+function modelRapidAdverseExitReady({
+  trueAdverseCents,
+  modelAgainst,
+  inOpenGrace,
+  config = {},
+} = {}) {
+  const need = modelRapidAdverseCents(config);
+  if (!(need > 0)) return { ready: false, skipped: true };
+  if (inOpenGrace) return { ready: false, need, inGrace: true };
+  const adverse = Number(trueAdverseCents);
+  if (!Number.isFinite(adverse) || adverse < need) {
+    return { ready: false, need, adverse: Number.isFinite(adverse) ? adverse : 0 };
+  }
+  if (!modelAgainst) return { ready: false, need, adverse, waitingModel: true };
+  return { ready: true, need, adverse };
+}
+
 /**
  * Pre-entry gate: skip only when the lean is clearly rotting.
  * Does NOT require model% ≈ Kalshi ask — that starved every setup for hours
@@ -1967,7 +2059,9 @@ function checkModelPostExitCooldown({
   const isLeanStop =
     reason === 'model_lean_stop' ||
     reason === 'model_lean_flip' ||
-    reason === 'model_dip_stop';
+    reason === 'model_dip_stop' ||
+    reason === 'model_rapid_adverse' ||
+    reason === 'model_stagnation';
   const cd = isLeanStop
     ? Number.isFinite(cdLean) && cdLean > 0
       ? cdLean
@@ -2319,6 +2413,8 @@ function isForceRetryExitReason(reason) {
     r === 'take_profit' ||
     r === 'breakeven' ||
     r === 'model_against' ||
+    r === 'model_stagnation' ||
+    r === 'model_rapid_adverse' ||
     r === 'model_late_exit' ||
     r === 'model_pre_close' ||
     r === 'model_lean_stop' ||
@@ -2807,6 +2903,9 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelSideSwitchConfirmTicks',
   'modelDumpPullbackCents',
   'modelFastRedCents',
+  'modelStagnationSeconds',
+  'modelStagnationMinProgressCents',
+  'modelRapidAdverseCents',
   'modelLeanStopBarrierCents',
   'modelLeanStopPaceDrawdownPct',
   'modelLeanStopPaceMinSampleSeconds',
@@ -3889,6 +3988,9 @@ class TradingBot {
       modelLateExtendMinConfidence: MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT,
       modelMomentumStallSeconds: MODEL_MOMENTUM_STALL_MS_DEFAULT / 1000,
       modelMomentumPullbackCents: MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT,
+      modelStagnationSeconds: MODEL_STAGNATION_SECONDS_DEFAULT,
+      modelStagnationMinProgressCents: MODEL_STAGNATION_MIN_PROGRESS_CENTS_DEFAULT,
+      modelRapidAdverseCents: MODEL_RAPID_ADVERSE_CENTS_DEFAULT,
       modelLiveLeanMarginPct: MODEL_LIVE_LEAN_MARGIN_DEFAULT,
       modelExtremeLiveLeanExitPct: MODEL_EXTREME_LIVE_LEAN_EXIT_PCT_DEFAULT,
       modelEntryLiveLeanMarginPct: MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT,
@@ -7334,18 +7436,19 @@ class TradingBot {
       };
 
       /** Hard lean against + red: sell the bid (loss cut). Not labeled breakeven. */
-      const tryModelAgainstCut = async () => {
+      const tryModelAgainstCut = async (exitReason = 'model_against') => {
+        const reason = String(exitReason || 'model_against');
         const cutFill = heldSideBidCents;
-        const closed = await this._closePosition(trade, cutFill, 'model_against', {
+        const closed = await this._closePosition(trade, cutFill, reason, {
           liveSellPriceCents: heldSideBidCents,
         });
         if (!closed && this._isLiveTrade(trade) && trade.status === 'open') {
-          trade.pendingForceExit = 'model_against';
+          trade.pendingForceExit = reason;
           if (!Number.isFinite(Number(trade.pendingForceExitSince))) {
             trade.pendingForceExitSince = Date.now();
           }
           this.lastDecision =
-            `Model-against cut missed on ${trade.symbol} — retrying every cycle until flat.`;
+            `Model cut (${reason}) missed on ${trade.symbol} — retrying every cycle until flat.`;
           this._logActivity(this.lastDecision, {
             kind: 'close',
             symbol: trade.symbol,
@@ -7374,6 +7477,55 @@ class TradingBot {
         }
         return false;
       };
+
+      const modelDeteriorating =
+        !faded &&
+        !!(
+          engineSoftTurning ||
+          leanStaleScratch ||
+          modelHardAgainst ||
+          (picked && picked.window && !engineClearlyWithUs)
+        );
+
+      // Rapid dump + thesis rotting — cut before 81→20 cliffs (time not required).
+      const peakProgress = modelPeakProgressCents(trade, peak);
+      const rapidAdverse = modelRapidAdverseExitReady({
+        trueAdverseCents: trueAdverse,
+        modelAgainst: modelDeteriorating,
+        inOpenGrace,
+        config: this.config,
+      });
+      if (bidOk && rapidAdverse.ready) {
+        this.lastDecision =
+          `Rapid adverse −${rapidAdverse.adverse}¢ (≥${rapidAdverse.need}¢) + model decaying on ${trade.symbol} — cutting.`;
+        await tryModelAgainstCut('model_rapid_adverse');
+        return;
+      }
+
+      // Stagnation: held long enough with no peak progress toward TP + model decaying.
+      // Time alone never exits — must also show thesis deterioration.
+      const stagnation = modelStagnationExitReady({
+        heldMs,
+        peakProgressCents: peakProgress,
+        modelDeteriorating,
+        config: this.config,
+      });
+      if (bidOk && stagnation.ready) {
+        this.lastDecision =
+          `Stagnation ${stagnation.needSec}s with only +${stagnation.peakProgress}¢ peak + model decaying on ${trade.symbol} — exiting.`;
+        if (underwater || econUnderwater) {
+          await tryModelAgainstCut('model_stagnation');
+        } else if (isBankableGreen && heldForBank) {
+          await this._closePosition(trade, heldSideBidCents, 'take_profit', {
+            liveSellPriceCents: heldSideBidCents,
+          });
+        } else if (scratchFlat || flatOrGreen) {
+          await tryModelBreakevenScratch();
+        } else {
+          await tryModelAgainstCut('model_stagnation');
+        }
+        return;
+      }
 
       // Strong lean rotting (99/1 → 85/15): cut if no recovery — smaller loss beats cliff.
       if (bidOk && picked && picked.window && !faded) {
@@ -10769,6 +10921,11 @@ module.exports = {
   modelNearFlatCents,
   modelBreakevenExitAllowed,
   modelLeanStaleForScratch,
+  modelStagnationExitReady,
+  modelRapidAdverseExitReady,
+  modelPeakProgressCents,
+  MODEL_STAGNATION_SECONDS_DEFAULT,
+  MODEL_RAPID_ADVERSE_CENTS_DEFAULT,
   modelDirectionSupportsHold,
   windowConsensusSupportsSide,
   modelCalibrationEntryGate,
