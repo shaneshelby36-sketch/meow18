@@ -327,6 +327,7 @@ class KalshiClient {
     this._publicGate = Promise.resolve();
     this._lastPublicAt = 0;
     this._cooldownUntil = 0;
+    this._429Streak = 0;
     this._429LogAt = 0;
     // Basic-tier defaults at ~85% headroom (200 read / 100 write).
     this._readBudget = createTokenBucket(170, 340);
@@ -488,6 +489,7 @@ class KalshiClient {
         err.body = json;
         throw err;
       }
+      this._clearRateLimitStreak();
       return json;
     }
     throw lastErr || new Error(`Kalshi API ${method} ${path} -> HTTP 429`);
@@ -497,11 +499,25 @@ class KalshiClient {
 
   _noteRateLimit() {
     // Prefer cache briefly; Kalshi has no 429 penalty beyond empty buckets.
-    this._cooldownUntil = Date.now() + 3_000;
+    this._429Streak = Math.min(8, (Number(this._429Streak) || 0) + 1);
+    const baseMs = 3_000;
+    const backoffMs = Math.min(20_000, baseMs * Math.pow(1.6, this._429Streak - 1));
+    this._cooldownUntil = Math.max(this._cooldownUntil || 0, Date.now() + backoffMs);
     if (Date.now() - this._429LogAt > 10_000) {
       this._429LogAt = Date.now();
-      console.warn('[kalshi] rate limited (429) — pacing on token budget and preferring cached markets');
+      console.warn(
+        `[kalshi] rate limited (429) — pacing ${Math.round(backoffMs / 1000)}s, preferring cached markets`
+      );
     }
+  }
+
+  _clearRateLimitStreak() {
+    this._429Streak = 0;
+  }
+
+  publicRateLimitRemainingMs() {
+    const rem = Number(this._cooldownUntil) - Date.now();
+    return rem > 0 ? rem : 0;
   }
 
   async _withPublicGate(fn) {
@@ -550,17 +566,20 @@ class KalshiClient {
     const cacheKey = String(seriesTicker || '');
     const now = Date.now();
     const cached = this._openMarketsCache.get(cacheKey);
+    const limited = now < this._cooldownUntil;
     // Empty lists go stale fast — a real rollover must not look "rolling over" for 12s+.
+    // During 429 cooldown, serve a non-empty list up to 60s so entries don't freeze on BTC.
     if (cached) {
       const n = Array.isArray(cached.markets) ? cached.markets.length : 0;
-      const ttl = n > 0 ? 20_000 : 1_500;
+      let ttl = n > 0 ? 20_000 : 1_500;
+      if (limited && n > 0) ttl = 60_000;
       if (now - cached.at < ttl) return cached.markets;
     }
 
     const inflight = this._openMarketsInflight.get(cacheKey);
     if (inflight) return inflight;
 
-    if (now < this._cooldownUntil) {
+    if (limited) {
       if (cached) return cached.markets;
       return [];
     }
@@ -608,7 +627,7 @@ class KalshiClient {
   }
 
   isPublicRateLimited() {
-    return Date.now() < (Number(this._cooldownUntil) || 0);
+    return this.publicRateLimitRemainingMs() > 0;
   }
 
   /**
@@ -633,6 +652,7 @@ class KalshiClient {
     const first = await attempt(false);
     if (first) return first;
     if (this.isPublicRateLimited()) return null;
+    // One bust+retry when not rate-limited (real rollover miss).
     return attempt(true);
   }
 

@@ -6827,22 +6827,33 @@ class TradingBot {
     if (!this._lastLiveMarketAt) this._lastLiveMarketAt = Object.create(null);
     const limited =
       typeof this.client.isPublicRateLimited === 'function' && this.client.isPublicRateLimited();
+    const staleMs = limited ? 60_000 : 8_000;
     const cached = this._lastLiveMarket[seriesTicker];
     const cachedClose = cached ? parseMarketCloseMs(cached) : NaN;
     const cacheAge = Date.now() - (Number(this._lastLiveMarketAt[seriesTicker]) || 0);
-    // Drop bot-side cache once the window is inside the min-left floor.
+    const cachedQuoted = (m) =>
+      m &&
+      Number.isFinite(Number(m.yes_bid)) &&
+      Number.isFinite(Number(m.yes_ask)) &&
+      Number(m.yes_bid) >= 1 &&
+      Number(m.yes_ask) <= 99 &&
+      Number(m.yes_bid) <= Number(m.yes_ask);
+    // Drop bot-side cache once the window is inside the min-left floor (unless 429 — keep stale briefly).
     if (cached && Number.isFinite(cachedClose) && cachedClose <= Date.now() + Math.max(500, minMsLeft)) {
-      delete this._lastLiveMarket[seriesTicker];
-      delete this._lastLiveMarketAt[seriesTicker];
+      if (limited && cachedQuoted(cached) && cacheAge < 45_000) {
+        return cached;
+      }
+      if (!limited) {
+        delete this._lastLiveMarket[seriesTicker];
+        delete this._lastLiveMarketAt[seriesTicker];
+      }
     } else if (cached && Number.isFinite(cachedClose) && cachedClose > Date.now() + Math.max(500, minMsLeft)) {
-      const cachedQuoted =
-        Number.isFinite(Number(cached.yes_bid)) &&
-        Number.isFinite(Number(cached.yes_ask)) &&
-        Number(cached.yes_bid) >= 1 &&
-        Number(cached.yes_ask) <= 99 &&
-        Number(cached.yes_bid) <= Number(cached.yes_ask);
-      // While rate-limited or recently refreshed with real quotes, reuse.
-      if (cachedQuoted && (limited || cacheAge < 8_000)) return cached;
+      if (cachedQuoted(cached) && (limited ? cacheAge < staleMs : cacheAge < 8_000)) return cached;
+      // While rate-limited: never network-refresh — stale quoted cache beats freezing on BTC.
+      if (limited) {
+        if (cachedQuoted(cached) && cacheAge < staleMs) return cached;
+        return cached || null;
+      }
       const ticker = cached.ticker;
       if (ticker && typeof this.client.getMarket === 'function') {
         try {
@@ -6857,11 +6868,11 @@ class TradingBot {
           // keep cached window rather than re-list the whole series
         }
       }
-      if (cachedQuoted) return cached;
+      if (cachedQuoted(cached)) return cached;
       // Quote-less cache — fall through to re-list / hydrate.
     }
 
-    if (limited) return cached || null;
+    if (limited) return cachedQuoted(cached) ? cached : cached || null;
 
     let found = null;
     if (typeof this.client.getLiveOpenMarket === 'function') {
@@ -6872,7 +6883,7 @@ class TradingBot {
       }
     }
     if (!found && typeof this.client.getOpenMarkets === 'function') {
-      if (typeof this.client.invalidateOpenMarkets === 'function') {
+      if (!limited && typeof this.client.invalidateOpenMarkets === 'function') {
         this.client.invalidateOpenMarkets(seriesTicker);
       }
       const markets = await this.client.getOpenMarkets(seriesTicker, 20);
@@ -6881,14 +6892,7 @@ class TradingBot {
         pickLiveOpenMarket(markets, Date.now(), 0);
     }
     if (found) {
-      // Series list often omits bid/ask — hydrate from GET /markets/{ticker} before caching.
-      const quotedOk = (m) =>
-        m &&
-        Number.isFinite(Number(m.yes_bid)) &&
-        Number.isFinite(Number(m.yes_ask)) &&
-        Number(m.yes_bid) >= 1 &&
-        Number(m.yes_ask) <= 99 &&
-        Number(m.yes_bid) <= Number(m.yes_ask);
+      const quotedOk = cachedQuoted;
       if (found.ticker && typeof this.client.getMarket === 'function' && !quotedOk(found)) {
         try {
           const quoted = await this._getMarketBounded(found.ticker, 3500);
@@ -6899,8 +6903,6 @@ class TradingBot {
           // keep list row
         }
       }
-      // Never stick a quote-less row in the bot cache — that locks SOL/BTC
-      // into "no two-sided quote" until the window rolls.
       if (quotedOk(found)) {
         this._lastLiveMarket[seriesTicker] = found;
         this._lastLiveMarketAt[seriesTicker] = Date.now();
@@ -6908,7 +6910,7 @@ class TradingBot {
       }
       return found;
     }
-    return null;
+    return cachedQuoted(cached) ? cached : null;
   }
 
   _liveMarketWaitReason(symbol) {
@@ -6917,7 +6919,12 @@ class TradingBot {
       typeof this.client.isPublicRateLimited === 'function' &&
       this.client.isPublicRateLimited();
     if (limited) {
-      return `Waiting: ${symbol} Kalshi market list paused (rate limit) — retrying in a few seconds.`;
+      const remMs =
+        typeof this.client.publicRateLimitRemainingMs === 'function'
+          ? this.client.publicRateLimitRemainingMs()
+          : 0;
+      const sec = remMs > 0 ? Math.max(1, Math.ceil(remMs / 1000)) : 'a few';
+      return `Waiting: ${symbol} Kalshi paused (rate limit ~${sec}s) — using cached quotes when available.`;
     }
     return `Waiting: ${symbol} 15m window rolling over (new ticker not listed yet).`;
   }
@@ -6981,6 +6988,8 @@ class TradingBot {
       typeof this.client.getCachedMarket === 'function'
         ? this.client.getCachedMarket(ticker, maxAgeMs)
         : null;
+    const limited =
+      typeof this.client.isPublicRateLimited === 'function' && this.client.isPublicRateLimited();
     // Shadow sims must not burn Kalshi quota — cache / live-cycle snapshot only.
     if (this._inShadow) {
       const hit = peek(Infinity);
@@ -6991,6 +7000,10 @@ class TradingBot {
         }
       }
       return null;
+    }
+    // During 429 cooldown: cache only — never queue another GET behind the gate.
+    if (limited) {
+      return peek(120_000) || null;
     }
     // Align with getMarket cache (~8s) so the 4s manage watchdog usually avoids HTTP.
     const fresh = peek(8000);
@@ -10113,14 +10126,13 @@ class TradingBot {
       (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
     );
     if (candidates.length === 0) return [];
-    if (
+    const limited =
       this.client &&
       typeof this.client.isPublicRateLimited === 'function' &&
-      this.client.isPublicRateLimited()
-    ) {
+      this.client.isPublicRateLimited();
+    if (limited) {
       this.lastDecision =
-        'Waiting: Kalshi public GETs paused (rate limit) — holding opens from cache; new entries resume after cooldown.';
-      return [];
+        'Kalshi rate limit — scanning from cached quotes (new entries when quotes are fresh enough).';
     }
     const skips = [];
     // Serial — parallel AUTO scans were bursting list GETs and tripping 429.
