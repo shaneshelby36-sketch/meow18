@@ -1801,7 +1801,7 @@ function formatSetupKnobs(s) {
     );
   }
   if (s.modelMinTpCents != null) bits.push(`TP +${s.modelMinTpCents}¢`);
-  if (s.modelMaxLossCents != null) bits.push(`max −${s.modelMaxLossCents}¢`);
+  if (s.modelMaxLossCents != null && s.modelMaxLossCents > 0) bits.push(`max −${s.modelMaxLossCents}¢`);
   if (s.modelHardStopFloorCents != null) bits.push(`floor ${s.modelHardStopFloorCents}¢`);
   else bits.push('floor 55¢');
   if (s.modelRichStopFloorCents != null && Number(s.modelRichStopFloorCents) > 0) {
@@ -2412,7 +2412,7 @@ async function loadBotConfigIntoForm() {
         c.modelPreCloseForceMinutes != null ? c.modelPreCloseForceMinutes : 1;
     }
     const modelMaxLoss = document.getElementById('bot-model-max-loss');
-    if (modelMaxLoss) modelMaxLoss.value = c.modelMaxLossCents != null ? c.modelMaxLossCents : 8;
+    if (modelMaxLoss) modelMaxLoss.value = c.modelMaxLossCents != null ? c.modelMaxLossCents : 0;
     const modelHardFloor = document.getElementById('bot-model-hard-floor');
     if (modelHardFloor) {
       modelHardFloor.value =
@@ -2719,8 +2719,8 @@ async function saveBotConfig(opts = {}) {
     modelPreCloseForceMinutes: parseFloat(
       document.getElementById('bot-model-preclose-force')?.value || '1'
     ),
-    modelMaxLossCents: parseFloat(document.getElementById('bot-model-max-loss')?.value || '8'),
-    modelHardAdverseCents: parseFloat(document.getElementById('bot-model-max-loss')?.value || '8'),
+    modelMaxLossCents: parseFloat(document.getElementById('bot-model-max-loss')?.value || '0'),
+    modelHardAdverseCents: parseFloat(document.getElementById('bot-model-max-loss')?.value || '0'),
     modelHardStopFloorCents: parseFloat(document.getElementById('bot-model-hard-floor')?.value || '55'),
     modelLeanStopBarrierCents: parseFloat(document.getElementById('bot-model-hard-floor')?.value || '55'),
     modelLeanStopPaceDrawdownPct: parseFloat(

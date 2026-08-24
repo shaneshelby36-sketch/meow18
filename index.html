@@ -524,10 +524,10 @@
           </label>
           <label>MODEL max loss (¢ below entry)
             <div class="slider-row">
-              <input id="bot-model-max-loss" type="range" min="4" max="20" step="1" />
+              <input id="bot-model-max-loss" type="range" min="0" max="20" step="1" />
               <span class="slider-value" id="bot-model-max-loss-value">—</span>
             </div>
-            <span class="field-hint"><strong>Unused</strong> — MODEL exits follow <em>model still firm</em> only (not a −8¢ price cliff).</span>
+            <span class="field-hint"><strong>Off (0)</strong> — MODEL losses exit via stagnation + hard floor, not a −N¢ price cliff.</span>
           </label>
           <label>MODEL hard stop floor (¢)
             <div class="slider-row">

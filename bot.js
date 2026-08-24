@@ -38,7 +38,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 83;
+const SETTINGS_DEFAULTS_VERSION = 84;
 
 /** Min ms between Kalshi series list refreshes per KX*15M (live book only). */
 const KALSHI_SERIES_REFRESH_MS = 12_000;
@@ -244,7 +244,7 @@ const MODEL_SETUPS = [
     id: 'core',
     recommended: true,
     label: 'Core BTC / ETH',
-    why: 'BTC + ETH, one slot, max 88¢, conf 55%, stall 4s, BE chase 8s, stagnation 60s.',
+    why: 'BTC + ETH, one slot, max 88¢, conf 55%, stall 4s, BE chase 8s, stagnation 60s (no max-loss cliff).',
     autoTradeSymbols: 'BTC,ETH',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
@@ -254,7 +254,6 @@ const MODEL_SETUPS = [
     maxOpenPositions: 1,
     modelLowAskMinConfidence: 0,
     modelConfirmCrossCents: 0,
-    modelMaxLossCents: 8,
     modelMomentumStallSeconds: 4,
     modelStagnationSeconds: 60,
     modelRapidAdverseCents: 0,
@@ -270,7 +269,6 @@ const MODEL_SETUPS = [
     modelMinTpCents: 7,
     maxOpenPositions: 2,
     modelConfirmCrossCents: 0,
-    modelMaxLossCents: 8,
   },
   {
     id: 'tight',
@@ -283,7 +281,6 @@ const MODEL_SETUPS = [
     modelMinTpCents: 7,
     maxOpenPositions: 1,
     modelConfirmCrossCents: 0,
-    modelMaxLossCents: 8,
     modelDumpPullbackCents: 2,
     modelFastRedCents: 2,
     modelMinEntryCents: 62,
@@ -299,7 +296,6 @@ const MODEL_SETUPS = [
     modelMinTpCents: 7,
     maxOpenPositions: 2,
     modelConfirmCrossCents: 0,
-    modelMaxLossCents: 8,
   },
   {
     id: 'hits',
@@ -312,13 +308,12 @@ const MODEL_SETUPS = [
     modelMinTpCents: 6,
     maxOpenPositions: 3,
     modelConfirmCrossCents: 0,
-    modelMaxLossCents: 8,
     modelFastRedCents: 2,
   },
   {
     id: 'cut6',
-    label: 'Cut losers at 6¢',
-    why: 'Same Core coins/conf, tighter max loss (6¢ vs 8¢) and dump cut. Tests whether scratches stay small enough for the skim to win.',
+    label: 'Faster stagnation (45s)',
+    why: 'Core coins/conf with quicker stagnation exit (45s vs 60s). Losses from mushy thesis, not a −N¢ price cliff.',
     autoTradeSymbols: 'BTC,BNB,SOL',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
@@ -326,7 +321,7 @@ const MODEL_SETUPS = [
     modelMinTpCents: 7,
     maxOpenPositions: 2,
     modelConfirmCrossCents: 0,
-    modelMaxLossCents: 6,
+    modelStagnationSeconds: 45,
     modelDumpPullbackCents: 2,
     modelFastRedCents: 2,
     modelLeanStopBarrierCents: 50,
@@ -342,7 +337,6 @@ const MODEL_SETUPS = [
     modelMinTpCents: 7,
     maxOpenPositions: 2,
     modelConfirmCrossCents: 0,
-    modelMaxLossCents: 8,
     modelDumpPullbackCents: 5,
     modelFastRedCents: 5,
   },
@@ -432,8 +426,6 @@ function modelSetupConfigPatch(setup) {
     modelMinTpCents: setup.modelMinTpCents,
     maxOpenPositions: setup.maxOpenPositions,
     modelConfirmCrossCents: setup.modelConfirmCrossCents,
-    modelMaxLossCents: setup.modelMaxLossCents,
-    modelHardAdverseCents: setup.modelMaxLossCents,
     modelMinEntryCents:
       setup.modelMinEntryCents != null ? setup.modelMinEntryCents : MODEL_MIN_ENTRY_DEFAULT_CENTS,
     modelDumpPullbackCents:
@@ -2459,14 +2451,14 @@ const MODEL_PERFECT_LEAN_DEFAULT = 15;
 const MODEL_MIN_CONFIDENCE_DEFAULT = 55;
 /** Trail off peak — unused by simplified Model exits (kept for config compat). */
 const MODEL_TRAIL_CENTS_DEFAULT = 0;
-/** Soft lean margin — treat 52/48 as turning (bank before the dump). */
-const MODEL_SOFT_LEAN_MARGIN_DEFAULT = 2;
+/** Soft lean margin — 52/48 counts as mushy for stagnation (was 2). */
+const MODEL_SOFT_LEAN_MARGIN_DEFAULT = 3;
 /** Soft dip (−N¢ + lean fade). 0 = off — price stops were hurting more than helping. */
 const MODEL_MAX_ADVERSE_CENTS_DEFAULT = 0;
-/** Hard cliff (−N¢ from entry). Caps gap dumps so 83→60 can't book full pain. */
-const MODEL_HARD_ADVERSE_CENTS_DEFAULT = 8;
-/** Alias / paper fill ceiling: never book more than this many ¢ loss from entry on adverse exits. */
-const MODEL_MAX_LOSS_CENTS_DEFAULT = 8;
+/** Hard cliff (−N¢ from entry). 0 = off — MODEL losses use stagnation + hard floor. */
+const MODEL_HARD_ADVERSE_CENTS_DEFAULT = 0;
+/** Paper fill ceiling on adverse exits. 0 = off (book live bid). */
+const MODEL_MAX_LOSS_CENTS_DEFAULT = 0;
 /**
  * Legacy rich-floor knob (default off). Hard floor 55 applies to all tickets
  * including 78+/80/85. Setting this below the hard floor can optionally allow
@@ -7744,14 +7736,7 @@ class TradingBot {
       // Soft/50-50 no longer instant-cuts — stagnation + hard flip own mushy thesis.
       const peakProgress = modelPeakProgressCents(trade, peak);
 
-      // Price stops — fire even when model still prints "firm" (market can disagree).
-      const maxLossCut = modelEffectiveMaxLossCents(trade, this.config);
-      if (bidOk && againstBeReady && maxLossCut > 0 && trueAdverse >= maxLossCut) {
-        this.lastDecision =
-          `Max loss −${trueAdverse}¢ (cap ${maxLossCut}¢) on ${trade.symbol} — cutting despite firm lean.`;
-        await tryModelAgainstCut('model_max_loss');
-        return;
-      }
+      // Hard floor / pace — cliff safety when bid hits absolute floor (not a −N¢ max-loss cap).
       const leanStop = modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, this.config);
       if (bidOk && leanStop) {
         const floor = modelLeanStopBarrierCents(this.config);

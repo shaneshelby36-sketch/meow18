@@ -8667,8 +8667,8 @@ async function testModelStrategy() {
     });
     checkEq(trade.exitReason, 'model_against', 'gap dump + model against → cut at bid');
     checkEq(trade.exitPriceCents, 60, 'paper against-cut books live bid');
-    checkEq(MODEL_MAX_LOSS_CENTS_DEFAULT, 8, 'default max loss 8¢');
-    checkEq(modelAdverseExitFillCents({ entryPriceCents: 83 }, 60, {}, 'paper'), 75, 'adverse fill helper caps paper');
+    checkEq(MODEL_MAX_LOSS_CENTS_DEFAULT, 0, 'default max loss off');
+    checkEq(modelAdverseExitFillCents({ entryPriceCents: 83 }, 60, {}, 'paper'), 60, 'adverse fill uncapped when max loss off');
   }
 
   // Hard floor 55 for all (incl. 78+/80/85); rich 68 no longer early-stops
