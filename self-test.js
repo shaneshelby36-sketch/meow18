@@ -7776,7 +7776,7 @@ async function testModelStrategy() {
     checkEq(trade.status, 'open', 'fast dump near floor + firm lean → hold');
   }
 
-  // Bid ≤55 + firm lean → hard floor cut (market disagrees with engine)
+  // Bid ≤55 + firm lean → hold (lean-stop / hard-floor cut removed; stagnation owns it)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7810,7 +7810,7 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.status, 'closed', 'bid ≤55 + firm lean → hard floor cut');
+    checkEq(trade.status, 'open', 'bid ≤55 + firm lean holds — no lean-stop');
   }
 
   // BE chase: flat 8s without +3 → scratch

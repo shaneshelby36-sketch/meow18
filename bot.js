@@ -1007,31 +1007,10 @@ function modelLeanStopPaceArmCents(config = {}) {
   return MODEL_LEAN_STOP_PACE_ARM_CENTS_DEFAULT;
 }
 
-function modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, config = {}) {
-  const barrier = modelLeanStopBarrierCents(config);
-  const cur = Number(heldSideBidCents);
-  if (Number.isFinite(cur) && cur <= barrier) return true;
-  const entryBid = Number(trade && trade.modelEntryBidCents);
-  const entry = Number(trade && trade.entryPriceCents);
-  const from = Number.isFinite(entryBid) ? entryBid : entry;
-  if (!Number.isFinite(entry) || !Number.isFinite(cur)) return false;
-
-  // Do not lean-stop in the middle of the ride (78→67). Pace only once the
-  // bid is already near the hard floor (default ≤ floor+8).
-  const arm = modelLeanStopPaceArmCents(config);
-  if (!(cur <= barrier + arm)) return false;
-
-  const adverse = Math.round(entry - cur);
-  const minAdv = modelLeanStopMinAdverseCents(trade, config);
-  if (!(adverse >= minAdv)) return false;
-  return modelOnPaceBelowBarrier({
-    fromBid: from,
-    currentBid: cur,
-    elapsedMs: heldMs,
-    barrierCents: barrier,
-    horizonMs: modelLeanStopPaceHorizonMs(config),
-    minSampleMs: modelLeanStopPaceMinSampleMs(config),
-  });
+function modelShouldLeanStopRed(_trade, _heldSideBidCents, _heldMs, _config = {}) {
+  // Disabled: pace/floor lean-stop was too sensitive. MODEL reds wait for
+  // stagnation (or a hard lean flip). Helpers above stay for sit-out labels.
+  return false;
 }
 
 function modelMinTpCents(config = {}) {
@@ -7894,21 +7873,6 @@ class TradingBot {
 
       // Soft/50-50 no longer instant-cuts — stagnation + hard flip own mushy thesis.
       const peakProgress = modelPeakProgressCents(trade, peak);
-
-      // Hard floor / pace — cliff safety when bid hits absolute floor (not a −N¢ max-loss cap).
-      const leanStop = modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, this.config);
-      if (bidOk && leanStop) {
-        const floor = modelLeanStopBarrierCents(this.config);
-        const atFloor = Number(heldSideBidCents) <= floor;
-        if (atFloor || againstBeReady) {
-          this.lastDecision =
-            atFloor
-              ? `Hard floor ${floor}¢ on ${trade.symbol} at ${heldSideBidCents}¢ — cutting.`
-              : `Lean-stop pace toward floor on ${trade.symbol} — cutting.`;
-          await tryModelAgainstCut('model_lean_stop');
-          return;
-        }
-      }
 
       const rapidAdverse = modelRapidAdverseExitReady({
         trueAdverseCents: trueAdverse,

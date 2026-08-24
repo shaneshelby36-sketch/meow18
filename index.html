@@ -541,21 +541,21 @@
               <input id="bot-model-max-loss" type="range" min="0" max="20" step="1" />
               <span class="slider-value" id="bot-model-max-loss-value">—</span>
             </div>
-            <span class="field-hint"><strong>Off (0)</strong> — MODEL losses exit via stagnation + hard floor, not a −N¢ price cliff.</span>
+            <span class="field-hint"><strong>Off (0)</strong> — MODEL losses exit via stagnation (and hard lean flip), not a −N¢ cliff or lean-stop.</span>
           </label>
           <label>MODEL hard stop floor (¢)
             <div class="slider-row">
               <input id="bot-model-hard-floor" type="range" min="40" max="65" step="1" />
               <span class="slider-value" id="bot-model-hard-floor-value">—</span>
             </div>
-            <span class="field-hint"><strong>Unused</strong> for exits. Entry “min room to floor” still blocks tight buys near 55.</span>
+            <span class="field-hint"><strong>Unused</strong> for exits (lean-stop / hard-floor cut removed). Entry “min room to floor” still blocks tight buys near 55.</span>
           </label>
           <label>MODEL pace lean-stop drawdown (% of room to floor)
             <div class="slider-row">
               <input id="bot-model-pace-drawdown" type="range" min="15" max="60" step="5" />
               <span class="slider-value" id="bot-model-pace-drawdown-value">—</span>
             </div>
-            <span class="field-hint"><strong>Unused</strong> — pace lean-stop removed. Hold while firm; BE when lean turns.</span>
+            <span class="field-hint"><strong>Unused</strong> — pace lean-stop removed. Reds wait for stagnation or a hard lean flip.</span>
           </label>
           <label>MODEL pace sample (sec)
             <div class="slider-row">
