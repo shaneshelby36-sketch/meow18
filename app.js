@@ -2288,7 +2288,6 @@ function wireBotConfigAutoSave() {
     'bot-half-stake-near',
     'bot-second-green',
     'bot-model-invert',
-    'bot-model-against-exit',
     'bot-model-auto-switch',
     'bot-symbol',
     'bot-strategy-mode',
@@ -2420,15 +2419,6 @@ async function loadBotConfigIntoForm() {
     if (modelStagnationSensitivity) {
       modelStagnationSensitivity.value =
         c.modelStagnationMinProgressCents != null ? c.modelStagnationMinProgressCents : 3;
-    }
-    const modelAgainstExit = document.getElementById('bot-model-against-exit');
-    if (modelAgainstExit) {
-      const on =
-        c.modelAgainstExit === true ||
-        c.modelAgainstExit === 1 ||
-        c.modelAgainstExit === 'on' ||
-        c.modelAgainstExit === 'true';
-      modelAgainstExit.value = on ? 'on' : 'off';
     }
     const modelBeChaseSec = document.getElementById('bot-model-be-chase-sec');
     if (modelBeChaseSec) {
@@ -2781,7 +2771,6 @@ async function saveBotConfig(opts = {}) {
     modelStagnationMinProgressCents: parseFloat(
       document.getElementById('bot-model-stagnation-sensitivity')?.value || '3'
     ),
-    modelAgainstExit: document.getElementById('bot-model-against-exit')?.value || 'off',
     modelBeChaseSeconds: parseFloat(document.getElementById('bot-model-be-chase-sec')?.value || '20'),
     modelRapidAdverseCents: parseFloat(document.getElementById('bot-model-rapid-adverse')?.value || '0'),
     modelLeanDecayDropPts: parseFloat(document.getElementById('bot-model-decay-drop')?.value || '14'),
@@ -3232,6 +3221,18 @@ function wireBotUI() {
     loadBotConfigIntoForm();
   });
   document.getElementById('bot-settings-save').addEventListener('click', () => saveBotConfig());
+  document.getElementById('bot-stake-half')?.addEventListener('click', () => {
+    const el = document.getElementById('bot-stake');
+    if (!el) return;
+    el.value = Math.max(1, Math.round(parseFloat(el.value) / 2));
+    el.dispatchEvent(new Event('input'));
+  });
+  document.getElementById('bot-stake-quarter')?.addEventListener('click', () => {
+    const el = document.getElementById('bot-stake');
+    if (!el) return;
+    el.value = Math.max(1, Math.round(parseFloat(el.value) / 4));
+    el.dispatchEvent(new Event('input'));
+  });
   const settleWindowApplyEdge = document.getElementById('settle-window-apply-edge');
   if (settleWindowApplyEdge) {
     settleWindowApplyEdge.addEventListener('click', () => applySettleWindowRec('edge'));

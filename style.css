@@ -1333,6 +1333,16 @@ body[data-view-mode="bot"] .asset-picker {
 
 /* ---------- Sliders (bot settings) ---------- */
 
+.stake-quick-btns {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.stake-quick-btns .btn-secondary {
+  flex: 1;
+  font-size: 0.82rem;
+  padding: 4px 0;
+}
 .slider-row {
   display: flex;
   align-items: center;
