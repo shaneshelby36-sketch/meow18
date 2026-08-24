@@ -406,12 +406,10 @@ class KalshiClient {
     await bucket.take(cost);
   }
 
-  /** Prefer signed market GETs when keyed — they use the paced account read bucket. */
+  /** Use signed market GETs when credentials are available — account read bucket
+   *  (170 req/s at basic tier) does not share the public IP pool that 429s. */
   _preferMarketAuth() {
-    // Market lists/tickers are public. Keep them unauthenticated so we don't burn
-    // the account read bucket (or depend on signed responses that omit quotes).
-    // Auth + token budget still apply to portfolio / order writes.
-    return false;
+    return this.hasCredentials;
   }
 
   getCachedMarket(ticker, maxAgeMs = Infinity) {
@@ -549,6 +547,7 @@ class KalshiClient {
   }
 
   publicRateLimitRemainingMs() {
+    if (this._preferMarketAuth()) return 0; // auth uses account bucket — not public IP limited
     this._maybeDecay429Streak();
     const rem = Number(this._cooldownUntil) - Date.now();
     if (rem > 0) return rem;
@@ -562,13 +561,16 @@ class KalshiClient {
   }
 
   async _withPublicGate(fn) {
+    const useAuth = this._preferMarketAuth();
     const run = this._publicGate.then(async () => {
-      const cooldownWait = Math.max(0, this._cooldownUntil - Date.now());
-      const spacingMs = this._preferMarketAuth() ? 0 : UNAUTH_PUBLIC_SPACING_MS;
-      const spacingWait = Math.max(0, this._lastPublicAt + spacingMs - Date.now());
-      const wait = Math.max(cooldownWait, spacingWait);
-      if (wait > 0) await sleep(wait);
-      this._lastPublicAt = Date.now();
+      // Authenticated requests use the account token bucket — skip public IP cooldown/spacing.
+      if (!useAuth) {
+        const cooldownWait = Math.max(0, this._cooldownUntil - Date.now());
+        const spacingWait = Math.max(0, this._lastPublicAt + UNAUTH_PUBLIC_SPACING_MS - Date.now());
+        const wait = Math.max(cooldownWait, spacingWait);
+        if (wait > 0) await sleep(wait);
+        this._lastPublicAt = Date.now();
+      }
       return fn();
     });
     this._publicGate = run.then(
@@ -609,7 +611,9 @@ class KalshiClient {
     const cacheKey = String(seriesTicker || '');
     const now = Date.now();
     const cached = this._openMarketsCache.get(cacheKey);
-    const limited = now < this._cooldownUntil;
+    // Public-IP 429 cooldown only applies to unauthenticated requests.
+    const useAuth = this._preferMarketAuth();
+    const limited = !useAuth && now < this._cooldownUntil;
     // Empty lists go stale fast — a real rollover must not look "rolling over" for 12s+.
     // During 429 cooldown, serve a non-empty list up to 60s so entries don't freeze on BTC.
     if (cached) {
@@ -629,7 +633,7 @@ class KalshiClient {
 
     const work = this._withPublicGate(async () => {
       try {
-        if (Date.now() < this._cooldownUntil) {
+        if (!useAuth && Date.now() < this._cooldownUntil) {
           const again = this._openMarketsCache.get(cacheKey);
           return again ? again.markets : [];
         }
