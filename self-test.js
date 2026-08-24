@@ -3640,8 +3640,8 @@ async function testBotTradingFlow() {
     });
     checkEq(
       modelStakeBot._stakeDollarsForEntry(69, { model: true }),
-      5,
-      'model half stake under 70'
+      10,
+      'model full stake under 70 (half-stake off)'
     );
     checkEq(
       modelStakeBot._stakeDollarsForEntry(70, { model: true }),
@@ -3651,7 +3651,7 @@ async function testBotTradingFlow() {
     checkEq(
       modelStakeBot._stakeDollarsForEntry(85, { model: true }),
       10,
-      'model full stake above 70 even if saved slider said otherwise'
+      'model full stake above 70'
     );
     checkEq(
       modelStakeBot._stakeDollarsForEntry(80, { model: true }),
@@ -3660,8 +3660,8 @@ async function testBotTradingFlow() {
     );
     checkEq(
       modelStakeBot._stakeDollarsForEntry(50, { model: true, symbol: 'NEAR' }),
-      5,
-      'model under 70 is half only — not NEAR/quarter extra'
+      10,
+      'model under 70 full stake — not NEAR/quarter extra'
     );
   }
 
@@ -5942,7 +5942,7 @@ async function testModelStrategy() {
   check(!modelDirectionAgainstHeld('UP', 'yes'), 'UP not against YES');
   check(isModelStrategyMode({ strategyMode: 'model' }), 'model mode helper');
   check(isModelTrade({ strategy: 'model' }), 'model trade helper');
-  checkEq(MODEL_MAX_ENTRY_DEFAULT_CENTS, 93, 'model max entry default 93¢');
+  checkEq(MODEL_MAX_ENTRY_DEFAULT_CENTS, 88, 'model max entry default 88¢');
   checkEq(MODEL_MIN_ENTRY_DEFAULT_CENTS, 65, 'model min entry default 65¢');
   checkEq(MODEL_KALSHI_FAVORITE_CENTS_DEFAULT, 75, 'Kalshi favorite floor 75¢');
   {
@@ -6118,44 +6118,44 @@ async function testModelStrategy() {
   checkEq(MODEL_HARD_ADVERSE_CENTS_DEFAULT, 8, 'hard max-loss cliff 8¢');
   checkEq(MODEL_BANK_GREEN_CENTS_DEFAULT, 11, 'bank / momentum arm at ≥11¢ green');
   checkEq(MODEL_MIN_TP_CENTS_DEFAULT, 11, 'min TP 11¢ — no micro banks');
-  checkEq(MODEL_STAGNATION_SECONDS_DEFAULT, 40, 'stagnation check default 40s');
-  checkEq(MODEL_RAPID_ADVERSE_CENTS_DEFAULT, 6, 'rapid adverse default −6¢');
+  checkEq(MODEL_STAGNATION_SECONDS_DEFAULT, 60, 'stagnation check default 60s');
+  checkEq(MODEL_RAPID_ADVERSE_CENTS_DEFAULT, 0, 'rapid adverse off by default');
   {
     check(
       modelStagnationExitReady({
-        heldMs: 45_000,
+        heldMs: 65_000,
         peakProgressCents: 0,
         modelDeteriorating: true,
         config: {},
       }).ready,
-      '40s + 0 peak + decaying → stagnation cut'
+      '60s + 0 peak + decaying → stagnation cut'
     );
     check(
       !modelStagnationExitReady({
-        heldMs: 45_000,
+        heldMs: 65_000,
         peakProgressCents: 0,
         modelDeteriorating: false,
         config: {},
       }).ready,
-      '40s + 0 peak but firm model → hold'
+      '60s + 0 peak but firm model → hold'
     );
     check(
       modelStagnationExitReady({
-        heldMs: 45_000,
+        heldMs: 65_000,
         peakProgressCents: 2,
         modelDeteriorating: true,
         config: {},
       }).ready,
-      '40s + peaked +2¢ (under +3 trail) + decaying → stagnation cut'
+      '60s + peaked +2¢ (under +3 trail) + decaying → stagnation cut'
     );
     check(
       !modelStagnationExitReady({
-        heldMs: 45_000,
+        heldMs: 65_000,
         peakProgressCents: 3,
         modelDeteriorating: true,
         config: {},
       }).ready,
-      '40s + peaked +3¢ → not stagnant'
+      '60s + peaked +3¢ → not stagnant'
     );
     check(
       !modelStagnationExitReady({
@@ -6211,7 +6211,7 @@ async function testModelStrategy() {
     true,
     'rich 96¢ always allowed'
   );
-  checkEq(MODEL_MOMENTUM_STALL_MS_DEFAULT, 8_000, 'stall flat ~8s');
+  checkEq(MODEL_MOMENTUM_STALL_MS_DEFAULT, 4_000, 'stall flat ~4s');
   checkEq(MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT, 2, 'stall pullback 2¢');
   checkEq(MODEL_MIN_MINUTES_TO_OPEN_DEFAULT, 0, 'model late entry cutoff off');
 
@@ -6540,8 +6540,8 @@ async function testModelStrategy() {
       },
     };
     const rich = await bot._evaluateSymbolForModel('ETH', preds);
-    checkEq(rich, null, 'blocks model entry above 93¢');
-    check(/max entry 93/i.test(bot.lastDecision || ''), 'decision cites model max entry');
+    checkEq(rich, null, 'blocks model entry above 88¢');
+    check(/max entry 88/i.test(bot.lastDecision || ''), 'decision cites model max entry');
   }
 
   // Never enter below 60¢ (default floor)
@@ -6997,7 +6997,7 @@ async function testModelStrategy() {
     checkEq(trade.status, 'open', 'firm lean ignores legacy hard-cliff config');
   }
 
-  // Soft lean (50/50) while flat → preemptive BE (don't wait for clear against / dump)
+  // Soft lean (50/50) while flat → hold for stagnation (soft BE off)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7007,7 +7007,7 @@ async function testModelStrategy() {
         yes_bid: 55,
         no_bid: 45,
       }),
-      { strategyMode: 'model', modelMinHoldSeconds: 0, modelMinConfidence: 55 }
+      { strategyMode: 'model', modelMinHoldSeconds: 0, modelMinConfidence: 55, modelStagnationSeconds: 60, modelRapidAdverseCents: 0 }
     );
     const trade = openTrade(bot, {
       strategy: 'model',
@@ -7029,10 +7029,10 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, soft);
-    checkEq(trade.exitReason, 'breakeven', '50/50 soft lean banks preemptive (flat BE)');
+    checkEq(trade.status, 'open', '50/50 soft lean flat holds (soft BE off — stagnation owns it)');
   }
 
-  // 50/50 + spread-flat (bid below ask entry) — scratch without waiting min-hold
+  // 50/50 + spread-flat → hold (soft BE off); stagnation still uses mush lean as decaying
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7048,6 +7048,8 @@ async function testModelStrategy() {
         modelMinConfidence: 55,
         modelOpenGraceSeconds: 8,
         modelLeanAgainstBeSeconds: 5,
+        modelStagnationSeconds: 60,
+        modelRapidAdverseCents: 0,
       }
     );
     const trade = openTrade(bot, {
@@ -7074,8 +7076,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, soft);
-    checkEq(trade.exitReason, 'breakeven', '50/50 spread-flat scratches without min-hold');
-    checkEq(trade.exitPriceCents, 53, 'paper BE books spread-flat bid');
+    checkEq(trade.status, 'open', '50/50 spread-flat holds (soft BE off)');
   }
 
   // After model BE: same-cycle reopen allowed (scalp recycle). Sit-out is the ~30s cooldown.
@@ -7368,7 +7369,7 @@ async function testModelStrategy() {
     checkEq(trade.status, 'open', 'fade does not lean-stop while lock is still UP');
   }
 
-  // Underwater + weak confidence → model cuts before loss
+  // Underwater + weak confidence → hold (conf wick alone is not hard against)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -7378,7 +7379,7 @@ async function testModelStrategy() {
         yes_bid: 52,
         no_bid: 48,
       }),
-      { strategyMode: 'model', modelMinConfidence: 70, modelMinHoldSeconds: 0, modelMaxAdverseCents: 8 }
+      { strategyMode: 'model', modelMinConfidence: 70, modelMinHoldSeconds: 0, modelMaxAdverseCents: 8, modelStagnationSeconds: 0, modelRapidAdverseCents: 0 }
     );
     const trade = openTrade(bot, {
       strategy: 'model',
@@ -7388,6 +7389,8 @@ async function testModelStrategy() {
       openedAt: now - 5_000,
       peakHeldBidCents: 55,
       modelEntryHeldProb: 58,
+      modelEntryBidCents: 55,
+      modelEntrySpreadCents: 0,
     });
     const weakRed = {
       ETH: {
@@ -7401,7 +7404,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, weakRed);
-    checkEq(trade.exitReason, 'model_against', 'weak confidence while red → cut at bid');
+    checkEq(trade.status, 'open', 'weak confidence while shallow red → hold (not MODEL_AGAINST)');
   }
 
   // Red + firm model still with us (high conf) → brief bounce window
@@ -8050,7 +8053,7 @@ async function testModelStrategy() {
     check(trade.exitReason === 'model_against', 'red + lean against → cut at bid (not firm hold)');
   }
 
-  // Soft 49/50 lean + red → cut without waiting for hard flip
+  // Soft 49/50 lean + red → hold (soft MODEL_AGAINST off; stagnation owns mush)
   {
     const now = Date.now();
     const bot = makeBot(
@@ -8066,6 +8069,9 @@ async function testModelStrategy() {
         modelMinHoldSeconds: 30,
         modelOpenGraceSeconds: 0,
         modelLeanAgainstBeSeconds: 0,
+        modelMaxLossCents: 8,
+        modelStagnationSeconds: 60,
+        modelRapidAdverseCents: 0,
       }
     );
     const trade = openTrade(bot, {
@@ -8075,6 +8081,58 @@ async function testModelStrategy() {
       windowCloseTime: now + 12 * 60 * 1000,
       openedAt: now - 15_000,
       modelEntryHeldProb: 55,
+      modelEntryBidCents: 55,
+      modelEntrySpreadCents: 0,
+    });
+    const softLean = {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: {
+            ...win(50, 70),
+            probabilityUp: 49,
+            probabilityDown: 50,
+            tracking: { predictedDirection: 'UP' },
+          },
+          w10: { ...win(50, 70), probabilityUp: 49, probabilityDown: 50 },
+          w15: { ...win(50, 70), probabilityUp: 49, probabilityDown: 50 },
+        },
+      },
+    };
+    await bot._manageOpenTrade(trade, softLean);
+    checkEq(trade.status, 'open', 'soft/50-50 + −3¢ holds (soft against off)');
+  }
+
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 47,
+        no_bid: 53,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinConfidence: 55,
+        modelMinHoldSeconds: 30,
+        modelOpenGraceSeconds: 0,
+        modelLeanAgainstBeSeconds: 0,
+        modelMaxLossCents: 8,
+        modelStagnationSeconds: 60,
+        modelRapidAdverseCents: 0,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 15_000,
+      modelEntryHeldProb: 55,
+      modelEntryBidCents: 55,
+      modelEntrySpreadCents: 0,
     });
     await bot._manageOpenTrade(trade, {
       ETH: {
@@ -8092,7 +8150,59 @@ async function testModelStrategy() {
         },
       },
     });
-    checkEq(trade.exitReason, 'model_against', 'soft/50-50 lean + red → cut (not hold for hard flip)');
+    checkEq(trade.status, 'open', 'soft/50-50 + −8¢ holds (soft against off — not max-loss soft cut)');
+  }
+
+  // Regression: 74→69 soft lean must not MODEL_AGAINST (user ETH YES case)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 69,
+        no_bid: 31,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinConfidence: 55,
+        modelMinHoldSeconds: 0,
+        modelOpenGraceSeconds: 0,
+        modelLeanAgainstBeSeconds: 0,
+        modelMaxLossCents: 8,
+        modelStagnationSeconds: 0,
+        modelRapidAdverseCents: 0,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 74,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 20_000,
+      modelEntryHeldProb: 65,
+      modelEntryBidCents: 72,
+      modelEntrySpreadCents: 2,
+      peakHeldBidCents: 74,
+      engineConfidence: 65,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: {
+            ...win(50, 55),
+            probabilityUp: 50,
+            probabilityDown: 50,
+            tracking: { predictedDirection: 'UP' },
+          },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    });
+    checkEq(trade.status, 'open', '74→69 soft lean holds (not MODEL_AGAINST)');
   }
 
   // Rapid adverse −6¢ + model against → cut (cliff protection)
@@ -8697,7 +8807,7 @@ async function testModelStrategy() {
       },
     };
     await bot._manageOpenTrade(trade, weak);
-    checkEq(trade.exitReason, 'breakeven', 'weak confidence while flat → breakeven');
+    checkEq(trade.status, 'open', 'weak confidence while flat → hold (soft BE off)');
   }
 
   // Dump + lean still with us: small red holds under fast-red threshold
@@ -8826,7 +8936,7 @@ async function testModelStrategy() {
       side: 'yes',
       entryPriceCents: 55,
       windowCloseTime: now + 8 * 60 * 1000,
-      openedAt: now - 5_000,
+      openedAt: now - 15_000,
     });
     const mid = {
       ETH: {

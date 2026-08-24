@@ -2336,7 +2336,7 @@ async function loadBotConfigIntoForm() {
       modelShadowBooks.value = on ? 'on' : 'off';
     }
     const modelConf = document.getElementById('bot-model-confidence');
-    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 41;
+    if (modelConf) modelConf.value = c.modelMinConfidence != null ? c.modelMinConfidence : 55;
     const modelLiveFavor = document.getElementById('bot-model-live-favor');
     if (modelLiveFavor) {
       modelLiveFavor.value =
@@ -2378,23 +2378,23 @@ async function loadBotConfigIntoForm() {
         c.modelLowAskMinConfidence != null ? c.modelLowAskMinConfidence : 0;
     }
     const modelMaxEntry = document.getElementById('bot-model-max-entry');
-    if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 93;
+    if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 88;
     const modelBankGreen = document.getElementById('bot-model-bank-green');
     if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 11;
     const modelStallSec = document.getElementById('bot-model-stall-sec');
     if (modelStallSec) {
       modelStallSec.value =
-        c.modelMomentumStallSeconds != null ? c.modelMomentumStallSeconds : 8;
+        c.modelMomentumStallSeconds != null ? c.modelMomentumStallSeconds : 4;
     }
     const modelStagnationSec = document.getElementById('bot-model-stagnation-sec');
     if (modelStagnationSec) {
       modelStagnationSec.value =
-        c.modelStagnationSeconds != null ? c.modelStagnationSeconds : 40;
+        c.modelStagnationSeconds != null ? c.modelStagnationSeconds : 60;
     }
     const modelRapidAdverse = document.getElementById('bot-model-rapid-adverse');
     if (modelRapidAdverse) {
       modelRapidAdverse.value =
-        c.modelRapidAdverseCents != null ? c.modelRapidAdverseCents : 6;
+        c.modelRapidAdverseCents != null ? c.modelRapidAdverseCents : 0;
     }
     const modelSettleClose = document.getElementById('bot-model-settle-close');
     if (modelSettleClose) {
@@ -2689,7 +2689,7 @@ async function saveBotConfig(opts = {}) {
     modelInvertSide: document.getElementById('bot-model-invert')?.value || 'off',
     modelAutoSwitchSetup: document.getElementById('bot-model-auto-switch')?.value || 'off',
     modelShadowBooks: document.getElementById('bot-model-shadow-books')?.value || 'off',
-    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '41'),
+    modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '55'),
     modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '2'),
     modelMinEntryLeanPct: parseFloat(document.getElementById('bot-model-min-entry-lean')?.value || '65'),
     modelSignalDominanceMin: (() => {
@@ -2706,14 +2706,14 @@ async function saveBotConfig(opts = {}) {
       document.getElementById('bot-model-min-room-floor')?.value || '10'
     ),
     modelLowAskMinConfidence: parseFloat(document.getElementById('bot-model-low-ask-conf')?.value || '0'),
-    modelMaxEntryCents: parseFloat(document.getElementById('bot-model-max-entry')?.value || '93'),
+    modelMaxEntryCents: parseFloat(document.getElementById('bot-model-max-entry')?.value || '88'),
     modelLowPriceMaxCents: 70,
     modelLowPriceStakeQuarters: 2,
     modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '11'),
     modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '11'),
-    modelMomentumStallSeconds: parseFloat(document.getElementById('bot-model-stall-sec')?.value || '8'),
-    modelStagnationSeconds: parseFloat(document.getElementById('bot-model-stagnation-sec')?.value || '40'),
-    modelRapidAdverseCents: parseFloat(document.getElementById('bot-model-rapid-adverse')?.value || '6'),
+    modelMomentumStallSeconds: parseFloat(document.getElementById('bot-model-stall-sec')?.value || '4'),
+    modelStagnationSeconds: parseFloat(document.getElementById('bot-model-stagnation-sec')?.value || '60'),
+    modelRapidAdverseCents: parseFloat(document.getElementById('bot-model-rapid-adverse')?.value || '0'),
     modelSettleCloseMinutes: parseFloat(document.getElementById('bot-model-settle-close')?.value || '2.5'),
     modelLateBarrierMinutes: parseFloat(document.getElementById('bot-model-late-barrier')?.value || '2'),
     modelPreCloseForceMinutes: parseFloat(

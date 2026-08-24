@@ -37,7 +37,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 79;
+const SETTINGS_DEFAULTS_VERSION = 83;
 
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
@@ -237,16 +237,20 @@ const MODEL_SETUPS = [
     id: 'core',
     recommended: true,
     label: 'Core BTC / ETH',
-    why: 'BTC + ETH, one slot, bank at +11¢. Low-ask near-certain gate off.',
+    why: 'BTC + ETH, one slot, max 88¢, conf 55%, stall 4s, stagnation 60s.',
     autoTradeSymbols: 'BTC,ETH',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
     modelBankGreenCents: 11,
     modelMinTpCents: 11,
+    modelMaxEntryCents: 88,
     maxOpenPositions: 1,
     modelLowAskMinConfidence: 0,
     modelConfirmCrossCents: 0,
     modelMaxLossCents: 8,
+    modelMomentumStallSeconds: 4,
+    modelStagnationSeconds: 60,
+    modelRapidAdverseCents: 0,
   },
   {
     id: 'btc-sol',
@@ -411,7 +415,7 @@ function modelSetupById(id) {
 
 function modelSetupConfigPatch(setup) {
   if (!setup) return {};
-  return {
+  const patch = {
     symbol: 'AUTO',
     strategyMode: 'model',
     autoTradeSymbols: setup.autoTradeSymbols,
@@ -435,6 +439,20 @@ function modelSetupConfigPatch(setup) {
         : MODEL_LEAN_STOP_BARRIER_CENTS_DEFAULT,
     activeSetupId: setup.id,
   };
+  if (setup.modelMaxEntryCents != null) patch.modelMaxEntryCents = setup.modelMaxEntryCents;
+  if (setup.modelLowAskMinConfidence != null) {
+    patch.modelLowAskMinConfidence = setup.modelLowAskMinConfidence;
+  }
+  if (setup.modelMomentumStallSeconds != null) {
+    patch.modelMomentumStallSeconds = setup.modelMomentumStallSeconds;
+  }
+  if (setup.modelStagnationSeconds != null) {
+    patch.modelStagnationSeconds = setup.modelStagnationSeconds;
+  }
+  if (setup.modelRapidAdverseCents != null) {
+    patch.modelRapidAdverseCents = setup.modelRapidAdverseCents;
+  }
+  return patch;
 }
 
 // Rough Kalshi 15m crypto liquidity preference (higher = usually tighter books).
@@ -603,17 +621,23 @@ function pickModelWindowKey(minutesRemaining) {
   return 'w15';
 }
 
-/** Live probability lean first; frozen tracking lock only breaks ties. */
+/** Live probability lean first; frozen tracking lock only breaks ties / mush. */
 function modelWindowDirection(window) {
   if (!window) return null;
   const up = Number(window.probabilityUp);
   const down = Number(window.probabilityDown);
   if (Number.isFinite(up) && Number.isFinite(down)) {
-    if (up > down) return 'UP';
-    if (down > up) return 'DOWN';
+    // Need a clear live lead — 49/50 mush must not flip direction and knife reds.
+    const margin = MODEL_SOFT_LEAN_MARGIN_DEFAULT;
+    if (up >= down + margin) return 'UP';
+    if (down >= up + margin) return 'DOWN';
   }
   const locked = window.tracking && window.tracking.predictedDirection;
   if (locked === 'UP' || locked === 'DOWN') return locked;
+  if (Number.isFinite(up) && Number.isFinite(down)) {
+    if (up > down) return 'UP';
+    if (down > up) return 'DOWN';
+  }
   if (Number.isFinite(up)) return up >= 50 ? 'UP' : 'DOWN';
   return null;
 }
@@ -739,14 +763,14 @@ const MODEL_LEAN_STOP_PACE_ARM_CENTS_DEFAULT = 8;
  * exit only if the model is also deteriorating (time is context, not a timer cut).
  * 0 = off.
  */
-const MODEL_STAGNATION_SECONDS_DEFAULT = 40;
+const MODEL_STAGNATION_SECONDS_DEFAULT = 60;
 /** Peak must reach at least this many ¢ above entry to count as progress (matches trail arm). */
 const MODEL_STAGNATION_MIN_PROGRESS_CENTS_DEFAULT = 3;
 /**
  * Rapid adverse: true ¢ below entry (beyond spread haircut) at/above this + model
  * against → cut immediately (after open grace). Caps cliffs like 81→20. 0 = off.
  */
-const MODEL_RAPID_ADVERSE_CENTS_DEFAULT = 6;
+const MODEL_RAPID_ADVERSE_CENTS_DEFAULT = 0;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /**
@@ -764,13 +788,13 @@ const MODEL_PRE_CLOSE_FORCE_MINUTES_DEFAULT = 1;
 /** Confidence required to extend a hold into/through the final barrier. */
 const MODEL_LATE_EXTEND_MIN_CONFIDENCE_DEFAULT = 78;
 /** After trail is armed, TP if bid sits at peak this long without a new high (ms). */
-const MODEL_MOMENTUM_STALL_MS_DEFAULT = 8_000;
+const MODEL_MOMENTUM_STALL_MS_DEFAULT = 4_000;
 /** After trail arm, TP if bid pulls back this many ¢ from peak. */
 const MODEL_MOMENTUM_PULLBACK_CENTS_DEFAULT = 2;
-/** Model entries below this ask always use half stake. Hard cutoff — not a slider. */
-const MODEL_HALF_STAKE_UNDER_CENTS = 70;
-/** Kept for saved configs / UI remnants; sizing ignores this and always uses ½ under 70¢. */
-const MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT = MODEL_HALF_STAKE_UNDER_CENTS;
+/** Model entries below this ask use half stake. 0 = off (full stake at all asks). */
+const MODEL_HALF_STAKE_UNDER_CENTS = 0;
+/** Kept for saved configs / UI remnants; sizing uses MODEL_HALF_STAKE_UNDER_CENTS. */
+const MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT = 70;
 const MODEL_LOW_PRICE_STAKE_QUARTERS_DEFAULT = 2;
 /**
  * Confirmation gate: must observe ask below this, then cross it, before entry
@@ -1150,15 +1174,19 @@ function modelMaxEntrySpreadCentsForSymbol(symbol, config = {}) {
 }
 
 function modelLowPriceMaxCents(_config = {}) {
-  return MODEL_HALF_STAKE_UNDER_CENTS;
+  // When half-stake is off (0), keep a display remnant of 70 for old UI copy.
+  return MODEL_HALF_STAKE_UNDER_CENTS > 0
+    ? MODEL_HALF_STAKE_UNDER_CENTS
+    : MODEL_UNCERTAIN_MAX_PRICE_CENTS_DEFAULT;
 }
 
 function modelIsHalfStakeAsk(priceCents) {
+  if (!(MODEL_HALF_STAKE_UNDER_CENTS > 0)) return false;
   const p = Number(priceCents);
   return Number.isFinite(p) && p < MODEL_HALF_STAKE_UNDER_CENTS;
 }
 
-/** Under-70¢ is always half stake. Quarters slider is ignored. */
+/** Half-stake under-N¢ is off when threshold is 0. */
 function modelLowPriceStakeQuarters(_config = {}) {
   return 2;
 }
@@ -1653,21 +1681,26 @@ function modelEngineTurningAgainst({
 }
 
 /**
- * Exit-only: real lean flip (not 50/50 tie or 3pt prob wick). Used to BE/cut reds.
+ * Exit-only: real lean flip (not 50/50 tie, conf wick, signalScore noise, or 1pt lean).
+ * Live lean needs a clear lead against us (≥5pts). Soft/50-50 + max-loss depth
+ * still cuts via the soft-red path; signalScore stays in soft-turning only.
  */
+const MODEL_HARD_LEAN_AGAINST_MARGIN_DEFAULT = 5;
+
 function modelEngineHardAgainst({
   window,
   direction,
   side,
-  minConf,
+  minConf: _minConf,
   config = {},
 } = {}) {
   if (!window || !side) return false;
   if (direction && modelDirectionAgainstHeld(direction, side)) return true;
-  if (modelLiveLeanAgainstHeld(window, side, modelLiveLeanMarginPct(config))) return true;
-  if (modelSignalTurningAgainst(window, side, config)) return true;
-  const conf = Number(window.confidence);
-  if (Number.isFinite(minConf) && Number.isFinite(conf) && conf < minConf) return true;
+  const hardMargin = Math.max(
+    MODEL_HARD_LEAN_AGAINST_MARGIN_DEFAULT,
+    modelLiveLeanMarginPct(config)
+  );
+  if (modelLiveLeanAgainstHeld(window, side, hardMargin)) return true;
   return false;
 }
 
@@ -2290,7 +2323,7 @@ const STRATEGY_RETRO_MID_CEILING_MINUTES = 8.5;
 /** Edge: never buy above this ask (¢). */
 const EDGE_MAX_ENTRY_DEFAULT_CENTS = 95;
 /** Model: never buy richer than this (leaves a little room to 100). */
-const MODEL_MAX_ENTRY_DEFAULT_CENTS = 93;
+const MODEL_MAX_ENTRY_DEFAULT_CENTS = 88;
 /** Model: never buy cheaper than this (normal floor). 65¢ OK only with low-ask conviction. */
 const MODEL_MIN_ENTRY_DEFAULT_CENTS = 65;
 /** Absolute floor even when the call is “perfect.” */
@@ -2370,7 +2403,7 @@ const MODEL_PERFECT_CONFIDENCE_DEFAULT = 80;
 /** Lean strength (|probUp−50|) required for perfect-entry exception. */
 const MODEL_PERFECT_LEAN_DEFAULT = 15;
 /** Model confidence floor default. */
-const MODEL_MIN_CONFIDENCE_DEFAULT = 41;
+const MODEL_MIN_CONFIDENCE_DEFAULT = 55;
 /** Trail off peak — unused by simplified Model exits (kept for config compat). */
 const MODEL_TRAIL_CENTS_DEFAULT = 0;
 /** Soft lean margin — treat 52/48 as turning (bank before the dump). */
@@ -3970,7 +4003,7 @@ class TradingBot {
       edgePreCloseMinutes: EDGE_PRE_CLOSE_MINUTES_DEFAULT,
       edgeBreakevenAfterMinutes: EDGE_BREAKEVEN_AFTER_MINUTES_DEFAULT,
       minMinutesToOpen: 3, // don't open when fewer than this many minutes remain in the window
-      // Model tab: window schedule + locked lean; confidence floor; max entry 93¢.
+      // Model tab: window schedule + locked lean; confidence floor; max entry 88¢.
       modelMinConfidence: MODEL_MIN_CONFIDENCE_DEFAULT,
       modelMaxEntryCents: MODEL_MAX_ENTRY_DEFAULT_CENTS,
       modelMinEntryCents: MODEL_MIN_ENTRY_DEFAULT_CENTS,
@@ -5367,7 +5400,7 @@ class TradingBot {
 
   /**
    * Stake for this entry.
-   * Model: ask under 70¢ → ½ stake. Hard cutoff — not confidence, rich-ask, or sliders.
+   * Model: optional half stake under MODEL_HALF_STAKE_UNDER_CENTS (0 = off).
    * Settle:
    * - Ask &lt; 80¢: ¼ normal (all coins)
    * - Else NEAR: ½ normal when halfStakeNear is on
@@ -7497,11 +7530,7 @@ class TradingBot {
           (engineSoftTurning && leanStaleScratch)
         );
 
-      // Soft/50-50 + red: need real adverse beyond haircut (not −1¢ noise).
-      const softRedMinAdverse = 3;
-      const softRedDeepEnough = trueAdverse >= softRedMinAdverse;
-
-      // Rapid dump + thesis rotting — cut before 81→20 cliffs (time not required).
+      // Soft/50-50 no longer instant-cuts — stagnation + hard flip own mushy thesis.
       const peakProgress = modelPeakProgressCents(trade, peak);
       const rapidAdverse = modelRapidAdverseExitReady({
         trueAdverseCents: trueAdverse,
@@ -7576,24 +7605,8 @@ class TradingBot {
         if (await exitModelAgainst()) return;
       }
 
-      // Soft/50-50 lean + red: cut at bid (don't wait for hard flip or min-hold).
-      // Require ≥3¢ true adverse so ask→bid haircut / −1¢ wicks don't fake MODEL_AGAINST.
-      if (
-        bidOk &&
-        leanStaleScratch &&
-        softRedDeepEnough &&
-        (underwater || econUnderwater) &&
-        againstBeReady
-      ) {
-        await tryModelAgainstCut();
-        return;
-      }
-
-      // 50/50 / soft lean + econ-flat: scratch BE after open grace (skip min-hold).
-      if (bidOk && leanStaleScratch && scratchFlat && againstBeReady) {
-        await tryModelBreakevenScratch();
-        return;
-      }
+      // Soft/50-50 lean no longer instant-BE or MODEL_AGAINST — stagnation owns mushy thesis.
+      // (leanStaleScratch still feeds modelDeteriorating for the stagnation check above.)
 
       // Bid-led dump: only act when hard lean against (firm holds ignore price slides).
       const dumpPullback = modelDumpPullbackCents(this.config);
@@ -7604,9 +7617,6 @@ class TradingBot {
           await this._closePosition(trade, heldSideBidCents, 'take_profit', {
             liveSellPriceCents: heldSideBidCents,
           });
-          return;
-        } else if (scratchFlat && (heldLongEnough || leanStaleScratch)) {
-          await tryModelBreakevenScratch();
           return;
         }
       }
@@ -7713,15 +7723,12 @@ class TradingBot {
         return;
       }
 
-      // Weak-conf lean-exit leftover: only real bankable green (never micro TP).
+      // Weak-conf lean-exit leftover: only real bankable green (never micro TP / soft BE).
+      // Soft mush + flat → hold for stagnation, not instant breakeven.
       if (bidOk && leanExit && heldLongEnough && isBankableGreen && heldForBank) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
         });
-        return;
-      }
-      if (bidOk && leanExit && scratchFlat && (heldLongEnough || leanStaleScratch)) {
-        await tryModelBreakevenScratch();
         return;
       }
 
@@ -7764,18 +7771,14 @@ class TradingBot {
         why = `hard lean against (${leanTxt}) — BE/cut after open grace + ${Math.round(againstBeDelay / 1000)}s`;
       else if (!why && underwater && modelFirm)
         why = `model still firm (${leanTxt}) — holding (no price stop)`;
-      else if (!why && underwater && leanStaleScratch && !againstBeReady)
-        why = `soft/50-50 lean (${leanTxt}) + red — cut after open grace + ${Math.round(againstBeDelay / 1000)}s`;
-      else if (!why && underwater && leanStaleScratch && againstBeReady)
-        why = `soft/50-50 lean (${leanTxt}) + red — cut armed`;
-      else if (!why && leanStaleScratch && scratchFlat && !againstBeReady)
-        why = `50/50/soft lean (${leanTxt}) — BE scratch after open grace + ${Math.round(againstBeDelay / 1000)}s`;
-      else if (!why && leanStaleScratch && scratchFlat && againstBeReady)
-        why = `50/50/soft lean (${leanTxt}) — BE scratch armed (near flat)`;
+      else if (!why && underwater && leanStaleScratch)
+        why = `soft/50-50 lean (${leanTxt}) + red — hold for stagnation / hard flip (no soft cut)`;
+      else if (!why && leanStaleScratch && scratchFlat)
+        why = `50/50/soft lean (${leanTxt}) — hold for stagnation (soft BE off)`;
       else if (!why && (inSettleClose || inLateBarrier))
         why = `nearing settle (${minutesRemaining.toFixed(1)}m left) — cash-out armed`;
       else if (!why && !armed && flatOrGreen && !liveFavors)
-        why = `lean soft — exit armed (${leanTxt})`;
+        why = `lean soft — waiting stagnation (${leanTxt})`;
       else if (!why && !armed && flatOrGreen) why = `green but under trail arm (need +${armCents}¢)`;
       else if (!why) why = `holding — model firm (${leanTxt})`;
       const holdMsg = `Holding ${trade.symbol} ${String(trade.side || '').toUpperCase()} ${pxTxt} — ${why}.`;

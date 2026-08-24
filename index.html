@@ -373,7 +373,7 @@
         </div>
 
         <div id="bot-settings-model" class="bot-field-grid" hidden>
-          <p class="settings-hint"><strong>MODEL</strong> — Core: BTC/ETH, one slot, TP <strong>+11¢</strong>, trail arm <strong>+3¢</strong>, stagnation + rapid-adverse cuts. Hard floor <strong>55¢</strong>.</p>
+          <p class="settings-hint"><strong>MODEL</strong> — Core: BTC/ETH, <strong>1</strong> slot, max <strong>88¢</strong>, conf <strong>55%</strong>, stall <strong>4s</strong>, stagnation <strong>60s</strong>, rapid adverse <strong>off</strong>. Full stake at all asks.</p>
 
           <div class="model-setups" id="bot-model-setups">
             <h4 class="bot-panel-subhead">Paper setups</h4>
@@ -406,7 +406,7 @@
               <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />
               <span class="slider-value" id="bot-model-confidence-value">—</span>
             </div>
-            <span class="field-hint">Default <strong>41%</strong> (Core).</span>
+            <span class="field-hint">Default <strong>55%</strong> (Core).</span>
           </label>
           <label>MODEL live favor (pts)
             <div class="slider-row">
@@ -461,15 +461,16 @@
               <input id="bot-model-low-ask-conf" type="range" min="0" max="95" step="1" />
               <span class="slider-value" id="bot-model-low-ask-conf-value">—</span>
             </div>
-            <span class="field-hint"><strong>Off by default (0)</strong> — no near-certain gate on ≤69¢ asks. Raise to re-enable (conf + live favor + held lean). Under 70¢ stake still stays <strong>half</strong>.</span>
+            <span class="field-hint"><strong>Off by default (0)</strong> — no near-certain gate on ≤69¢ asks. Raise to re-enable (conf + live favor + held lean).</span>
           </label>
           <label>MODEL max entry (¢)
             <div class="slider-row">
               <input id="bot-model-max-entry" type="range" min="70" max="98" step="1" />
               <span class="slider-value" id="bot-model-max-entry-value">—</span>
             </div>
+            <span class="field-hint">Default <strong>88¢</strong>. Won't buy richer asks.</span>
           </label>
-          <p class="field-hint">Asks under <strong>70¢</strong> always use <strong>half stake</strong>. Hard cutoff — not confidence, rich-ask, or a slider.</p>
+          <p class="field-hint">MODEL stake is <strong>full size</strong> at all asks (under-70¢ half-stake is off).</p>
 
           <h4 class="bot-panel-subhead">Exit &amp; recycle</h4>
           <label>MODEL bank / TP green (¢)
@@ -481,24 +482,24 @@
           </label>
           <label>MODEL green stall bank (sec)
             <div class="slider-row">
-              <input id="bot-model-stall-sec" type="range" min="3" max="60" step="1" value="8" />
+              <input id="bot-model-stall-sec" type="range" min="3" max="60" step="1" value="4" />
               <span class="slider-value" id="bot-model-stall-sec-value">—</span>
             </div>
-            <span class="field-hint">While green (trail armed), bank at the <strong>live bid</strong> if peak is flat this long or pulls back <strong>2¢</strong> — even if under the TP target above. Default <strong>8s</strong>.</span>
+            <span class="field-hint">While green (trail armed), bank at the <strong>live bid</strong> if peak is flat this long or pulls back <strong>2¢</strong> — even if under the TP target above. Default <strong>4s</strong>.</span>
           </label>
           <label>MODEL stagnation check (sec)
             <div class="slider-row">
               <input id="bot-model-stagnation-sec" type="range" min="0" max="120" step="5" />
               <span class="slider-value" id="bot-model-stagnation-sec-value">—</span>
             </div>
-            <span class="field-hint">After this long with peak never reaching trail arm (<strong>&lt;+3¢</strong>) <em>and</em> model decaying → exit. Below +3¢ the stall bank never arms. Time alone never cuts. Default <strong>40s</strong>. <strong>0</strong> = off.</span>
+            <span class="field-hint">After this long with peak never reaching trail arm (<strong>&lt;+3¢</strong>) <em>and</em> model soft/decaying → exit. Soft lean no longer instant-BE or MODEL_AGAINST — this is the mushy-thesis exit. Time alone never cuts. Default <strong>60s</strong>. <strong>0</strong> = off.</span>
           </label>
           <label>MODEL rapid adverse (¢)
             <div class="slider-row">
               <input id="bot-model-rapid-adverse" type="range" min="0" max="15" step="1" />
               <span class="slider-value" id="bot-model-rapid-adverse-value">—</span>
             </div>
-            <span class="field-hint">True red ≥ this many ¢ below entry <em>and</em> model decaying → cut immediately (after 4s open grace). Stops cliffs like 81→20. Default <strong>6¢</strong>. <strong>0</strong> = off.</span>
+            <span class="field-hint"><strong>Off by default (0)</strong>. When on: true red ≥ this many ¢ <em>and</em> model decaying → cut after open grace.</span>
           </label>
           <label>MODEL cash out before settle (min left)
             <div class="slider-row">
