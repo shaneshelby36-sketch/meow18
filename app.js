@@ -1704,6 +1704,7 @@ const SLIDER_UNITS = {
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
   'bot-model-near-target-bank': (v) => `+${Math.round(v)}¢`,
   'bot-model-stagnation-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
+  'bot-model-be-chase-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-model-rapid-adverse': (v) => (Number(v) <= 0 ? 'off' : `−${Math.round(v)}¢`),
   'bot-model-stall-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-model-settle-close': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
@@ -2110,6 +2111,7 @@ function wireSliderDisplays() {
     'bot-model-near-target-bank',
     'bot-model-stall-sec',
     'bot-model-stagnation-sec',
+    'bot-model-be-chase-sec',
     'bot-model-rapid-adverse',
     'bot-model-settle-close',
     'bot-model-late-barrier',
@@ -2242,6 +2244,7 @@ function wireBotConfigAutoSave() {
     'bot-model-near-target-bank',
     'bot-model-stall-sec',
     'bot-model-stagnation-sec',
+    'bot-model-be-chase-sec',
     'bot-model-rapid-adverse',
     'bot-model-settle-close',
     'bot-model-late-barrier',
@@ -2400,6 +2403,11 @@ async function loadBotConfigIntoForm() {
       modelStagnationSec.value =
         c.modelStagnationSeconds != null ? c.modelStagnationSeconds : 60;
     }
+    const modelBeChaseSec = document.getElementById('bot-model-be-chase-sec');
+    if (modelBeChaseSec) {
+      modelBeChaseSec.value =
+        c.modelBeChaseSeconds != null ? c.modelBeChaseSeconds : 20;
+    }
     const modelRapidAdverse = document.getElementById('bot-model-rapid-adverse');
     if (modelRapidAdverse) {
       modelRapidAdverse.value =
@@ -2537,6 +2545,7 @@ async function loadBotConfigIntoForm() {
     'bot-model-near-target-bank',
     'bot-model-stall-sec',
     'bot-model-stagnation-sec',
+    'bot-model-be-chase-sec',
     'bot-model-rapid-adverse',
       'bot-model-settle-close',
       'bot-model-late-barrier',
@@ -2726,6 +2735,7 @@ async function saveBotConfig(opts = {}) {
     ),
     modelMomentumStallSeconds: parseFloat(document.getElementById('bot-model-stall-sec')?.value || '4'),
     modelStagnationSeconds: parseFloat(document.getElementById('bot-model-stagnation-sec')?.value || '60'),
+    modelBeChaseSeconds: parseFloat(document.getElementById('bot-model-be-chase-sec')?.value || '20'),
     modelRapidAdverseCents: parseFloat(document.getElementById('bot-model-rapid-adverse')?.value || '0'),
     modelSettleCloseMinutes: parseFloat(document.getElementById('bot-model-settle-close')?.value || '2.5'),
     modelLateBarrierMinutes: parseFloat(document.getElementById('bot-model-late-barrier')?.value || '2'),

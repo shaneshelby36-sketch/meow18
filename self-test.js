@@ -7874,6 +7874,15 @@ async function testModelStrategy() {
       config: { modelBeChaseSeconds: 8 },
     });
     check(!trade.modelBeChaseStartedAt, 'BE chase resets when bid dips red');
+    const stillRed = { entryPriceCents: 72 };
+    const nearOnly = modelBeChaseExitReady(stillRed, {
+      nearFlat: true,
+      flatOrGreen: false,
+      peakProgressCents: 0,
+      now,
+      config: { modelBeChaseSeconds: 8 },
+    });
+    check(nearOnly.reset && !stillRed.modelBeChaseStartedAt, 'spread-padded near-flat does not start BE chase');
   }
 
   check(
@@ -8111,6 +8120,90 @@ async function testModelStrategy() {
     };
     await bot._manageOpenTrade(trade, stillFirm);
     checkEq(trade.status, 'open', '+1¢ green holds while lean still firm');
+  }
+
+  // BE chase timed out but lean still firm → hold (no easy BE)
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 56,
+        no_bid: 44,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinConfidence: 55,
+        modelMinHoldSeconds: 0,
+        modelBeChaseSeconds: 8,
+        modelLeanAgainstBeSeconds: 0,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 5 * 60 * 1000,
+      peakHeldBidCents: 56,
+      modelEntryHeldProb: 62,
+      modelBeChaseStartedAt: now - 20_000,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(62, 70), tracking: { predictedDirection: 'UP' } },
+          w10: win(55, 60),
+          w15: win(55, 60),
+        },
+      },
+    });
+    checkEq(trade.status, 'open', 'BE chase timeout + firm lean does not scratch');
+  }
+
+  // BE chase timed out + lean decaying → scratch
+  {
+    const now = Date.now();
+    const bot = makeBot(
+      mockClient({
+        status: 'open',
+        close_time: new Date(now + 12 * 60 * 1000).toISOString(),
+        yes_bid: 55,
+        no_bid: 45,
+      }),
+      {
+        strategyMode: 'model',
+        modelMinConfidence: 55,
+        modelMinHoldSeconds: 0,
+        modelBeChaseSeconds: 8,
+        modelLeanAgainstBeSeconds: 0,
+      }
+    );
+    const trade = openTrade(bot, {
+      strategy: 'model',
+      side: 'yes',
+      entryPriceCents: 55,
+      windowCloseTime: now + 12 * 60 * 1000,
+      openedAt: now - 5 * 60 * 1000,
+      peakHeldBidCents: 56,
+      modelEntryHeldProb: 62,
+      modelBeChaseStartedAt: now - 20_000,
+    });
+    await bot._manageOpenTrade(trade, {
+      ETH: {
+        ready: true,
+        price: 3000,
+        windows: {
+          w5: { ...win(50, 40), tracking: { predictedDirection: 'UP' } },
+          w10: win(50, 40),
+          w15: win(50, 40),
+        },
+      },
+    });
+    checkEq(trade.exitReason, 'breakeven', 'BE chase timeout + decaying lean scratches');
   }
 
   // Exactly flat + lean against → breakeven scratch

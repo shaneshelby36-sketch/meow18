@@ -501,6 +501,13 @@
             </div>
             <span class="field-hint">After this long with peak never reaching trail arm (<strong>&lt;+3¢</strong>) <em>and</em> model soft/decaying → exit. Soft lean no longer instant-BE or MODEL_AGAINST — this is the mushy-thesis exit. Time alone never cuts. Default <strong>60s</strong>. <strong>0</strong> = off.</span>
           </label>
+          <label>MODEL BE chase (sec)
+            <div class="slider-row">
+              <input id="bot-model-be-chase-sec" type="range" min="0" max="60" step="1" />
+              <span class="slider-value" id="bot-model-be-chase-sec-value">—</span>
+            </div>
+            <span class="field-hint">After bid reaches entry, this many seconds to hit trail arm (<strong>+3¢</strong>) or scratch breakeven. Only fires if the model is also decaying — a firm lean will not BE. Default <strong>20s</strong> (was 8s). <strong>0</strong> = off.</span>
+          </label>
           <label>MODEL rapid adverse (¢)
             <div class="slider-row">
               <input id="bot-model-rapid-adverse" type="range" min="0" max="15" step="1" />

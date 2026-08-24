@@ -38,7 +38,7 @@ const ROTATION_PERIOD_MS = 12 * 60 * 60 * 1000; // 12 hours
 const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past this)
 // Bump when shipping intentional default resets so stale bot-config.json
 // doesn't keep old absolute stop/TP values after deploy.
-const SETTINGS_DEFAULTS_VERSION = 84;
+const SETTINGS_DEFAULTS_VERSION = 85;
 
 /** Min ms between Kalshi series list refreshes per KX*15M (live book only). */
 const KALSHI_SERIES_REFRESH_MS = 12_000;
@@ -244,7 +244,7 @@ const MODEL_SETUPS = [
     id: 'core',
     recommended: true,
     label: 'Core BTC / ETH',
-    why: 'BTC + ETH, one slot, max 88¢, conf 55%, stall 4s, BE chase 8s, stagnation 60s (no max-loss cliff).',
+    why: 'BTC + ETH, one slot, max 88¢, conf 55%, stall 4s, BE chase 20s (only if lean decaying), stagnation 60s (no max-loss cliff).',
     autoTradeSymbols: 'BTC,ETH',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
@@ -256,6 +256,7 @@ const MODEL_SETUPS = [
     modelLowAskMinConfidence: 0,
     modelConfirmCrossCents: 0,
     modelMomentumStallSeconds: 4,
+    modelBeChaseSeconds: 20,
     modelStagnationSeconds: 60,
     modelRapidAdverseCents: 0,
   },
@@ -445,6 +446,9 @@ function modelSetupConfigPatch(setup) {
   }
   if (setup.modelMomentumStallSeconds != null) {
     patch.modelMomentumStallSeconds = setup.modelMomentumStallSeconds;
+  }
+  if (setup.modelBeChaseSeconds != null) {
+    patch.modelBeChaseSeconds = setup.modelBeChaseSeconds;
   }
   if (setup.modelStagnationSeconds != null) {
     patch.modelStagnationSeconds = setup.modelStagnationSeconds;
@@ -774,7 +778,7 @@ const MODEL_STAGNATION_MIN_PROGRESS_CENTS_DEFAULT = 3;
  */
 const MODEL_RAPID_ADVERSE_CENTS_DEFAULT = 0;
 /** After crossing breakeven, must reach trail-arm (+3¢) within this many seconds or scratch BE. 0 = off. */
-const MODEL_BE_CHASE_SECONDS_DEFAULT = 8;
+const MODEL_BE_CHASE_SECONDS_DEFAULT = 20;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /**
@@ -1915,25 +1919,27 @@ function modelBeChaseUpwardEvidence(trade, args = {}) {
 }
 
 /**
- * Crossed breakeven → N seconds to reach +trailArm (default +3¢) or scratch flat.
- * Dips back underwater reset the timer; crossing BE again restarts it.
+ * Crossed breakeven (bid ≥ entry) → N seconds to reach +trailArm (default +3¢)
+ * or scratch flat. Spread-padded "near flat" (still a hair red) does not start
+ * the timer. Dips back underwater reset it; crossing BE again restarts it.
  * While bid is still rising toward +3¢, the timer does not scratch.
  */
 function modelBeChaseExitReady(
   trade,
-  {
+  opts = {}
+) {
+  const {
     nearFlat,
     flatOrGreen,
     peakProgressCents,
     now,
     config = {},
-    upwardEvidence = false,
-  } = {}
-) {
+  } = opts;
+  const risingNow = !!(opts.upwardEvidence || opts.upwardEvidence);
   const needSec = modelBeChaseSeconds(config);
   if (!(needSec > 0)) return { ready: false, skipped: true };
   const needProgress = modelTrailArmCents(config);
-  const atBe = !!(nearFlat || flatOrGreen);
+  const atBe = !!flatOrGreen;
 
   if (!atBe) {
     if (trade) {
@@ -1964,7 +1970,7 @@ function modelBeChaseExitReady(
 
   const elapsed = t - Number(trade.modelBeChaseStartedAt);
   if (elapsed >= needSec * 1000) {
-    if (upwardEvidence) {
+    if (risingNow) {
       return {
         ready: false,
         needSec,
@@ -7946,7 +7952,8 @@ class TradingBot {
         return;
       }
 
-      // BE chase: crossed flat → 8s to reach +3¢ or scratch (timer resets if dips red again).
+      // BE chase: crossed bid≥entry → N seconds to reach +3¢ or scratch.
+      // Never scratches while the model is still firm — that was the "easy BE".
       const beChase = modelBeChaseExitReady(trade, {
         nearFlat,
         flatOrGreen,
@@ -7962,12 +7969,19 @@ class TradingBot {
         bidOk &&
         againstBeReady &&
         beChase.ready &&
-        (scratchFlat || flatOrGreen) &&
-        !upwardMomentum
+        flatOrGreen &&
+        !upwardMomentum &&
+        modelDeteriorating
       ) {
         this.lastDecision =
-          `BE chase ${beChase.needSec}s expired (peak +${beChase.peakProgress}¢, need +${beChase.needProgress}¢) on ${trade.symbol} — scratching.`;
+          `BE chase ${beChase.needSec}s expired (peak +${beChase.peakProgress}¢, need +${beChase.needProgress}¢) + lean decaying on ${trade.symbol} — scratching.`;
         if (await tryModelBreakevenScratch()) return;
+      }
+      if (bidOk && beChase.ready && flatOrGreen && !modelDeteriorating) {
+        this.lastDecision =
+          `BE chase ${beChase.needSec}s up on ${trade.symbol} but model still firm — holding (no easy BE).`;
+        trade.holdReason = this.lastDecision;
+        this._persist();
       }
 
       // Strong lean rotting (99/1 → 85/15): cut if no recovery — smaller loss beats cliff.
