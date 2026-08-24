@@ -244,7 +244,7 @@ const MODEL_SETUPS = [
     id: 'core',
     recommended: true,
     label: 'Core BTC / ETH',
-    why: 'BTC + ETH, one slot, max 88¢, conf 55%, stall 4s, stagnation 60s.',
+    why: 'BTC + ETH, one slot, max 88¢, conf 55%, stall 4s, BE chase 8s, stagnation 60s.',
     autoTradeSymbols: 'BTC,ETH',
     modelMinConfidence: 55,
     modelEntryLiveLeanMarginPct: 3,
@@ -778,6 +778,8 @@ const MODEL_STAGNATION_MIN_PROGRESS_CENTS_DEFAULT = 3;
  * against → cut immediately (after open grace). Caps cliffs like 81→20. 0 = off.
  */
 const MODEL_RAPID_ADVERSE_CENTS_DEFAULT = 0;
+/** After crossing breakeven, must reach trail-arm (+3¢) within this many seconds or scratch BE. 0 = off. */
+const MODEL_BE_CHASE_SECONDS_DEFAULT = 8;
 /** Near settle: close unless losing more than this many ¢ (50 = ride only big losers). */
 const MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT = 50;
 /**
@@ -1843,6 +1845,50 @@ function modelRapidAdverseExitReady({
   }
   if (!modelAgainst) return { ready: false, need, adverse, waitingModel: true };
   return { ready: true, need, adverse };
+}
+
+function modelBeChaseSeconds(config = {}) {
+  const n = Number(config.modelBeChaseSeconds);
+  if (Number.isFinite(n) && n <= 0) return 0;
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return MODEL_BE_CHASE_SECONDS_DEFAULT;
+}
+
+/**
+ * Crossed breakeven → N seconds to reach +trailArm (default +3¢) or scratch flat.
+ * Dips back underwater reset the timer; crossing BE again restarts it.
+ */
+function modelBeChaseExitReady(trade, { nearFlat, flatOrGreen, peakProgressCents, now, config = {} } = {}) {
+  const needSec = modelBeChaseSeconds(config);
+  if (!(needSec > 0)) return { ready: false, skipped: true };
+  const needProgress = modelTrailArmCents(config);
+  const atBe = !!(nearFlat || flatOrGreen);
+
+  if (!atBe) {
+    if (trade) delete trade.modelBeChaseStartedAt;
+    return { ready: false, reset: true };
+  }
+
+  const peak = Number(peakProgressCents);
+  const peaked = Number.isFinite(peak) ? peak : 0;
+  if (peaked >= needProgress) {
+    if (trade) delete trade.modelBeChaseStartedAt;
+    return { ready: false, achieved: true, needProgress };
+  }
+
+  const t = Number(now);
+  if (!Number.isFinite(t)) return { ready: false, needSec, needProgress };
+
+  if (!trade.modelBeChaseStartedAt) {
+    trade.modelBeChaseStartedAt = t;
+    return { ready: false, started: true, needSec, needProgress };
+  }
+
+  const elapsed = t - Number(trade.modelBeChaseStartedAt);
+  if (elapsed >= needSec * 1000) {
+    return { ready: true, needSec, needProgress, peakProgress: peaked, elapsedMs: elapsed };
+  }
+  return { ready: false, needSec, needProgress, peakProgress: peaked, elapsedMs: elapsed };
 }
 
 /**
@@ -2955,6 +3001,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelStagnationSeconds',
   'modelStagnationMinProgressCents',
   'modelRapidAdverseCents',
+  'modelBeChaseSeconds',
   'modelLeanStopBarrierCents',
   'modelLeanStopPaceDrawdownPct',
   'modelLeanStopPaceMinSampleSeconds',
@@ -4040,6 +4087,7 @@ class TradingBot {
       modelStagnationSeconds: MODEL_STAGNATION_SECONDS_DEFAULT,
       modelStagnationMinProgressCents: MODEL_STAGNATION_MIN_PROGRESS_CENTS_DEFAULT,
       modelRapidAdverseCents: MODEL_RAPID_ADVERSE_CENTS_DEFAULT,
+      modelBeChaseSeconds: MODEL_BE_CHASE_SECONDS_DEFAULT,
       modelLiveLeanMarginPct: MODEL_LIVE_LEAN_MARGIN_DEFAULT,
       modelExtremeLiveLeanExitPct: MODEL_EXTREME_LIVE_LEAN_EXIT_PCT_DEFAULT,
       modelEntryLiveLeanMarginPct: MODEL_ENTRY_LIVE_LEAN_MARGIN_DEFAULT,
@@ -6959,7 +7007,10 @@ class TradingBot {
       if (
         found.ticker &&
         typeof this.client.getMarket === 'function' &&
-        !quoted(found)
+        !quoted(found) &&
+        !(
+          typeof this.client.isPublicRateLimited === 'function' && this.client.isPublicRateLimited()
+        )
       ) {
         try {
           const q = await this._getMarketBounded(found.ticker, 3500);
@@ -7144,7 +7195,14 @@ class TradingBot {
     }
     // During 429 cooldown: cache only — never queue another GET behind the gate.
     if (limited) {
-      return peek(120_000) || null;
+      const hit = peek(120_000);
+      if (hit) return hit;
+      if (this._lastLiveMarket) {
+        for (const m of Object.values(this._lastLiveMarket)) {
+          if (m && String(m.ticker) === String(ticker)) return normalizeMarketPrices(m);
+        }
+      }
+      return null;
     }
     const fresh = peek(20_000);
     if (fresh) return fresh;
@@ -7685,6 +7743,29 @@ class TradingBot {
 
       // Soft/50-50 no longer instant-cuts — stagnation + hard flip own mushy thesis.
       const peakProgress = modelPeakProgressCents(trade, peak);
+
+      // Price stops — fire even when model still prints "firm" (market can disagree).
+      const maxLossCut = modelEffectiveMaxLossCents(trade, this.config);
+      if (bidOk && againstBeReady && maxLossCut > 0 && trueAdverse >= maxLossCut) {
+        this.lastDecision =
+          `Max loss −${trueAdverse}¢ (cap ${maxLossCut}¢) on ${trade.symbol} — cutting despite firm lean.`;
+        await tryModelAgainstCut('model_max_loss');
+        return;
+      }
+      const leanStop = modelShouldLeanStopRed(trade, heldSideBidCents, heldMs, this.config);
+      if (bidOk && leanStop) {
+        const floor = modelLeanStopBarrierCents(this.config);
+        const atFloor = Number(heldSideBidCents) <= floor;
+        if (atFloor || againstBeReady) {
+          this.lastDecision =
+            atFloor
+              ? `Hard floor ${floor}¢ on ${trade.symbol} at ${heldSideBidCents}¢ — cutting.`
+              : `Lean-stop pace toward floor on ${trade.symbol} — cutting.`;
+          await tryModelAgainstCut('model_lean_stop');
+          return;
+        }
+      }
+
       const rapidAdverse = modelRapidAdverseExitReady({
         trueAdverseCents: trueAdverse,
         modelAgainst: modelDeteriorating,
@@ -7721,6 +7802,23 @@ class TradingBot {
           await tryModelAgainstCut('model_stagnation');
         }
         return;
+      }
+
+      // BE chase: crossed flat → 8s to reach +3¢ or scratch (timer resets if dips red again).
+      const beChase = modelBeChaseExitReady(trade, {
+        nearFlat,
+        flatOrGreen,
+        peakProgressCents: peakProgress,
+        now,
+        config: this.config,
+      });
+      if (beChase.started || beChase.reset || beChase.achieved) {
+        this._persist();
+      }
+      if (bidOk && againstBeReady && beChase.ready && (scratchFlat || flatOrGreen)) {
+        this.lastDecision =
+          `BE chase ${beChase.needSec}s expired (peak +${beChase.peakProgress}¢, need +${beChase.needProgress}¢) on ${trade.symbol} — scratching.`;
+        if (await tryModelBreakevenScratch()) return;
       }
 
       // Strong lean rotting (99/1 → 85/15): cut if no recovery — smaller loss beats cliff.
@@ -11070,6 +11168,8 @@ module.exports = {
   modelLeanStaleForScratch,
   modelStagnationExitReady,
   modelRapidAdverseExitReady,
+  modelBeChaseExitReady,
+  modelBeChaseSeconds,
   modelPeakProgressCents,
   MODEL_STAGNATION_SECONDS_DEFAULT,
   MODEL_RAPID_ADVERSE_CENTS_DEFAULT,

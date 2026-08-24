@@ -66,9 +66,11 @@ function loadSavedCredentials() {
 loadSavedCredentials();
 
 if (kalshiClient.hasCredentials) {
-  kalshiClient.syncAccountLimits({ force: true }).catch((err) => {
-    console.warn('[kalshi] account limits sync deferred:', err && err.message ? err.message : err);
-  });
+  setTimeout(() => {
+    kalshiClient.syncAccountLimits({ force: true }).catch((err) => {
+      console.warn('[kalshi] account limits sync deferred:', err && err.message ? err.message : err);
+    });
+  }, 12_000);
 }
 
 function saveCredentials({ keyId, privateKeyPem }) {

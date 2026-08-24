@@ -153,7 +153,9 @@ function bookSideFromLegacy(side, action) {
 }
 
 /** Min gap between unauthenticated public GETs (IP bucket is much tighter than Basic read). */
-const UNAUTH_PUBLIC_SPACING_MS = 900;
+const UNAUTH_PUBLIC_SPACING_MS = 1200;
+/** After repeated 429s, stay cache-only briefly even when short cooldown expires. */
+const PUBLIC_QUIET_AFTER_429_MS = 45_000;
 /** Series list cache — avoid re-listing KXBTC15M / KXETH15M every 5s tick. */
 const OPEN_MARKETS_CACHE_MS = 45_000;
 const OPEN_MARKETS_CACHE_LIMITED_MS = 120_000;
@@ -337,6 +339,7 @@ class KalshiClient {
     this._cooldownUntil = 0;
     this._429Streak = 0;
     this._429LogAt = 0;
+    this._last429At = 0;
     // Basic-tier defaults at ~85% headroom (200 read / 100 write).
     this._readBudget = createTokenBucket(170, 340);
     this._writeBudget = createTokenBucket(85, 85);
@@ -497,7 +500,9 @@ class KalshiClient {
         err.body = json;
         throw err;
       }
-      this._clearRateLimitStreak();
+      // Auth successes (balance, orders) must not reset public-market 429 backoff.
+      const isPublicMarket = !auth && String(path).startsWith('/markets');
+      if (isPublicMarket) this._clearRateLimitStreak();
       return json;
     }
     throw lastErr || new Error(`Kalshi API ${method} ${path} -> HTTP 429`);
@@ -505,11 +510,20 @@ class KalshiClient {
 
   // ---------- public market data (no auth needed) ----------
 
+  _maybeDecay429Streak() {
+    const streak = Number(this._429Streak) || 0;
+    const last = Number(this._last429At) || 0;
+    if (streak > 0 && last > 0 && Date.now() - last > 3 * 60_000) {
+      this._429Streak = 0;
+    }
+  }
+
   _noteRateLimit() {
-    // Prefer cache briefly; Kalshi has no 429 penalty beyond empty buckets.
-    this._429Streak = Math.min(8, (Number(this._429Streak) || 0) + 1);
-    const baseMs = 5_000;
-    const backoffMs = Math.min(30_000, baseMs * Math.pow(1.5, this._429Streak - 1));
+    // Prefer cache; public IP bucket refills slowly — don't retry every 5s.
+    this._429Streak = Math.min(12, (Number(this._429Streak) || 0) + 1);
+    this._last429At = Date.now();
+    const baseMs = 15_000;
+    const backoffMs = Math.min(120_000, baseMs * Math.pow(1.4, this._429Streak - 1));
     this._cooldownUntil = Math.max(this._cooldownUntil || 0, Date.now() + backoffMs);
     if (Date.now() - this._429LogAt > 10_000) {
       this._429LogAt = Date.now();
@@ -524,8 +538,16 @@ class KalshiClient {
   }
 
   publicRateLimitRemainingMs() {
+    this._maybeDecay429Streak();
     const rem = Number(this._cooldownUntil) - Date.now();
-    return rem > 0 ? rem : 0;
+    if (rem > 0) return rem;
+    const streak = Number(this._429Streak) || 0;
+    const last = Number(this._last429At) || 0;
+    if (streak >= 2 && last > 0) {
+      const quietRem = PUBLIC_QUIET_AFTER_429_MS - (Date.now() - last);
+      if (quietRem > 0) return quietRem;
+    }
+    return 0;
   }
 
   async _withPublicGate(fn) {
@@ -551,6 +573,7 @@ class KalshiClient {
       const data = await this._request('GET', '/markets', {
         query: { series_ticker: seriesTicker, limit, ...query },
         auth: useAuth,
+        retryOn429: false,
       });
       return (data.markets || []).map(normalizeMarketPrices);
     };
@@ -674,8 +697,9 @@ class KalshiClient {
     if (cached && now - cached.at < cacheMaxMs && marketHasUsableTwoSidedQuote(cached.market)) {
       return cached.market;
     }
-    if (limited && cached && marketHasUsableTwoSidedQuote(cached.market)) {
-      return cached.market;
+    if (limited) {
+      if (cached && cached.market) return normalizeMarketPrices(cached.market);
+      return null;
     }
 
     const inflight = this._marketByTickerInflight.get(key);
@@ -683,14 +707,14 @@ class KalshiClient {
 
     const work = this._withPublicGate(async () => {
       try {
-        if (
-          Date.now() < this._cooldownUntil &&
-          cached &&
-          marketHasUsableTwoSidedQuote(cached.market)
-        ) {
-          return cached.market;
+        if (Date.now() < this._cooldownUntil) {
+          if (cached && cached.market) return normalizeMarketPrices(cached.market);
+          return null;
         }
-        const data = await this._request('GET', `/markets/${key}`, { auth: this._preferMarketAuth() });
+        const data = await this._request('GET', `/markets/${key}`, {
+          auth: this._preferMarketAuth(),
+          retryOn429: false,
+        });
         const market = normalizeMarketPrices(data.market);
         if (marketHasUsableTwoSidedQuote(market)) {
           this._marketByTickerCache.set(key, { at: Date.now(), market });
@@ -698,7 +722,8 @@ class KalshiClient {
         return market;
       } catch (err) {
         if (err && err.status === 429) this._noteRateLimit();
-        if (cached && marketHasUsableTwoSidedQuote(cached.market)) return cached.market;
+        if (cached && cached.market) return normalizeMarketPrices(cached.market);
+        if (err && err.status === 429) return null;
         throw err;
       } finally {
         this._marketByTickerInflight.delete(key);
