@@ -2360,6 +2360,12 @@ async function loadBotConfigIntoForm() {
       modelLiveFavor.value =
         c.modelEntryLiveLeanMarginPct != null ? c.modelEntryLiveLeanMarginPct : 2;
     }
+    const softLeanDisplay = document.getElementById('bot-model-soft-lean-value');
+    if (softLeanDisplay) {
+      const v = c.modelSoftLeanMarginPct != null ? c.modelSoftLeanMarginPct : 3;
+      softLeanDisplay.textContent = v + ' pts';
+      softLeanDisplay.dataset.value = v;
+    }
     const modelMinEntryLean = document.getElementById('bot-model-min-entry-lean');
     if (modelMinEntryLean) {
       modelMinEntryLean.value =
@@ -2743,6 +2749,7 @@ async function saveBotConfig(opts = {}) {
     modelShadowBooks: document.getElementById('bot-model-shadow-books')?.value || 'off',
     modelMinConfidence: parseFloat(document.getElementById('bot-model-confidence')?.value || '55'),
     modelEntryLiveLeanMarginPct: parseFloat(document.getElementById('bot-model-live-favor')?.value || '2'),
+    modelSoftLeanMarginPct: parseFloat(document.getElementById('bot-model-soft-lean-value')?.dataset.value || '3'),
     modelMinEntryLeanPct: parseFloat(document.getElementById('bot-model-min-entry-lean')?.value || '65'),
     modelSignalDominanceMin: (() => {
       const raw = parseFloat(document.getElementById('bot-model-signal-dom')?.value || '0');
@@ -3221,6 +3228,16 @@ function wireBotUI() {
     loadBotConfigIntoForm();
   });
   document.getElementById('bot-settings-save').addEventListener('click', () => saveBotConfig());
+  const softLeanStep = (delta) => {
+    const el = document.getElementById('bot-model-soft-lean-value');
+    if (!el) return;
+    const cur = Number(el.dataset.value) || 3;
+    const next = Math.max(0, Math.min(20, cur + delta));
+    el.dataset.value = next;
+    el.textContent = next + ' pts';
+  };
+  document.getElementById('bot-model-soft-lean-down')?.addEventListener('click', () => softLeanStep(-1));
+  document.getElementById('bot-model-soft-lean-up')?.addEventListener('click', () => softLeanStep(1));
   document.getElementById('bot-stake-half')?.addEventListener('click', () => {
     const el = document.getElementById('bot-stake');
     if (!el) return;

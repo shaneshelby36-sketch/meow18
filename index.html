@@ -419,6 +419,14 @@
             </div>
             <span class="field-hint">Live UP vs DOWN must lead by this many pts to enter. Default <strong>2</strong>. <strong>0</strong> = any lead.</span>
           </label>
+          <label>MODEL stall-hold lean sensitivity (pts)
+            <div class="stepper-row">
+              <button type="button" class="stepper-btn" id="bot-model-soft-lean-down">−</button>
+              <span class="stepper-value" id="bot-model-soft-lean-value">—</span>
+              <button type="button" class="stepper-btn" id="bot-model-soft-lean-up">+</button>
+            </div>
+            <span class="field-hint">How many pts of lean lead counts as "still firm" when the price stalls while green. Higher = easier to keep holding (lean must lead by more to hold). Lower = banks sooner on a stall. Default <strong>3</strong>. Does <strong>not</strong> affect entries or any other exit.</span>
+          </label>
           <label>MODEL min entry lean (%)
             <div class="slider-row">
               <input id="bot-model-min-entry-lean" type="range" min="0" max="95" step="1" />

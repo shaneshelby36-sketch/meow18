@@ -477,8 +477,8 @@ async function main() {
           console.error('[bot] manage-watchdog error:', err.message);
         });
       }
-    }, 4000);
-    console.log('[startup] settle + manage watchdog every 4s (independent of prediction loop)');
+    }, 2500);
+    console.log('[startup] settle + manage watchdog every 2.5s (independent of prediction loop)');
   }
 
   const app = express();
