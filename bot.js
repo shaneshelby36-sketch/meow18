@@ -39,6 +39,12 @@ const TRADE_LOG_MAX = 5000; // permanent history cap (oldest dropped only past t
 // doesn't keep old absolute stop/TP values after deploy.
 const SETTINGS_DEFAULTS_VERSION = 83;
 
+/** Min ms between Kalshi series list refreshes per KX*15M (live book only). */
+const KALSHI_SERIES_REFRESH_MS = 12_000;
+const KALSHI_SERIES_REFRESH_LIMITED_MS = 120_000;
+const KALSHI_SERIES_STALE_CAP_MS = 45_000;
+const KALSHI_SERIES_STALE_CAP_LIMITED_MS = 120_000;
+
 // Minimum sample sizes before a bucket's win rate is worth trusting, per the
 // standard rule of thumb: a handful of trades tells you almost nothing, a
 // few hundred starts to actually mean something.
@@ -6815,22 +6821,25 @@ class TradingBot {
 
   /**
    * Current tradeable Kalshi 15m market for a series (soonest still-live close).
+   * Throttled hard — re-listing KXBTC15M every 5s tick was tripping Kalshi 429s.
    */
   async _fetchLiveMarket(seriesTicker, minMsLeft = 1500) {
     if (!seriesTicker || !this.client) return null;
-    // Shadow books reuse the live cycle's cached market — no extra Kalshi GETs.
     if (this._inShadow) {
       const cached = this._lastLiveMarket && this._lastLiveMarket[seriesTicker];
       return cached || null;
     }
     if (!this._lastLiveMarket) this._lastLiveMarket = Object.create(null);
     if (!this._lastLiveMarketAt) this._lastLiveMarketAt = Object.create(null);
+
     const limited =
       typeof this.client.isPublicRateLimited === 'function' && this.client.isPublicRateLimited();
-    const staleMs = limited ? 60_000 : 8_000;
+    const refreshMs = limited ? KALSHI_SERIES_REFRESH_LIMITED_MS : KALSHI_SERIES_REFRESH_MS;
+    const staleCapMs = limited ? KALSHI_SERIES_STALE_CAP_LIMITED_MS : KALSHI_SERIES_STALE_CAP_MS;
+
     const cached = this._lastLiveMarket[seriesTicker];
-    const cachedClose = cached ? parseMarketCloseMs(cached) : NaN;
     const cacheAge = Date.now() - (Number(this._lastLiveMarketAt[seriesTicker]) || 0);
+    const cachedClose = cached ? parseMarketCloseMs(cached) : NaN;
     const cachedQuoted = (m) =>
       m &&
       Number.isFinite(Number(m.yes_bid)) &&
@@ -6838,41 +6847,21 @@ class TradingBot {
       Number(m.yes_bid) >= 1 &&
       Number(m.yes_ask) <= 99 &&
       Number(m.yes_bid) <= Number(m.yes_ask);
-    // Drop bot-side cache once the window is inside the min-left floor (unless 429 — keep stale briefly).
-    if (cached && Number.isFinite(cachedClose) && cachedClose <= Date.now() + Math.max(500, minMsLeft)) {
-      if (limited && cachedQuoted(cached) && cacheAge < 45_000) {
+
+    const windowLive =
+      cached &&
+      Number.isFinite(cachedClose) &&
+      cachedClose > Date.now() + Math.max(500, minMsLeft);
+
+    if (cached && cachedQuoted(cached) && cacheAge < staleCapMs && (windowLive || limited)) {
+      if (cacheAge < refreshMs || limited) {
         return cached;
       }
-      if (!limited) {
-        delete this._lastLiveMarket[seriesTicker];
-        delete this._lastLiveMarketAt[seriesTicker];
-      }
-    } else if (cached && Number.isFinite(cachedClose) && cachedClose > Date.now() + Math.max(500, minMsLeft)) {
-      if (cachedQuoted(cached) && (limited ? cacheAge < staleMs : cacheAge < 8_000)) return cached;
-      // While rate-limited: never network-refresh — stale quoted cache beats freezing on BTC.
-      if (limited) {
-        if (cachedQuoted(cached) && cacheAge < staleMs) return cached;
-        return cached || null;
-      }
-      const ticker = cached.ticker;
-      if (ticker && typeof this.client.getMarket === 'function') {
-        try {
-          const fresh = await this._getMarketBounded(ticker, 2000);
-          if (fresh) {
-            const merged = { ...cached, ...fresh };
-            this._lastLiveMarket[seriesTicker] = merged;
-            this._lastLiveMarketAt[seriesTicker] = Date.now();
-            return merged;
-          }
-        } catch (_) {
-          // keep cached window rather than re-list the whole series
-        }
-      }
-      if (cachedQuoted(cached)) return cached;
-      // Quote-less cache — fall through to re-list / hydrate.
     }
 
-    if (limited) return cachedQuoted(cached) ? cached : cached || null;
+    if (limited) {
+      return cachedQuoted(cached) ? cached : cached || null;
+    }
 
     let found = null;
     if (typeof this.client.getLiveOpenMarket === 'function') {
@@ -6882,35 +6871,46 @@ class TradingBot {
         found = null;
       }
     }
-    if (!found && typeof this.client.getOpenMarkets === 'function') {
-      if (!limited && typeof this.client.invalidateOpenMarkets === 'function') {
-        this.client.invalidateOpenMarkets(seriesTicker);
-      }
-      const markets = await this.client.getOpenMarkets(seriesTicker, 20);
-      found =
-        pickLiveOpenMarket(markets, Date.now(), minMsLeft) ||
-        pickLiveOpenMarket(markets, Date.now(), 0);
-    }
     if (found) {
-      const quotedOk = cachedQuoted;
-      if (found.ticker && typeof this.client.getMarket === 'function' && !quotedOk(found)) {
+      if (found.ticker && typeof this.client.getMarket === 'function' && !cachedQuoted(found)) {
         try {
           const quoted = await this._getMarketBounded(found.ticker, 3500);
-          if (quotedOk(quoted)) {
+          if (cachedQuoted(quoted)) {
             found = { ...found, ...quoted };
           }
         } catch (_) {
-          // keep list row
+          /* keep list row */
         }
       }
-      if (quotedOk(found)) {
+      if (cachedQuoted(found)) {
         this._lastLiveMarket[seriesTicker] = found;
         this._lastLiveMarketAt[seriesTicker] = Date.now();
-        return found;
       }
       return found;
     }
     return cachedQuoted(cached) ? cached : null;
+  }
+
+  /** One pass over tradeable series — serial, stops on 429. */
+  async _prefetchKalshiForSymbols(symbols, minMsLeft = 5000) {
+    if (this._inShadow || !Array.isArray(symbols) || !symbols.length) return;
+    const series = [
+      ...new Set(
+        symbols
+          .map((s) => SERIES_BY_SYMBOL[String(s || '').toUpperCase()])
+          .filter(Boolean)
+      ),
+    ];
+    for (const st of series) {
+      await this._fetchLiveMarket(st, minMsLeft);
+      if (
+        this.client &&
+        typeof this.client.isPublicRateLimited === 'function' &&
+        this.client.isPublicRateLimited()
+      ) {
+        break;
+      }
+    }
   }
 
   _liveMarketWaitReason(symbol) {
@@ -7005,8 +7005,7 @@ class TradingBot {
     if (limited) {
       return peek(120_000) || null;
     }
-    // Align with getMarket cache (~8s) so the 4s manage watchdog usually avoids HTTP.
-    const fresh = peek(8000);
+    const fresh = peek(20_000);
     if (fresh) return fresh;
 
     let timer = null;
@@ -9872,26 +9871,38 @@ class TradingBot {
     }
     let yesBid = Number(market.yes_bid);
     let yesAsk = Number(market.yes_ask);
-    if (!Number.isFinite(yesBid) || !Number.isFinite(yesAsk) || yesBid < 1 || yesAsk > 99 || yesBid > yesAsk) {
-      // One more hydrate — list rows / rate-limit stubs often lack bids.
-      if (market.ticker && typeof this._getMarketBounded === 'function') {
-        try {
-          const quoted = await this._getMarketBounded(market.ticker, 3500);
-          if (
-            quoted &&
-            Number.isFinite(Number(quoted.yes_bid)) &&
-            Number.isFinite(Number(quoted.yes_ask)) &&
-            Number(quoted.yes_bid) >= 1 &&
-            Number(quoted.yes_ask) <= 99 &&
-            Number(quoted.yes_bid) <= Number(quoted.yes_ask)
-          ) {
-            market = { ...market, ...quoted };
-            yesBid = Number(market.yes_bid);
-            yesAsk = Number(market.yes_ask);
-          }
-        } catch (_) {
-          /* fall through */
+    const hasQuote =
+      Number.isFinite(yesBid) &&
+      Number.isFinite(yesAsk) &&
+      yesBid >= 1 &&
+      yesAsk <= 99 &&
+      yesBid <= yesAsk;
+    if (
+      !hasQuote &&
+      market.ticker &&
+      typeof this._getMarketBounded === 'function' &&
+      !(
+        this.client &&
+        typeof this.client.isPublicRateLimited === 'function' &&
+        this.client.isPublicRateLimited()
+      )
+    ) {
+      try {
+        const quoted = await this._getMarketBounded(market.ticker, 3500);
+        if (
+          quoted &&
+          Number.isFinite(Number(quoted.yes_bid)) &&
+          Number.isFinite(Number(quoted.yes_ask)) &&
+          Number(quoted.yes_bid) >= 1 &&
+          Number(quoted.yes_ask) <= 99 &&
+          Number(quoted.yes_bid) <= Number(quoted.yes_ask)
+        ) {
+          market = { ...market, ...quoted };
+          yesBid = Number(market.yes_bid);
+          yesAsk = Number(market.yes_ask);
         }
+      } catch (_) {
+        /* fall through */
       }
     }
     if (!Number.isFinite(yesBid) || !Number.isFinite(yesAsk) || yesBid < 1 || yesAsk > 99 || yesBid > yesAsk) {
@@ -10126,13 +10137,14 @@ class TradingBot {
       (sym) => predictions[sym] && !this._hasOpenOnSymbol(sym)
     );
     if (candidates.length === 0) return [];
+    await this._prefetchKalshiForSymbols(candidates, 5000);
     const limited =
       this.client &&
       typeof this.client.isPublicRateLimited === 'function' &&
       this.client.isPublicRateLimited();
     if (limited) {
       this.lastDecision =
-        'Kalshi rate limit — scanning from cached quotes (new entries when quotes are fresh enough).';
+        'Kalshi rate limit — using cached BTC/ETH quotes (refresh pauses ~12s per series).';
     }
     const skips = [];
     // Serial — parallel AUTO scans were bursting list GETs and tripping 429.

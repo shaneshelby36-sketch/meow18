@@ -152,6 +152,14 @@ function bookSideFromLegacy(side, action) {
   throw new Error(`Invalid Kalshi order direction: action=${action} side=${side}`);
 }
 
+/** Min gap between unauthenticated public GETs (IP bucket is much tighter than Basic read). */
+const UNAUTH_PUBLIC_SPACING_MS = 900;
+/** Series list cache — avoid re-listing KXBTC15M / KXETH15M every 5s tick. */
+const OPEN_MARKETS_CACHE_MS = 45_000;
+const OPEN_MARKETS_CACHE_LIMITED_MS = 120_000;
+const TICKER_MARKET_CACHE_MS = 20_000;
+const TICKER_MARKET_CACHE_LIMITED_MS = 120_000;
+
 /** Default Kalshi endpoint cost (tokens). See GET /account/endpoint_costs for overrides. */
 const DEFAULT_TOKEN_COST = 10;
 
@@ -500,8 +508,8 @@ class KalshiClient {
   _noteRateLimit() {
     // Prefer cache briefly; Kalshi has no 429 penalty beyond empty buckets.
     this._429Streak = Math.min(8, (Number(this._429Streak) || 0) + 1);
-    const baseMs = 3_000;
-    const backoffMs = Math.min(20_000, baseMs * Math.pow(1.6, this._429Streak - 1));
+    const baseMs = 5_000;
+    const backoffMs = Math.min(30_000, baseMs * Math.pow(1.5, this._429Streak - 1));
     this._cooldownUntil = Math.max(this._cooldownUntil || 0, Date.now() + backoffMs);
     if (Date.now() - this._429LogAt > 10_000) {
       this._429LogAt = Date.now();
@@ -523,8 +531,7 @@ class KalshiClient {
   async _withPublicGate(fn) {
     const run = this._publicGate.then(async () => {
       const cooldownWait = Math.max(0, this._cooldownUntil - Date.now());
-      // Unauth/IP traffic: keep a small gap. Authed GETs are already token-bucket paced.
-      const spacingMs = this._preferMarketAuth() ? 0 : 250;
+      const spacingMs = this._preferMarketAuth() ? 0 : UNAUTH_PUBLIC_SPACING_MS;
       const spacingWait = Math.max(0, this._lastPublicAt + spacingMs - Date.now());
       const wait = Math.max(cooldownWait, spacingWait);
       if (wait > 0) await sleep(wait);
@@ -553,11 +560,13 @@ class KalshiClient {
         return !s || s === 'open' || s === 'active' || s === 'initialized' || s === 'unopened';
       });
 
-    let open = usable(await fetchList({ status: 'open' }));
-    if (!open.length) {
-      open = usable(await fetchList({ min_close_ts: Math.floor(Date.now() / 1000) }));
-    }
-    return open;
+    // One list GET per refresh — the old open-then-min_close_ts double-fetch was 429 fuel.
+    return usable(
+      await fetchList({
+        status: 'open',
+        min_close_ts: Math.floor(Date.now() / 1000),
+      })
+    );
   }
 
   async getOpenMarkets(seriesTicker, limit = 20) {
@@ -571,8 +580,8 @@ class KalshiClient {
     // During 429 cooldown, serve a non-empty list up to 60s so entries don't freeze on BTC.
     if (cached) {
       const n = Array.isArray(cached.markets) ? cached.markets.length : 0;
-      let ttl = n > 0 ? 20_000 : 1_500;
-      if (limited && n > 0) ttl = 60_000;
+      let ttl = n > 0 ? OPEN_MARKETS_CACHE_MS : 1_500;
+      if (limited && n > 0) ttl = OPEN_MARKETS_CACHE_LIMITED_MS;
       if (now - cached.at < ttl) return cached.markets;
     }
 
@@ -650,10 +659,7 @@ class KalshiClient {
       return pickFrom(markets, minMsLeft) || pickFrom(markets, 0);
     };
     const first = await attempt(false);
-    if (first) return first;
-    if (this.isPublicRateLimited()) return null;
-    // One bust+retry when not rate-limited (real rollover miss).
-    return attempt(true);
+    return first || null;
   }
 
   async getMarket(ticker) {
@@ -662,14 +668,13 @@ class KalshiClient {
     if (!this._marketByTickerCache) this._marketByTickerCache = new Map();
     if (!this._marketByTickerInflight) this._marketByTickerInflight = new Map();
     const now = Date.now();
+    const limited = now < this._cooldownUntil;
     const cached = this._marketByTickerCache.get(key);
-    // 8s cache only when quotes are usable — never serve a quote-less list stub.
-    if (cached && now - cached.at < 8000 && marketHasUsableTwoSidedQuote(cached.market)) {
+    const cacheMaxMs = limited ? TICKER_MARKET_CACHE_LIMITED_MS : TICKER_MARKET_CACHE_MS;
+    if (cached && now - cached.at < cacheMaxMs && marketHasUsableTwoSidedQuote(cached.market)) {
       return cached.market;
     }
-    // Cooldown: reuse a good quote, but still hydrate when we have none
-    // (otherwise SOL/BTC entries die as "no two-sided quote" after a 429).
-    if (now < this._cooldownUntil && cached && marketHasUsableTwoSidedQuote(cached.market)) {
+    if (limited && cached && marketHasUsableTwoSidedQuote(cached.market)) {
       return cached.market;
     }
 
