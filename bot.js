@@ -1979,6 +1979,8 @@ function modelStallBankReady(
     priceStalled,
     upwardMomentum,
     armed,
+    window = null,
+    side = null,
     config = {},
   } = {}
 ) {
@@ -1991,6 +1993,18 @@ function modelStallBankReady(
   const nearTargetBank = modelNearTargetBankCents(config);
   const arm = modelTrailArmCents(config);
   if (green < arm) return { ready: false };
+
+  // If the lean is still clearly firm and favoring, let it ride to full TP —
+  // only bank on stall when the lean is soft, weakening, or against.
+  const leanStillFirm =
+    window &&
+    side &&
+    !modelLiveProbNotWithUs(window, side) &&
+    !modelLiveLeanAgainstHeld(window, side, modelLiveLeanMarginPct(config)) &&
+    modelLiveLeanStillFavors(window, side, modelSoftLeanMarginPct(config));
+  if (leanStillFirm) {
+    return { ready: false, heldByLean: true };
+  }
 
   const nearTarget =
     bankGreen > 0 && Number.isFinite(peakProg) && peakProg >= nearTargetBank;
@@ -8094,6 +8108,8 @@ class TradingBot {
         priceStalled,
         upwardMomentum,
         armed,
+        window: picked && picked.window ? picked.window : null,
+        side: trade.side,
         config: this.config,
       });
       const stallBankHoldOk =
@@ -8112,6 +8128,14 @@ class TradingBot {
           liveSellPriceCents: heldSideBidCents,
           stallBank: true,
         });
+        return;
+      }
+      if (bidOk && stallBank.heldByLean) {
+        const holdMsg =
+          `Holding ${trade.symbol} +${greenCents}¢ — stall but lean still firm; riding to +${bankGreen}¢ TP.`;
+        trade.holdReason = holdMsg;
+        this.lastDecision = holdMsg;
+        this._persist();
         return;
       }
       if (bidOk && armed && upwardMomentum && greenCents < nearTargetBank) {
