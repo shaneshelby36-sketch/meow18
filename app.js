@@ -3225,13 +3225,13 @@ function wireBotUI() {
     const el = document.getElementById('bot-stake');
     if (!el) return;
     el.value = Math.max(1, Math.round(parseFloat(el.value) / 2));
-    el.dispatchEvent(new Event('input'));
+    updateSliderDisplay('bot-stake');
   });
   document.getElementById('bot-stake-quarter')?.addEventListener('click', () => {
     const el = document.getElementById('bot-stake');
     if (!el) return;
     el.value = Math.max(1, Math.round(parseFloat(el.value) / 4));
-    el.dispatchEvent(new Event('input'));
+    updateSliderDisplay('bot-stake');
   });
   const settleWindowApplyEdge = document.getElementById('settle-window-apply-edge');
   if (settleWindowApplyEdge) {

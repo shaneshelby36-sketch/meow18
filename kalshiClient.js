@@ -159,6 +159,9 @@ const PUBLIC_QUIET_AFTER_429_MS = 8_000;
 /** Public 429 backoff — keep short so we still trade off cache, then probe again. */
 const PUBLIC_429_BACKOFF_BASE_MS = 6_000;
 const PUBLIC_429_BACKOFF_MAX_MS = 20_000;
+/** After this many consecutive 429s without a clean response, use a longer quiet period. */
+const PUBLIC_429_PERSISTENT_STREAK = 4;
+const PUBLIC_429_PERSISTENT_BACKOFF_MS = 90_000;
 /** Series list cache — avoid re-listing KXBTC15M / KXETH15M every 5s tick. */
 const OPEN_MARKETS_CACHE_MS = 45_000;
 const OPEN_MARKETS_CACHE_LIMITED_MS = 120_000;
@@ -523,17 +526,20 @@ class KalshiClient {
 
   _noteRateLimit() {
     // Prefer cache; public IP bucket refills slowly — don't sit out for minutes.
-    this._429Streak = Math.min(6, (Number(this._429Streak) || 0) + 1);
+    this._429Streak = Math.min(8, (Number(this._429Streak) || 0) + 1);
     this._last429At = Date.now();
-    const backoffMs = Math.min(
-      PUBLIC_429_BACKOFF_MAX_MS,
-      PUBLIC_429_BACKOFF_BASE_MS * Math.pow(1.25, this._429Streak - 1)
-    );
+    const streak = this._429Streak;
+    // Persistent throttle: Kalshi is blocking this IP — back off much longer
+    // instead of hammering every 20s and staying rate-limited indefinitely.
+    const backoffMs = streak >= PUBLIC_429_PERSISTENT_STREAK
+      ? PUBLIC_429_PERSISTENT_BACKOFF_MS
+      : Math.min(PUBLIC_429_BACKOFF_MAX_MS, PUBLIC_429_BACKOFF_BASE_MS * Math.pow(1.25, streak - 1));
     this._cooldownUntil = Math.max(this._cooldownUntil || 0, Date.now() + backoffMs);
     if (Date.now() - this._429LogAt > 10_000) {
       this._429LogAt = Date.now();
       console.warn(
-        `[kalshi] rate limited (429) — cache-only ${Math.round(backoffMs / 1000)}s, then retry`
+        `[kalshi] rate limited (429) — cache-only ${Math.round(backoffMs / 1000)}s, then retry` +
+        (streak >= PUBLIC_429_PERSISTENT_STREAK ? ` (persistent streak ${streak} — backing off)` : '')
       );
     }
   }
