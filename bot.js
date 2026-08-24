@@ -1371,12 +1371,12 @@ function modelLeanDecayCutState(trade, window, side, now = Date.now(), config = 
   // Still clearly favoring (e.g. 90→85 NO) is "decay zone" for tracking only —
   // don't MODEL_AGAINST until the thesis is actually soft/50-50 or flipped.
   const thesisBroken =
+    atFloor || // if lean is already below the exit floor, thesis is by definition gone
     modelLiveProbNotWithUs(window, side) ||
     modelLiveLeanAgainstHeld(window, side, modelLiveLeanMarginPct(config)) ||
     !modelLiveLeanStillFavors(window, side, modelSoftLeanMarginPct(config));
-  // Floor cut: requires thesis to actually be soft/broken (not just "decaying").
-  // Stall cut: time-based override — if the lean hasn't recovered in stallMs it fires
-  // regardless of current thesis strength (92→77 is significant even if 77 still leads).
+  // Floor cut: fires as soon as heldProb drops to/below floor (thesisBroken always true there).
+  // Stall cut: time-based override — fires after stallMs regardless of thesis strength.
   const cutReady = (thesisBroken && atFloor) || stalled;
 
   return {
@@ -2267,8 +2267,9 @@ function checkModelPostExitCooldown({
     reason === 'model_lean_stop' ||
     reason === 'model_lean_flip' ||
     reason === 'model_dip_stop' ||
-    reason === 'model_rapid_adverse' ||
-    reason === 'model_stagnation';
+    reason === 'model_rapid_adverse';
+    // model_stagnation uses the regular sit-out — it's a time/thesis exit, not a
+    // knife-catch stop, so the longer lean-stop cooldown doesn't apply.
   const cd = isLeanStop
     ? Number.isFinite(cdLean) && cdLean > 0
       ? cdLean
