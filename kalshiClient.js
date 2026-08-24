@@ -750,6 +750,16 @@ class KalshiClient {
     return normalizeCreateOrderResponse(data);
   }
 
+  /** Sync read of last series list — no HTTP, safe during 429 cooldown. */
+  peekOpenMarkets(seriesTicker, maxAgeMs = OPEN_MARKETS_CACHE_LIMITED_MS) {
+    if (!this._openMarketsCache) return null;
+    const cached = this._openMarketsCache.get(String(seriesTicker || ''));
+    if (!cached || !Array.isArray(cached.markets)) return null;
+    const age = Date.now() - Number(cached.at || 0);
+    if (!(age >= 0) || age > maxAgeMs) return null;
+    return cached.markets;
+  }
+
   async cancelOrder(orderId) {
     return this._request('DELETE', `/portfolio/events/orders/${orderId}`);
   }

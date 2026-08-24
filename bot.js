@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { dataPath, ensureDataDir, writeJsonAtomic, pruneArchiveFiles } = require('./paths');
-const { bookSideFromLegacy, marketStrikePrice, parseMarketCloseMs } = require('./kalshiClient');
+const { bookSideFromLegacy, marketStrikePrice, parseMarketCloseMs, normalizeMarketPrices, marketHasUsableTwoSidedQuote } = require('./kalshiClient');
 const {
   windowConsensusSupportsSide,
   modelCalibrationEntryGate,
@@ -28,6 +28,7 @@ const LEDGER_PATH = dataPath('bot-ledger.json');
 const TRADE_LOG_PATH = dataPath('trade-log.json');
 const SHADOW_BOOKS_PATH = dataPath('shadow-books.json');
 const CONFIG_PATH = dataPath('bot-config.json');
+const KALSHI_SERIES_CACHE_PATH = dataPath('kalshi-series-cache.json');
 const CALIBRATION_PATH = dataPath('bot-calibration.json');
 const LEGACY_CALIBRATION_PATH = dataPath('calibration.json');
 const MODE_STATE_PATH = dataPath('bot-mode-state.json');
@@ -4216,6 +4217,9 @@ class TradingBot {
     this._lastAutoSetupSwitchAt = 0;
     this._lastAutoSwitchNote = null;
     this._inRunCycle = false;
+    this._lastLiveMarket = Object.create(null);
+    this._lastLiveMarketAt = Object.create(null);
+    this._loadKalshiSeriesCacheFromDisk();
     this._removeInvalidPaperTrades();
     this._seedTradeLogFromLedger();
     this._repairRetainedClosedPnlFromTradeLog();
@@ -6819,6 +6823,95 @@ class TradingBot {
     }
   }
 
+  _loadKalshiSeriesCacheFromDisk() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(KALSHI_SERIES_CACHE_PATH, 'utf8'));
+      const now = Date.now();
+      for (const [series, row] of Object.entries(raw || {})) {
+        if (!row || !row.market) continue;
+        const at = Number(row.at);
+        if (!Number.isFinite(at) || now - at > 20 * 60_000) continue;
+        const market = normalizeMarketPrices(row.market);
+        if (!market || !market.ticker) continue;
+        this._lastLiveMarket[series] = market;
+        this._lastLiveMarketAt[series] = at;
+        if (marketHasUsableTwoSidedQuote(market) && this.client) {
+          if (!this.client._marketByTickerCache) this.client._marketByTickerCache = new Map();
+          this.client._marketByTickerCache.set(String(market.ticker), { at, market });
+        }
+      }
+    } catch {
+      // no disk cache yet
+    }
+  }
+
+  _storeLiveMarketSeries(seriesTicker, market) {
+    if (!seriesTicker || !market || this._inShadow) return;
+    if (!this._lastLiveMarket) this._lastLiveMarket = Object.create(null);
+    if (!this._lastLiveMarketAt) this._lastLiveMarketAt = Object.create(null);
+    const norm = normalizeMarketPrices(market);
+    if (!norm || !norm.ticker) return;
+    const at = Date.now();
+    this._lastLiveMarket[seriesTicker] = norm;
+    this._lastLiveMarketAt[seriesTicker] = at;
+    if (marketHasUsableTwoSidedQuote(norm) && this.client?._marketByTickerCache) {
+      if (!this.client._marketByTickerCache) this.client._marketByTickerCache = new Map();
+      this.client._marketByTickerCache.set(String(norm.ticker), { at, market: norm });
+    }
+    try {
+      let disk = {};
+      try {
+        disk = JSON.parse(fs.readFileSync(KALSHI_SERIES_CACHE_PATH, 'utf8'));
+      } catch {
+        disk = {};
+      }
+      disk[seriesTicker] = { market: norm, at };
+      writeJsonAtomic(KALSHI_SERIES_CACHE_PATH, disk);
+    } catch {
+      // ignore persist errors
+    }
+  }
+
+  /** Memory → Kalshi list cache → disk. No HTTP when rate-limited. */
+  async _resolveMarketFromKalshiCache(seriesTicker, minMsLeft, { limited = false } = {}) {
+    const quoted = (m) => marketHasUsableTwoSidedQuote(normalizeMarketPrices(m));
+    const pickFloor = limited ? 0 : minMsLeft;
+
+    const mem = this._lastLiveMarket && this._lastLiveMarket[seriesTicker];
+    if (mem && quoted(mem)) {
+      return normalizeMarketPrices(mem);
+    }
+
+    let markets = null;
+    if (this.client && typeof this.client.peekOpenMarkets === 'function') {
+      markets = this.client.peekOpenMarkets(seriesTicker);
+    }
+    if (!markets && this.client && typeof this.client.getOpenMarkets === 'function') {
+      markets = await this.client.getOpenMarkets(seriesTicker, 20);
+    }
+    if (Array.isArray(markets) && markets.length) {
+      const picked =
+        pickLiveOpenMarket(markets, Date.now(), pickFloor) ||
+        pickLiveOpenMarket(markets, Date.now(), 0);
+      if (picked && quoted(picked)) {
+        this._storeLiveMarketSeries(seriesTicker, picked);
+        return normalizeMarketPrices(picked);
+      }
+    }
+
+    if (mem && mem.ticker && this.client && typeof this.client.getCachedMarket === 'function') {
+      const hit = this.client.getCachedMarket(mem.ticker, 120_000);
+      if (hit && quoted(hit)) {
+        const merged = normalizeMarketPrices({ ...mem, ...hit });
+        this._storeLiveMarketSeries(seriesTicker, merged);
+        return merged;
+      }
+    }
+
+    if (mem) return normalizeMarketPrices(mem);
+    return null;
+  }
+
   /**
    * Current tradeable Kalshi 15m market for a series (soonest still-live close).
    * Throttled hard — re-listing KXBTC15M every 5s tick was tripping Kalshi 429s.
@@ -6834,33 +6927,24 @@ class TradingBot {
 
     const limited =
       typeof this.client.isPublicRateLimited === 'function' && this.client.isPublicRateLimited();
-    const refreshMs = limited ? KALSHI_SERIES_REFRESH_LIMITED_MS : KALSHI_SERIES_REFRESH_MS;
-    const staleCapMs = limited ? KALSHI_SERIES_STALE_CAP_LIMITED_MS : KALSHI_SERIES_STALE_CAP_MS;
 
+    if (limited) {
+      return this._resolveMarketFromKalshiCache(seriesTicker, minMsLeft, { limited: true });
+    }
+
+    const refreshMs = KALSHI_SERIES_REFRESH_MS;
+    const staleCapMs = KALSHI_SERIES_STALE_CAP_MS;
     const cached = this._lastLiveMarket[seriesTicker];
     const cacheAge = Date.now() - (Number(this._lastLiveMarketAt[seriesTicker]) || 0);
     const cachedClose = cached ? parseMarketCloseMs(cached) : NaN;
-    const cachedQuoted = (m) =>
-      m &&
-      Number.isFinite(Number(m.yes_bid)) &&
-      Number.isFinite(Number(m.yes_ask)) &&
-      Number(m.yes_bid) >= 1 &&
-      Number(m.yes_ask) <= 99 &&
-      Number(m.yes_bid) <= Number(m.yes_ask);
-
+    const quoted = (m) => marketHasUsableTwoSidedQuote(normalizeMarketPrices(m));
     const windowLive =
       cached &&
       Number.isFinite(cachedClose) &&
       cachedClose > Date.now() + Math.max(500, minMsLeft);
 
-    if (cached && cachedQuoted(cached) && cacheAge < staleCapMs && (windowLive || limited)) {
-      if (cacheAge < refreshMs || limited) {
-        return cached;
-      }
-    }
-
-    if (limited) {
-      return cachedQuoted(cached) ? cached : cached || null;
+    if (cached && quoted(cached) && cacheAge < staleCapMs && windowLive && cacheAge < refreshMs) {
+      return normalizeMarketPrices(cached);
     }
 
     let found = null;
@@ -6872,23 +6956,27 @@ class TradingBot {
       }
     }
     if (found) {
-      if (found.ticker && typeof this.client.getMarket === 'function' && !cachedQuoted(found)) {
+      if (
+        found.ticker &&
+        typeof this.client.getMarket === 'function' &&
+        !quoted(found)
+      ) {
         try {
-          const quoted = await this._getMarketBounded(found.ticker, 3500);
-          if (cachedQuoted(quoted)) {
-            found = { ...found, ...quoted };
-          }
+          const q = await this._getMarketBounded(found.ticker, 3500);
+          if (quoted(q)) found = { ...found, ...q };
         } catch (_) {
           /* keep list row */
         }
       }
-      if (cachedQuoted(found)) {
-        this._lastLiveMarket[seriesTicker] = found;
-        this._lastLiveMarketAt[seriesTicker] = Date.now();
+      if (quoted(found)) {
+        this._storeLiveMarketSeries(seriesTicker, found);
       }
-      return found;
+      return normalizeMarketPrices(found);
     }
-    return cachedQuoted(cached) ? cached : null;
+
+    const fallback = await this._resolveMarketFromKalshiCache(seriesTicker, minMsLeft, { limited: false });
+    if (fallback && quoted(fallback)) return fallback;
+    return cached && quoted(cached) ? normalizeMarketPrices(cached) : null;
   }
 
   /** One pass over tradeable series — serial, stops on 429. */
@@ -6913,7 +7001,8 @@ class TradingBot {
     }
   }
 
-  _liveMarketWaitReason(symbol) {
+  _liveMarketWaitReason(symbol, seriesTicker) {
+    const st = seriesTicker || SERIES_BY_SYMBOL[String(symbol || '').toUpperCase()];
     const limited =
       this.client &&
       typeof this.client.isPublicRateLimited === 'function' &&
@@ -6924,7 +7013,19 @@ class TradingBot {
           ? this.client.publicRateLimitRemainingMs()
           : 0;
       const sec = remMs > 0 ? Math.max(1, Math.ceil(remMs / 1000)) : 'a few';
-      return `Waiting: ${symbol} Kalshi paused (rate limit ~${sec}s) — using cached quotes when available.`;
+      if (!this._seriesHasUsableCachedQuote(st)) {
+        const hasRow =
+          (st && this._lastLiveMarket && this._lastLiveMarket[st]) ||
+          (st &&
+            this.client &&
+            typeof this.client.peekOpenMarkets === 'function' &&
+            (this.client.peekOpenMarkets(st) || []).length);
+        if (!hasRow) {
+          return `Waiting: ${symbol} — Kalshi rate limit (~${sec}s), no cached quote yet.`;
+        }
+        return `Waiting: ${symbol} — Kalshi rate limit (~${sec}s), cached row lacks bid/ask.`;
+      }
+      return `Waiting: ${symbol} — Kalshi rate limit (~${sec}s), using cached quote.`;
     }
     return `Waiting: ${symbol} 15m window rolling over (new ticker not listed yet).`;
   }
@@ -6980,6 +7081,46 @@ class TradingBot {
       console.warn(`[bot] entry re-quote ${ticker} failed:`, err.message);
     }
     return null;
+  }
+
+  /** Normalize + merge ticker cache (cache-only during 429 — safe to call while limited). */
+  async _hydrateMarketQuote(market, timeoutMs = 3500) {
+    if (!market || typeof market !== 'object') return null;
+    let merged = normalizeMarketPrices(market);
+    const usable = (m) => marketHasUsableTwoSidedQuote(normalizeMarketPrices(m));
+    if (usable(merged)) return merged;
+    const ticker = merged.ticker;
+    if (!ticker || typeof this._getMarketBounded !== 'function') return usable(merged) ? merged : null;
+    try {
+      const hit = await this._getMarketBounded(ticker, timeoutMs);
+      if (hit && typeof hit === 'object') {
+        merged = normalizeMarketPrices({ ...merged, ...hit });
+      }
+    } catch (_) {
+      /* cache-only during cooldown */
+    }
+    return usable(merged) ? merged : null;
+  }
+
+  _seriesHasUsableCachedQuote(seriesTicker) {
+    const st = String(seriesTicker || '');
+    if (!st) return false;
+    const mem = this._lastLiveMarket && this._lastLiveMarket[st];
+    if (mem && marketHasUsableTwoSidedQuote(normalizeMarketPrices(mem))) return true;
+    const peek =
+      this.client &&
+      typeof this.client.peekOpenMarkets === 'function' &&
+      this.client.peekOpenMarkets(st);
+    if (Array.isArray(peek)) {
+      for (const m of peek) {
+        if (marketHasUsableTwoSidedQuote(normalizeMarketPrices(m))) return true;
+      }
+    }
+    if (mem && mem.ticker && this.client && typeof this.client.getCachedMarket === 'function') {
+      const hit = this.client.getCachedMarket(mem.ticker, 120_000);
+      if (hit && marketHasUsableTwoSidedQuote(normalizeMarketPrices(hit))) return true;
+    }
+    return false;
   }
 
   async _getMarketBounded(ticker, timeoutMs = 4000) {
@@ -9351,9 +9492,10 @@ class TradingBot {
       return null;
     }
     if (!market) {
-      this.lastDecision = this._liveMarketWaitReason(symbol);
+      this.lastDecision = this._liveMarketWaitReason(symbol, seriesTicker);
       return null;
     }
+    market = (await this._hydrateMarketQuote(market, 3500)) || normalizeMarketPrices(market);
     this._noteEngineStrike(symbol, market);
     if (this._hasOpenOnTicker(market.ticker)) {
       this.lastDecision = `Waiting: already holding an open position on ${market.ticker}.`;
@@ -9806,9 +9948,10 @@ class TradingBot {
       return null;
     }
     if (!market) {
-      say(this._liveMarketWaitReason(symbol));
+      say(this._liveMarketWaitReason(symbol, seriesTicker));
       return null;
     }
+    market = (await this._hydrateMarketQuote(market, 3500)) || normalizeMarketPrices(market);
     this._noteEngineStrike(symbol, market);
     if (this._hasOpenOnTicker(market.ticker)) {
       say(`Waiting: already holding an open position on ${market.ticker}.`);
@@ -9871,47 +10014,15 @@ class TradingBot {
     }
     let yesBid = Number(market.yes_bid);
     let yesAsk = Number(market.yes_ask);
-    const hasQuote =
-      Number.isFinite(yesBid) &&
-      Number.isFinite(yesAsk) &&
-      yesBid >= 1 &&
-      yesAsk <= 99 &&
-      yesBid <= yesAsk;
-    if (
-      !hasQuote &&
-      market.ticker &&
-      typeof this._getMarketBounded === 'function' &&
-      !(
-        this.client &&
-        typeof this.client.isPublicRateLimited === 'function' &&
-        this.client.isPublicRateLimited()
-      )
-    ) {
-      try {
-        const quoted = await this._getMarketBounded(market.ticker, 3500);
-        if (
-          quoted &&
-          Number.isFinite(Number(quoted.yes_bid)) &&
-          Number.isFinite(Number(quoted.yes_ask)) &&
-          Number(quoted.yes_bid) >= 1 &&
-          Number(quoted.yes_ask) <= 99 &&
-          Number(quoted.yes_bid) <= Number(quoted.yes_ask)
-        ) {
-          market = { ...market, ...quoted };
-          yesBid = Number(market.yes_bid);
-          yesAsk = Number(market.yes_ask);
-        }
-      } catch (_) {
-        /* fall through */
-      }
-    }
     if (!Number.isFinite(yesBid) || !Number.isFinite(yesAsk) || yesBid < 1 || yesAsk > 99 || yesBid > yesAsk) {
       const limited =
         this.client &&
         typeof this.client.isPublicRateLimited === 'function' &&
         this.client.isPublicRateLimited();
       this.lastError = limited
-        ? `Waiting: ${symbol} quote hydrate paused (Kalshi rate limit) — retrying shortly.`
+        ? this._seriesHasUsableCachedQuote(seriesTicker)
+          ? `Waiting: ${symbol} — Kalshi rate limit; cached quote not merging (retrying).`
+          : `Waiting: ${symbol} — Kalshi rate limit (~${Math.max(1, Math.ceil((this.client.publicRateLimitRemainingMs?.() || 5000) / 1000))}s), no bid/ask cache yet.`
         : `Skipped ${symbol}: Kalshi has no usable two-sided quote yet.`;
       say(this.lastError);
       return null;
@@ -10138,14 +10249,6 @@ class TradingBot {
     );
     if (candidates.length === 0) return [];
     await this._prefetchKalshiForSymbols(candidates, 5000);
-    const limited =
-      this.client &&
-      typeof this.client.isPublicRateLimited === 'function' &&
-      this.client.isPublicRateLimited();
-    if (limited) {
-      this.lastDecision =
-        'Kalshi rate limit — using cached BTC/ETH quotes (refresh pauses ~12s per series).';
-    }
     const skips = [];
     // Serial — parallel AUTO scans were bursting list GETs and tripping 429.
     const valid = [];
@@ -10315,9 +10418,10 @@ class TradingBot {
       return null;
     }
     if (!market) {
-      say(this._liveMarketWaitReason(symbol));
+      say(this._liveMarketWaitReason(symbol, seriesTicker));
       return null;
     }
+    market = (await this._hydrateMarketQuote(market, 3500)) || normalizeMarketPrices(market);
     this._noteEngineStrike(symbol, market);
     if (this._hasOpenOnTicker(market.ticker)) {
       say(`Waiting: already holding an open position on ${market.ticker}.`);
