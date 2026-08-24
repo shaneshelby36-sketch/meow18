@@ -1847,24 +1847,94 @@ function modelBeChaseSeconds(config = {}) {
 }
 
 /**
+ * Bid still rising — fresh highs / bounce, not stalled. BE chase, breakeven skip,
+ * and post-+3¢ stall (only bank after a momentum run).
+ */
+function modelUpwardMomentumEvidence(
+  trade,
+  {
+    greenCents,
+    heldSideBidCents,
+    peakHeldBidCents,
+    peakHeldBidAt,
+    now,
+    config = {},
+    beChaseMode = false,
+  } = {}
+) {
+  const arm = modelTrailArmCents(config);
+  const green = Number(greenCents);
+  if (!Number.isFinite(green) || green < 1) return false;
+
+  const bid = Number(heldSideBidCents);
+  if (!Number.isFinite(bid)) return false;
+
+  const stallMs = modelMomentumStallMs(config);
+  const stallPullback = modelMomentumPullbackCents(config);
+  const peak = Number(peakHeldBidCents);
+  const peakAt = Number(peakHeldBidAt);
+  const peakAgeMs = Number.isFinite(peakAt) ? now - peakAt : Infinity;
+  const pullback =
+    Number.isFinite(peak) && Number.isFinite(bid) ? Math.max(0, Math.round(peak - bid)) : 0;
+  const stalled =
+    (stallPullback > 0 && pullback >= stallPullback) ||
+    (stallMs > 0 && peakAgeMs >= stallMs);
+  const atPeak = Number.isFinite(peak) && Math.round(bid) >= Math.round(peak) - 1;
+
+  if (atPeak && !stalled) return true;
+
+  if (beChaseMode && green < arm && trade) {
+    const prevTrough = Number(trade.modelBeChaseTroughBid);
+    const base = Number.isFinite(prevTrough) ? prevTrough : bid;
+    trade.modelBeChaseTroughBid = Math.min(base, bid);
+    const trough = Number(trade.modelBeChaseTroughBid);
+    const bounce = Number.isFinite(trough) ? Math.max(0, Math.round(bid - trough)) : 0;
+    if (bounce >= 1 && !stalled) return true;
+  }
+
+  return false;
+}
+
+function modelBeChaseUpwardEvidence(trade, args = {}) {
+  return modelUpwardMomentumEvidence(trade, { ...args, beChaseMode: true });
+}
+
+/**
  * Crossed breakeven → N seconds to reach +trailArm (default +3¢) or scratch flat.
  * Dips back underwater reset the timer; crossing BE again restarts it.
+ * While bid is still rising toward +3¢, the timer does not scratch.
  */
-function modelBeChaseExitReady(trade, { nearFlat, flatOrGreen, peakProgressCents, now, config = {} } = {}) {
+function modelBeChaseExitReady(
+  trade,
+  {
+    nearFlat,
+    flatOrGreen,
+    peakProgressCents,
+    now,
+    config = {},
+    upwardEvidence = false,
+  } = {}
+) {
   const needSec = modelBeChaseSeconds(config);
   if (!(needSec > 0)) return { ready: false, skipped: true };
   const needProgress = modelTrailArmCents(config);
   const atBe = !!(nearFlat || flatOrGreen);
 
   if (!atBe) {
-    if (trade) delete trade.modelBeChaseStartedAt;
+    if (trade) {
+      delete trade.modelBeChaseStartedAt;
+      delete trade.modelBeChaseTroughBid;
+    }
     return { ready: false, reset: true };
   }
 
   const peak = Number(peakProgressCents);
   const peaked = Number.isFinite(peak) ? peak : 0;
   if (peaked >= needProgress) {
-    if (trade) delete trade.modelBeChaseStartedAt;
+    if (trade) {
+      delete trade.modelBeChaseStartedAt;
+      delete trade.modelBeChaseTroughBid;
+    }
     return { ready: false, achieved: true, needProgress };
   }
 
@@ -1873,11 +1943,22 @@ function modelBeChaseExitReady(trade, { nearFlat, flatOrGreen, peakProgressCents
 
   if (!trade.modelBeChaseStartedAt) {
     trade.modelBeChaseStartedAt = t;
+    if (trade) delete trade.modelBeChaseTroughBid;
     return { ready: false, started: true, needSec, needProgress };
   }
 
   const elapsed = t - Number(trade.modelBeChaseStartedAt);
   if (elapsed >= needSec * 1000) {
+    if (upwardEvidence) {
+      return {
+        ready: false,
+        needSec,
+        needProgress,
+        peakProgress: peaked,
+        elapsedMs: elapsed,
+        holdingRise: true,
+      };
+    }
     return { ready: true, needSec, needProgress, peakProgress: peaked, elapsedMs: elapsed };
   }
   return { ready: false, needSec, needProgress, peakProgress: peaked, elapsedMs: elapsed };
@@ -7594,6 +7675,24 @@ class TradingBot {
       const momentumStalled =
         (stallPullback > 0 && pullback >= stallPullback) ||
         (stallMs > 0 && peakAgeMs >= stallMs);
+      const armCents = modelTrailArmCents(this.config);
+      const armed = flatOrGreen && greenCents >= armCents;
+      const priceStalled = momentumStalled;
+      const upwardMomentum = modelUpwardMomentumEvidence(trade, {
+        greenCents,
+        heldSideBidCents,
+        peakHeldBidCents: peak,
+        peakHeldBidAt: peakAt,
+        now,
+        config: this.config,
+        beChaseMode: !armed,
+      });
+      if (armed && upwardMomentum) {
+        trade.modelArmHadMomentum = true;
+      }
+      if (!armed || underwater) {
+        delete trade.modelArmHadMomentum;
+      }
       let momentumRun = faded ? !momentumStalled : !!(liveFavors && !momentumStalled);
 
       // Fade TP is −N¢ on the lean/current side (YES if UP, NO if DOWN),
@@ -7781,6 +7880,10 @@ class TradingBot {
           await this._closePosition(trade, heldSideBidCents, 'take_profit', {
             liveSellPriceCents: heldSideBidCents,
           });
+        } else if (upwardMomentum) {
+          this.lastDecision =
+            `Stagnation thesis soft on ${trade.symbol} but bid still rising — holding (no BE scratch).`;
+          this._persist();
         } else if (scratchFlat || flatOrGreen) {
           await tryModelBreakevenScratch();
         } else {
@@ -7796,11 +7899,18 @@ class TradingBot {
         peakProgressCents: peakProgress,
         now,
         config: this.config,
+        upwardEvidence: upwardMomentum,
       });
-      if (beChase.started || beChase.reset || beChase.achieved) {
+      if (beChase.started || beChase.reset || beChase.achieved || beChase.holdingRise) {
         this._persist();
       }
-      if (bidOk && againstBeReady && beChase.ready && (scratchFlat || flatOrGreen)) {
+      if (
+        bidOk &&
+        againstBeReady &&
+        beChase.ready &&
+        (scratchFlat || flatOrGreen) &&
+        !upwardMomentum
+      ) {
         this.lastDecision =
           `BE chase ${beChase.needSec}s expired (peak +${beChase.peakProgress}¢, need +${beChase.needProgress}¢) on ${trade.symbol} — scratching.`;
         if (await tryModelBreakevenScratch()) return;
@@ -7935,25 +8045,37 @@ class TradingBot {
         return;
       }
 
-      // Trail armed (+3¢): bid flat or pulling back — bank at live bid if green,
-      // even below the target (+7¢). Avoids riding +8→+4 while "waiting" for target.
-      const armCents = modelTrailArmCents(this.config);
-      const armed = flatOrGreen && greenCents >= armCents;
-      const priceStalled =
-        (stallPullback > 0 && pullback >= stallPullback) ||
-        (stallMs > 0 && peakAgeMs >= stallMs);
-      if (bidOk && armed && priceStalled && flatOrGreen && greenCents >= 1 && heldForBank) {
+      // Trail armed (+3¢): stall-bank only after a momentum run; while rising, ride to +TP.
+      if (
+        bidOk &&
+        armed &&
+        priceStalled &&
+        flatOrGreen &&
+        greenCents >= 1 &&
+        heldForBank &&
+        trade.modelArmHadMomentum &&
+        !upwardMomentum
+      ) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
           stallBank: true,
         });
         return;
       }
+      if (bidOk && armed && upwardMomentum) {
+        const holdMsg =
+          `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — ` +
+          `momentum up; riding toward +${bankGreen}¢ TP (stall bank only after run fades).`;
+        trade.holdReason = holdMsg;
+        this.lastDecision = holdMsg;
+        this._persist();
+        return;
+      }
       if (bidOk && armed && !priceStalled) {
         const stallSec = stallMs > 0 ? Math.round(stallMs / 1000) : 0;
         const holdMsg =
           `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — ` +
-          `TP at +${bankGreen}¢; stall ${stallSec}s banks at bid.`;
+          `TP at +${bankGreen}¢; stall ${stallSec}s banks at bid after momentum run.`;
         trade.holdReason = holdMsg;
         this.lastDecision = holdMsg;
         return;
@@ -11154,6 +11276,8 @@ module.exports = {
   modelStagnationExitReady,
   modelRapidAdverseExitReady,
   modelBeChaseExitReady,
+  modelBeChaseUpwardEvidence,
+  modelUpwardMomentumEvidence,
   modelBeChaseSeconds,
   modelPeakProgressCents,
   MODEL_STAGNATION_SECONDS_DEFAULT,
