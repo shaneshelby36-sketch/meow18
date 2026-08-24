@@ -155,7 +155,10 @@ function bookSideFromLegacy(side, action) {
 /** Min gap between unauthenticated public GETs (IP bucket is much tighter than Basic read). */
 const UNAUTH_PUBLIC_SPACING_MS = 1200;
 /** After repeated 429s, stay cache-only briefly even when short cooldown expires. */
-const PUBLIC_QUIET_AFTER_429_MS = 45_000;
+const PUBLIC_QUIET_AFTER_429_MS = 8_000;
+/** Public 429 backoff — keep short so we still trade off cache, then probe again. */
+const PUBLIC_429_BACKOFF_BASE_MS = 6_000;
+const PUBLIC_429_BACKOFF_MAX_MS = 20_000;
 /** Series list cache — avoid re-listing KXBTC15M / KXETH15M every 5s tick. */
 const OPEN_MARKETS_CACHE_MS = 45_000;
 const OPEN_MARKETS_CACHE_LIMITED_MS = 120_000;
@@ -513,22 +516,24 @@ class KalshiClient {
   _maybeDecay429Streak() {
     const streak = Number(this._429Streak) || 0;
     const last = Number(this._last429At) || 0;
-    if (streak > 0 && last > 0 && Date.now() - last > 3 * 60_000) {
+    if (streak > 0 && last > 0 && Date.now() - last > 45_000) {
       this._429Streak = 0;
     }
   }
 
   _noteRateLimit() {
-    // Prefer cache; public IP bucket refills slowly — don't retry every 5s.
-    this._429Streak = Math.min(12, (Number(this._429Streak) || 0) + 1);
+    // Prefer cache; public IP bucket refills slowly — don't sit out for minutes.
+    this._429Streak = Math.min(6, (Number(this._429Streak) || 0) + 1);
     this._last429At = Date.now();
-    const baseMs = 15_000;
-    const backoffMs = Math.min(120_000, baseMs * Math.pow(1.4, this._429Streak - 1));
+    const backoffMs = Math.min(
+      PUBLIC_429_BACKOFF_MAX_MS,
+      PUBLIC_429_BACKOFF_BASE_MS * Math.pow(1.25, this._429Streak - 1)
+    );
     this._cooldownUntil = Math.max(this._cooldownUntil || 0, Date.now() + backoffMs);
     if (Date.now() - this._429LogAt > 10_000) {
       this._429LogAt = Date.now();
       console.warn(
-        `[kalshi] rate limited (429) — pacing ${Math.round(backoffMs / 1000)}s, preferring cached markets`
+        `[kalshi] rate limited (429) — cache-only ${Math.round(backoffMs / 1000)}s, then retry`
       );
     }
   }

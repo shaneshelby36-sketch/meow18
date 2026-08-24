@@ -900,6 +900,14 @@ async function testKalshiClient() {
   }
 
   {
+    const c = new KalshiClient({});
+    for (let i = 0; i < 12; i += 1) c._noteRateLimit();
+    const rem = c.publicRateLimitRemainingMs();
+    check(rem > 0, 'repeated 429s still pause public GETs');
+    check(rem <= 20_500, '429 backoff caps at 20s — does not lock Kalshi out for minutes');
+  }
+
+  {
     const { normalizeMarketPrices, marketHasUsableTwoSidedQuote } = require('./kalshiClient');
     const oneSided = normalizeMarketPrices({
       yes_bid_dollars: '0.0000',
