@@ -529,6 +529,27 @@
             </div>
             <span class="field-hint"><strong>Off by default (0)</strong>. When on: true red ≥ this many ¢ <em>and</em> model decaying → cut after open grace.</span>
           </label>
+          <label>MODEL lean decay trigger (pts drop)
+            <div class="slider-row">
+              <input id="bot-model-decay-drop" type="range" min="5" max="30" step="1" />
+              <span class="slider-value" id="bot-model-decay-drop-value">—</span>
+            </div>
+            <span class="field-hint">How many probability points the lean must drop from its peak before decay tracking starts (e.g. 92→78 = 14pt drop). Default <strong>14</strong>. Lower = more sensitive; higher = only cuts on bigger collapses.</span>
+          </label>
+          <label>MODEL lean decay stall (sec)
+            <div class="slider-row">
+              <input id="bot-model-decay-stall" type="range" min="0" max="30" step="1" />
+              <span class="slider-value" id="bot-model-decay-stall-value">—</span>
+            </div>
+            <span class="field-hint">After entering the decay zone with no recovery, cut after this many seconds regardless of lean strength. Default <strong>6s</strong>. Lower = cuts faster; <strong>0</strong> = stall timer off (only floor path fires).</span>
+          </label>
+          <label>MODEL lean decay floor (prob %)
+            <div class="slider-row">
+              <input id="bot-model-decay-floor" type="range" min="60" max="92" step="1" />
+              <span class="slider-value" id="bot-model-decay-floor-value">—</span>
+            </div>
+            <span class="field-hint">If the held-side probability drops to or below this level <em>and</em> the thesis is soft, cut immediately (no stall wait). Default <strong>85</strong>.</span>
+          </label>
           <label>MODEL cash out before settle (min left)
             <div class="slider-row">
               <input id="bot-model-settle-close" type="range" min="0" max="8" step="0.5" />

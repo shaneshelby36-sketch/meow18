@@ -1708,6 +1708,9 @@ const SLIDER_UNITS = {
   'bot-model-be-chase-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-model-rapid-adverse': (v) => (Number(v) <= 0 ? 'off' : `−${Math.round(v)}¢`),
   'bot-model-stall-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
+  'bot-model-decay-drop': (v) => `${Math.round(v)}pts`,
+  'bot-model-decay-stall': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
+  'bot-model-decay-floor': (v) => `${Math.round(v)}%`,
   'bot-model-settle-close': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
   'bot-model-late-barrier': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(1)} min`),
   'bot-model-preclose-force': (v) => (Number(v) <= 0 ? 'off' : `${(+v).toFixed(2)} min`),
@@ -2115,6 +2118,9 @@ function wireSliderDisplays() {
     'bot-model-stagnation-sensitivity',
     'bot-model-be-chase-sec',
     'bot-model-rapid-adverse',
+    'bot-model-decay-drop',
+    'bot-model-decay-stall',
+    'bot-model-decay-floor',
     'bot-model-settle-close',
     'bot-model-late-barrier',
     'bot-model-preclose-force',
@@ -2249,6 +2255,9 @@ function wireBotConfigAutoSave() {
     'bot-model-stagnation-sensitivity',
     'bot-model-be-chase-sec',
     'bot-model-rapid-adverse',
+    'bot-model-decay-drop',
+    'bot-model-decay-stall',
+    'bot-model-decay-floor',
     'bot-model-settle-close',
     'bot-model-late-barrier',
     'bot-model-preclose-force',
@@ -2431,6 +2440,18 @@ async function loadBotConfigIntoForm() {
       modelRapidAdverse.value =
         c.modelRapidAdverseCents != null ? c.modelRapidAdverseCents : 0;
     }
+    const modelDecayDrop = document.getElementById('bot-model-decay-drop');
+    if (modelDecayDrop) {
+      modelDecayDrop.value = c.modelLeanDecayDropPts != null ? c.modelLeanDecayDropPts : 14;
+    }
+    const modelDecayStall = document.getElementById('bot-model-decay-stall');
+    if (modelDecayStall) {
+      modelDecayStall.value = c.modelLeanDecayStallSeconds != null ? c.modelLeanDecayStallSeconds : 6;
+    }
+    const modelDecayFloor = document.getElementById('bot-model-decay-floor');
+    if (modelDecayFloor) {
+      modelDecayFloor.value = c.modelLeanDecayFloor != null ? c.modelLeanDecayFloor : 85;
+    }
     const modelSettleClose = document.getElementById('bot-model-settle-close');
     if (modelSettleClose) {
       modelSettleClose.value =
@@ -2566,6 +2587,9 @@ async function loadBotConfigIntoForm() {
     'bot-model-stagnation-sensitivity',
     'bot-model-be-chase-sec',
     'bot-model-rapid-adverse',
+    'bot-model-decay-drop',
+    'bot-model-decay-stall',
+    'bot-model-decay-floor',
       'bot-model-settle-close',
       'bot-model-late-barrier',
       'bot-model-preclose-force',
@@ -2760,6 +2784,9 @@ async function saveBotConfig(opts = {}) {
     modelAgainstExit: document.getElementById('bot-model-against-exit')?.value || 'off',
     modelBeChaseSeconds: parseFloat(document.getElementById('bot-model-be-chase-sec')?.value || '20'),
     modelRapidAdverseCents: parseFloat(document.getElementById('bot-model-rapid-adverse')?.value || '0'),
+    modelLeanDecayDropPts: parseFloat(document.getElementById('bot-model-decay-drop')?.value || '14'),
+    modelLeanDecayStallSeconds: parseFloat(document.getElementById('bot-model-decay-stall')?.value || '6'),
+    modelLeanDecayFloor: parseFloat(document.getElementById('bot-model-decay-floor')?.value || '85'),
     modelSettleCloseMinutes: parseFloat(document.getElementById('bot-model-settle-close')?.value || '2.5'),
     modelLateBarrierMinutes: parseFloat(document.getElementById('bot-model-late-barrier')?.value || '2'),
     modelPreCloseForceMinutes: parseFloat(
