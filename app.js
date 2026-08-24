@@ -1704,6 +1704,7 @@ const SLIDER_UNITS = {
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
   'bot-model-near-target-bank': (v) => `+${Math.round(v)}¢`,
   'bot-model-stagnation-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
+  'bot-model-stagnation-sensitivity': (v) => (Number(v) <= 0 ? 'any progress' : `≥${Math.round(v)}¢`),
   'bot-model-be-chase-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-model-rapid-adverse': (v) => (Number(v) <= 0 ? 'off' : `−${Math.round(v)}¢`),
   'bot-model-stall-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
@@ -2111,6 +2112,7 @@ function wireSliderDisplays() {
     'bot-model-near-target-bank',
     'bot-model-stall-sec',
     'bot-model-stagnation-sec',
+    'bot-model-stagnation-sensitivity',
     'bot-model-be-chase-sec',
     'bot-model-rapid-adverse',
     'bot-model-settle-close',
@@ -2244,6 +2246,7 @@ function wireBotConfigAutoSave() {
     'bot-model-near-target-bank',
     'bot-model-stall-sec',
     'bot-model-stagnation-sec',
+    'bot-model-stagnation-sensitivity',
     'bot-model-be-chase-sec',
     'bot-model-rapid-adverse',
     'bot-model-settle-close',
@@ -2276,6 +2279,7 @@ function wireBotConfigAutoSave() {
     'bot-half-stake-near',
     'bot-second-green',
     'bot-model-invert',
+    'bot-model-against-exit',
     'bot-model-auto-switch',
     'bot-symbol',
     'bot-strategy-mode',
@@ -2402,6 +2406,20 @@ async function loadBotConfigIntoForm() {
     if (modelStagnationSec) {
       modelStagnationSec.value =
         c.modelStagnationSeconds != null ? c.modelStagnationSeconds : 60;
+    }
+    const modelStagnationSensitivity = document.getElementById('bot-model-stagnation-sensitivity');
+    if (modelStagnationSensitivity) {
+      modelStagnationSensitivity.value =
+        c.modelStagnationMinProgressCents != null ? c.modelStagnationMinProgressCents : 3;
+    }
+    const modelAgainstExit = document.getElementById('bot-model-against-exit');
+    if (modelAgainstExit) {
+      const on =
+        c.modelAgainstExit === true ||
+        c.modelAgainstExit === 1 ||
+        c.modelAgainstExit === 'on' ||
+        c.modelAgainstExit === 'true';
+      modelAgainstExit.value = on ? 'on' : 'off';
     }
     const modelBeChaseSec = document.getElementById('bot-model-be-chase-sec');
     if (modelBeChaseSec) {
@@ -2545,6 +2563,7 @@ async function loadBotConfigIntoForm() {
     'bot-model-near-target-bank',
     'bot-model-stall-sec',
     'bot-model-stagnation-sec',
+    'bot-model-stagnation-sensitivity',
     'bot-model-be-chase-sec',
     'bot-model-rapid-adverse',
       'bot-model-settle-close',
@@ -2735,6 +2754,10 @@ async function saveBotConfig(opts = {}) {
     ),
     modelMomentumStallSeconds: parseFloat(document.getElementById('bot-model-stall-sec')?.value || '4'),
     modelStagnationSeconds: parseFloat(document.getElementById('bot-model-stagnation-sec')?.value || '60'),
+    modelStagnationMinProgressCents: parseFloat(
+      document.getElementById('bot-model-stagnation-sensitivity')?.value || '3'
+    ),
+    modelAgainstExit: document.getElementById('bot-model-against-exit')?.value || 'off',
     modelBeChaseSeconds: parseFloat(document.getElementById('bot-model-be-chase-sec')?.value || '20'),
     modelRapidAdverseCents: parseFloat(document.getElementById('bot-model-rapid-adverse')?.value || '0'),
     modelSettleCloseMinutes: parseFloat(document.getElementById('bot-model-settle-close')?.value || '2.5'),

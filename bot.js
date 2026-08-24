@@ -670,11 +670,6 @@ function isModelInvertSide(config = {}) {
   return isOnOffEnabled(config && config.modelInvertSide, false);
 }
 
-/** Instant MODEL_AGAINST cut on lean flip. Default off — stagnation owns decaying thesis. */
-function modelAgainstExitEnabled(config = {}) {
-  return isOnOffEnabled(config && config.modelAgainstExit, false);
-}
-
 function modelSignalSideFromDirection(direction) {
   return direction === 'UP' ? 'yes' : direction === 'DOWN' ? 'no' : null;
 }
@@ -1379,7 +1374,10 @@ function modelLeanDecayCutState(trade, window, side, now = Date.now(), config = 
     modelLiveProbNotWithUs(window, side) ||
     modelLiveLeanAgainstHeld(window, side, modelLiveLeanMarginPct(config)) ||
     !modelLiveLeanStillFavors(window, side, modelSoftLeanMarginPct(config));
-  const cutReady = thesisBroken && (atFloor || stalled);
+  // Floor cut: requires thesis to actually be soft/broken (not just "decaying").
+  // Stall cut: time-based override — if the lean hasn't recovered in stallMs it fires
+  // regardless of current thesis strength (92→77 is significant even if 77 still leads).
+  const cutReady = (thesisBroken && atFloor) || stalled;
 
   return {
     inDecayZone: true,
@@ -3774,7 +3772,6 @@ const EDITABLE_STRING_FIELDS = {
     return MODEL_SETUPS.some((x) => x.id === s) ? s : null;
   },
   modelInvertSide: (v) => parseOnOffField(v, false),
-  modelAgainstExit: (v) => parseOnOffField(v, false),
   modelAutoSwitchSetup: (v) => parseOnOffField(v, false),
   // Silent paper books for non-live setups. Off = freeze (knobs / what-if stay).
   modelShadowBooks: (v) => parseOnOffField(v, false),
@@ -4188,7 +4185,6 @@ class TradingBot {
       modelConfirmMaxExtensionCents: MODEL_CONFIRM_MAX_EXTENSION_CENTS_DEFAULT,
       modelConfirmMinContinueCents: MODEL_CONFIRM_MIN_CONTINUE_CENTS_DEFAULT,
       modelInvertSide: 'off', // fade: lock UP→buy NO, DOWN→buy YES
-      modelAgainstExit: 'off', // instant MODEL_AGAINST cut; stagnation owns decaying thesis
       modelPerfectMinEntryCents: MODEL_PERFECT_MIN_ENTRY_DEFAULT_CENTS,
       modelPerfectConfidence: MODEL_PERFECT_CONFIDENCE_DEFAULT,
       modelPerfectLeanPts: MODEL_PERFECT_LEAN_DEFAULT,
@@ -7145,7 +7141,10 @@ class TradingBot {
 
     const fallback = await this._resolveMarketFromKalshiCache(seriesTicker, minMsLeft, { limited: false });
     if (fallback && quoted(fallback)) return fallback;
-    return cached && quoted(cached) ? normalizeMarketPrices(cached) : null;
+    // Don't fall back to the old session's market when its window has already
+    // closed — that causes the bot to evaluate/bid into a closed market.
+    if (cached && quoted(cached) && windowLive) return normalizeMarketPrices(cached);
+    return null;
   }
 
   /** One pass over tradeable series — serial, stops on 429. */
@@ -7557,7 +7556,6 @@ class TradingBot {
       if (
         forceReason === 'breakeven' &&
         isModelTrade(trade) &&
-        modelAgainstExitEnabled(this.config) &&
         heldSideBidCents != null &&
         Number.isFinite(heldSideBidCents) &&
         !modelBreakevenExitAllowed(trade, heldSideBidCents)
@@ -7569,7 +7567,6 @@ class TradingBot {
       if (
         forceReason === 'take_profit' &&
         isModelTrade(trade) &&
-        modelAgainstExitEnabled(this.config) &&
         heldSideBidCents != null &&
         Number.isFinite(entryPx) &&
         heldSideBidCents < entryPx

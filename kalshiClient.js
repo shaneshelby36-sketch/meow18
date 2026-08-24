@@ -687,7 +687,13 @@ class KalshiClient {
       return pickFrom(markets, minMsLeft) || pickFrom(markets, 0);
     };
     const first = await attempt(false);
-    return first || null;
+    if (first) return first;
+    // Cache-bust retry on miss when not rate-limited — stale list from the old
+    // session would otherwise block entry for one or more full compute ticks.
+    if (!this.isPublicRateLimited()) {
+      return (await attempt(true)) || null;
+    }
+    return null;
   }
 
   async getMarket(ticker) {
