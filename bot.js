@@ -250,6 +250,7 @@ const MODEL_SETUPS = [
     modelEntryLiveLeanMarginPct: 3,
     modelBankGreenCents: 11,
     modelMinTpCents: 11,
+    modelNearTargetBankCents: 8,
     modelMaxEntryCents: 88,
     maxOpenPositions: 1,
     modelLowAskMinConfidence: 0,
@@ -719,6 +720,8 @@ const MODEL_OPEN_GRACE_MS_DEFAULT = 4_000;
 const MODEL_MIN_TP_CENTS_DEFAULT = 11;
 /** Unconditional bank once this many ¢ green (don't wait for a stall). */
 const MODEL_BANK_GREEN_CENTS_DEFAULT = 11;
+/** Peak green at/above this → stall-bank at live bid even if full TP is higher. */
+const MODEL_NEAR_TARGET_BANK_CENTS_DEFAULT = 8;
 /** Start trailing / allow stall-TP once at least this many ¢ green. */
 const MODEL_TRAIL_ARM_CENTS_DEFAULT = 3;
 /** Held bid at/above this → bank immediately (don't sit 96→100). */
@@ -1055,6 +1058,18 @@ function modelBankGreenCents(config = {}) {
   if (Number.isFinite(n) && n <= 0) return 0;
   if (Number.isFinite(n) && n > 0) return Math.round(n);
   return MODEL_BANK_GREEN_CENTS_DEFAULT;
+}
+
+/** Stall-bank when peak reaches this green (≤ full TP). 0 = auto (TP − 3¢). */
+function modelNearTargetBankCents(config = {}) {
+  const bank = modelBankGreenCents(config);
+  const n = Number(config.modelNearTargetBankCents);
+  if (Number.isFinite(n) && n > 0) {
+    const v = Math.round(n);
+    return bank > 0 ? Math.min(v, bank) : v;
+  }
+  if (bank > 0) return Math.max(1, bank - 3);
+  return MODEL_NEAR_TARGET_BANK_CENTS_DEFAULT;
 }
 
 /** ¢ green before we trail and TP on a tiny stall. Caps at trail-arm default. */
@@ -1965,7 +1980,43 @@ function modelBeChaseExitReady(
 }
 
 /**
- * Pre-entry gate: skip only when the lean is clearly rotting.
+ * Stall-bank at live bid when green stalls below full TP (+11).
+ * Near-target: peak touched within 3¢ of TP → bank on stall even if bid pulled back.
+ */
+function modelStallBankReady(
+  trade,
+  {
+    greenCents,
+    peakProgressCents,
+    priceStalled,
+    upwardMomentum,
+    armed,
+    config = {},
+  } = {}
+) {
+  if (!armed || !priceStalled || upwardMomentum) return { ready: false };
+  const green = Number(greenCents);
+  const peakProg = Number(peakProgressCents);
+  if (!Number.isFinite(green) || green < 1) return { ready: false };
+
+  const bankGreen = modelBankGreenCents(config);
+  const nearTargetBank = modelNearTargetBankCents(config);
+  const arm = modelTrailArmCents(config);
+  if (green < arm) return { ready: false };
+
+  const nearTarget =
+    bankGreen > 0 && Number.isFinite(peakProg) && peakProg >= nearTargetBank;
+  if (nearTarget) {
+    return { ready: true, why: 'nearTarget', peakProg, bankGreen, nearTargetBank };
+  }
+
+  if (trade?.modelArmHadMomentum) {
+    return { ready: true, why: 'momentumFade', peakProg };
+  }
+  return { ready: false };
+}
+
+/**
  * Does NOT require model% ≈ Kalshi ask — that starved every setup for hours
  * (asks sit 65–80¢ while leans often print 55–65%).
  * Returns { dump: true, reason } or { dump: false }.
@@ -3044,6 +3095,7 @@ const EDITABLE_NUMERIC_FIELDS = [
   'modelPerfectLeanPts',
   'modelMinTpCents',
   'modelBankGreenCents',
+  'modelNearTargetBankCents',
   'modelSettleCloseLossCents',
   'modelSettleCloseMinutes',
   'modelLateBarrierMinutes',
@@ -4150,6 +4202,7 @@ class TradingBot {
       modelPerfectLeanPts: MODEL_PERFECT_LEAN_DEFAULT,
       modelMinTpCents: MODEL_MIN_TP_CENTS_DEFAULT,
       modelBankGreenCents: MODEL_BANK_GREEN_CENTS_DEFAULT,
+      modelNearTargetBankCents: MODEL_NEAR_TARGET_BANK_CENTS_DEFAULT,
       modelSettleCloseLossCents: MODEL_SETTLE_CLOSE_UNLESS_LOSS_CENTS_DEFAULT,
       modelSettleCloseMinutes: MODEL_SETTLE_CLOSE_MINUTES_DEFAULT,
       modelLateBarrierMinutes: MODEL_LATE_BARRIER_MINUTES_DEFAULT,
@@ -7562,6 +7615,7 @@ class TradingBot {
         heldSideBidCents <= 99;
       const minTp = modelMinTpCents(this.config);
       const bankGreen = modelBankGreenCents(this.config);
+      const nearTargetBank = modelNearTargetBankCents(this.config);
       const flatOrGreen =
         bidOk && Number.isFinite(entry) && entry >= 1 && heldSideBidCents >= entry;
       const greenCents =
@@ -8037,45 +8091,55 @@ class TradingBot {
         }
       }
 
-      // Target hit — bank at slider green only (the chosen TP point).
-      if (bidOk && isDecentGreen && heldForBank) {
+      // Target hit — bank at slider green (after open grace; no 30s wait once at target).
+      const tpHoldOk = heldForBank || heldMs >= openGraceMs + againstBeDelay;
+      if (bidOk && isDecentGreen && tpHoldOk) {
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
         });
         return;
       }
 
-      // Trail armed (+3¢): stall-bank only after a momentum run; while rising, ride to +TP.
-      if (
-        bidOk &&
-        armed &&
-        priceStalled &&
-        flatOrGreen &&
-        greenCents >= 1 &&
-        heldForBank &&
-        trade.modelArmHadMomentum &&
-        !upwardMomentum
-      ) {
+      const stallBank = modelStallBankReady(trade, {
+        greenCents,
+        peakProgressCents: peakProgress,
+        priceStalled,
+        upwardMomentum,
+        armed,
+        config: this.config,
+      });
+      const stallBankHoldOk =
+        heldForBank ||
+        (stallBank.ready &&
+          stallBank.why === 'nearTarget' &&
+          heldMs >= openGraceMs + againstBeDelay);
+
+      // Trail armed (+3¢): bank at bid when stalled — especially near +TP target.
+      if (bidOk && stallBank.ready && stallBankHoldOk && flatOrGreen && greenCents >= 1) {
+        this.lastDecision =
+          stallBank.why === 'nearTarget'
+            ? `Stall at +${stallBank.nearTargetBank ?? nearTargetBank}¢ near-target (peak +${stallBank.peakProg}¢, TP +${stallBank.bankGreen}¢) on ${trade.symbol} — banking +${greenCents}¢ at bid.`
+            : `Stall after momentum run on ${trade.symbol} — banking +${greenCents}¢ at bid.`;
         await this._closePosition(trade, heldSideBidCents, 'take_profit', {
           liveSellPriceCents: heldSideBidCents,
           stallBank: true,
         });
         return;
       }
-      if (bidOk && armed && upwardMomentum) {
+      if (bidOk && armed && upwardMomentum && greenCents < nearTargetBank) {
         const holdMsg =
           `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — ` +
-          `momentum up; riding toward +${bankGreen}¢ TP (stall bank only after run fades).`;
+          `momentum up; riding toward +${bankGreen}¢ TP (stall bank at +${nearTargetBank}¢+).`;
         trade.holdReason = holdMsg;
         this.lastDecision = holdMsg;
         this._persist();
         return;
       }
-      if (bidOk && armed && !priceStalled) {
+      if (bidOk && armed && !priceStalled && greenCents >= armCents) {
         const stallSec = stallMs > 0 ? Math.round(stallMs / 1000) : 0;
         const holdMsg =
           `Holding ${trade.symbol} +${greenCents}¢ (peak ${Number.isFinite(peak) ? peak : heldSideBidCents}¢) — ` +
-          `TP at +${bankGreen}¢; stall ${stallSec}s banks at bid after momentum run.`;
+          `TP at +${bankGreen}¢; stall ${stallSec}s banks at bid (peak +${peakProgress}¢).`;
         trade.holdReason = holdMsg;
         this.lastDecision = holdMsg;
         return;
@@ -11278,6 +11342,7 @@ module.exports = {
   modelBeChaseExitReady,
   modelBeChaseUpwardEvidence,
   modelUpwardMomentumEvidence,
+  modelStallBankReady,
   modelBeChaseSeconds,
   modelPeakProgressCents,
   MODEL_STAGNATION_SECONDS_DEFAULT,
@@ -11317,6 +11382,7 @@ module.exports = {
   modelMinTpCents,
   modelTakeProfitMeetsFloor,
   modelBankGreenCents,
+  modelNearTargetBankCents,
   modelTrailArmCents,
   modelSettleCloseMinutes,
   modelLateBarrierMinutes,
@@ -11404,6 +11470,7 @@ module.exports = {
   MODEL_LEAN_AGAINST_BE_MS_DEFAULT,
   MODEL_MIN_TP_CENTS_DEFAULT,
   MODEL_BANK_GREEN_CENTS_DEFAULT,
+  MODEL_NEAR_TARGET_BANK_CENTS_DEFAULT,
   MODEL_TRAIL_ARM_CENTS_DEFAULT,
   MODEL_SETTLE_CLOSE_MINUTES_DEFAULT,
   MODEL_LATE_BARRIER_MINUTES_DEFAULT,

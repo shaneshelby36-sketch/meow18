@@ -478,7 +478,14 @@
               <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
               <span class="slider-value" id="bot-model-bank-green-value">—</span>
             </div>
-            <span class="field-hint">Bank when bid hits this green (default <strong>+11¢</strong>). Trail arms ~+<strong>3¢</strong> — if bid stalls, next slider banks at the live bid even below target.</span>
+            <span class="field-hint">Bank when bid hits this green (default <strong>+11¢</strong>). Trail arms ~+<strong>3¢</strong> — if bid stalls at the near-target slider below, banks at live bid even below this.</span>
+          </label>
+          <label>MODEL near-target stall (¢ green)
+            <div class="slider-row">
+              <input id="bot-model-near-target-bank" type="range" min="3" max="20" step="1" />
+              <span class="slider-value" id="bot-model-near-target-bank-value">—</span>
+            </div>
+            <span class="field-hint">When peak reaches this green, stall-bank at the live bid (default <strong>+8¢</strong> with +11 TP). Still tries for full TP above while momentum is up; once stalled here, exits even if bid pulled back.</span>
           </label>
           <label>MODEL green stall bank (sec)
             <div class="slider-row">

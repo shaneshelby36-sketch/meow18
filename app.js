@@ -1702,6 +1702,7 @@ const SLIDER_UNITS = {
   'bot-model-low-ask-conf': (v) => (Number(v) <= 0 ? 'off' : `≤69¢ need ≥${Math.round(v)}%`),
   'bot-model-max-entry': (v) => `${Math.round(v)}¢`,
   'bot-model-bank-green': (v) => `+${Math.round(v)}¢`,
+  'bot-model-near-target-bank': (v) => `+${Math.round(v)}¢`,
   'bot-model-stagnation-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
   'bot-model-rapid-adverse': (v) => (Number(v) <= 0 ? 'off' : `−${Math.round(v)}¢`),
   'bot-model-stall-sec': (v) => (Number(v) <= 0 ? 'off' : `${Math.round(v)}s`),
@@ -2106,6 +2107,7 @@ function wireSliderDisplays() {
     'bot-model-low-ask-conf',
     'bot-model-max-entry',
     'bot-model-bank-green',
+    'bot-model-near-target-bank',
     'bot-model-stall-sec',
     'bot-model-stagnation-sec',
     'bot-model-rapid-adverse',
@@ -2237,6 +2239,7 @@ function wireBotConfigAutoSave() {
     'bot-model-low-ask-conf',
     'bot-model-max-entry',
     'bot-model-bank-green',
+    'bot-model-near-target-bank',
     'bot-model-stall-sec',
     'bot-model-stagnation-sec',
     'bot-model-rapid-adverse',
@@ -2381,6 +2384,12 @@ async function loadBotConfigIntoForm() {
     if (modelMaxEntry) modelMaxEntry.value = c.modelMaxEntryCents != null ? c.modelMaxEntryCents : 88;
     const modelBankGreen = document.getElementById('bot-model-bank-green');
     if (modelBankGreen) modelBankGreen.value = c.modelBankGreenCents != null ? c.modelBankGreenCents : 11;
+    const modelNearTargetBank = document.getElementById('bot-model-near-target-bank');
+    if (modelNearTargetBank) {
+      const bank = c.modelBankGreenCents != null ? c.modelBankGreenCents : 11;
+      modelNearTargetBank.value =
+        c.modelNearTargetBankCents != null ? c.modelNearTargetBankCents : Math.max(3, bank - 3);
+    }
     const modelStallSec = document.getElementById('bot-model-stall-sec');
     if (modelStallSec) {
       modelStallSec.value =
@@ -2525,6 +2534,7 @@ async function loadBotConfigIntoForm() {
       'bot-model-low-ask-conf',
       'bot-model-max-entry',
       'bot-model-bank-green',
+    'bot-model-near-target-bank',
     'bot-model-stall-sec',
     'bot-model-stagnation-sec',
     'bot-model-rapid-adverse',
@@ -2711,6 +2721,9 @@ async function saveBotConfig(opts = {}) {
     modelLowPriceStakeQuarters: 2,
     modelBankGreenCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '11'),
     modelMinTpCents: parseFloat(document.getElementById('bot-model-bank-green')?.value || '11'),
+    modelNearTargetBankCents: parseFloat(
+      document.getElementById('bot-model-near-target-bank')?.value || '8'
+    ),
     modelMomentumStallSeconds: parseFloat(document.getElementById('bot-model-stall-sec')?.value || '4'),
     modelStagnationSeconds: parseFloat(document.getElementById('bot-model-stagnation-sec')?.value || '60'),
     modelRapidAdverseCents: parseFloat(document.getElementById('bot-model-rapid-adverse')?.value || '0'),
