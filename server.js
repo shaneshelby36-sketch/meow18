@@ -692,6 +692,7 @@ app.get("/", (req, res) => {
     }
     bot._dailyLossHaltedAt = null;
     bot._dailyLossCents = null;
+    bot._dailyLossResetAt = Date.now();
     bot._logActivity('Daily loss limit reset by user — trading resumed.', { kind: 'info' });
     res.json({ ok: true });
   });
