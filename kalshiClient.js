@@ -145,11 +145,11 @@ function marketHasUsableTwoSidedQuote(market) {
  * bid ≡ yes exposure, ask ≡ no exposure (Kalshi single-book convention).
  */
 function bookSideFromLegacy(side, action) {
+  // Kalshi V2 Create Order uses side="yes"|"no" (the outcome being traded),
+  // combined with action implied by the price leg. Just pass the outcome side.
   const s = String(side || '').toLowerCase();
-  const a = String(action || '').toLowerCase();
-  if ((a === 'buy' && s === 'yes') || (a === 'sell' && s === 'no')) return 'bid';
-  if ((a === 'buy' && s === 'no') || (a === 'sell' && s === 'yes')) return 'ask';
-  throw new Error(`Invalid Kalshi order direction: action=${action} side=${side}`);
+  if (s === 'yes' || s === 'no') return s;
+  throw new Error(`Invalid Kalshi order side: ${side}`);
 }
 
 /** Min gap between unauthenticated public GETs (IP bucket is much tighter than Basic read). */
@@ -234,18 +234,13 @@ function buildCreateOrderV2Body({
   if (!Number.isFinite(contracts) || contracts < 1) {
     throw new Error(`Invalid Kalshi order count: ${count}`);
   }
-  const outcome = String(side || '').toLowerCase();
-  const yesLegCents = outcome === 'no' ? 100 - rounded : rounded;
-  if (yesLegCents < 1 || yesLegCents > 99) {
-    throw new Error(`Invalid Kalshi YES-leg price from ${outcome} ${rounded}¢`);
-  }
   const tif = String(timeInForce || 'good_till_canceled').toLowerCase();
   const allowedTif = new Set(['good_till_canceled', 'immediate_or_cancel', 'fill_or_kill']);
   return {
     ticker,
     side: bookSideFromLegacy(side, action),
     count: `${contracts}.00`,
-    price: (yesLegCents / 100).toFixed(4),
+    price: (rounded / 100).toFixed(4),
     time_in_force: allowedTif.has(tif) ? tif : 'good_till_canceled',
     self_trade_prevention_type: 'taker_at_cross',
     client_order_id: clientOrderId || crypto.randomUUID(),
