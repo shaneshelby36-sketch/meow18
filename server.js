@@ -66,17 +66,26 @@ function loadSavedCredentials() {
 loadSavedCredentials();
 
 if (kalshiClient.hasCredentials) {
-  setTimeout(() => {
+  setTimeout(async () => {
     kalshiClient.syncAccountLimits({ force: true }).catch((err) => {
       console.warn('[kalshi] account limits sync deferred:', err && err.message ? err.message : err);
     });
-    // Verify auth works end-to-end — a failed balance fetch means credentials are bad.
-    kalshiClient.getBalance().then((b) => {
+    // Verify auth and log full account state.
+    try {
+      const b = await kalshiClient.getBalance();
       const cents = b && b.balance != null ? b.balance : (b && b.available_balance_cents);
       console.log(`[kalshi] auth check OK — balance: ${cents != null ? '$' + (Number(cents) / 100).toFixed(2) : JSON.stringify(b)}`);
-    }).catch((err) => {
-      console.error(`[kalshi] AUTH CHECK FAILED — orders will 404: ${err && err.message ? err.message : err}`);
-    });
+      console.log(`[kalshi] full balance response: ${JSON.stringify(b)}`);
+    } catch (err) {
+      console.error(`[kalshi] AUTH CHECK FAILED: ${err && err.message ? err.message : err}`);
+    }
+    // Check account limits — reveals tier, trading permissions.
+    try {
+      const lim = await kalshiClient._request('GET', '/account/limits', { auth: true });
+      console.log(`[kalshi] account limits: ${JSON.stringify(lim)}`);
+    } catch (err) {
+      console.error(`[kalshi] account limits fetch failed: ${err && err.message ? err.message : err}`);
+    }
   }, 3_000);
 }
 
