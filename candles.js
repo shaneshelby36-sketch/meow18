@@ -5213,13 +5213,19 @@ class TradingBot {
       };
     }
 
-    // Sum net P&L (after fees) for all trades closed today.
+    // Only count trades closed since the last manual reset (if any), so resetting
+    // the halt gives a fresh window from that point forward.
+    const scanFromMs = (this._dailyLossResetAt && this._dailyLossResetAt >= todayStartMs)
+      ? this._dailyLossResetAt
+      : todayStartMs;
+
+    // Sum net P&L (after fees) for all trades closed in the scan window.
     const trades = this.ledger && Array.isArray(this.ledger.trades) ? this.ledger.trades : [];
     let dayPnlCents = 0;
     for (const t of trades) {
       if (!t || t.status !== 'closed') continue;
       const closedAt = Number(t.closedAt);
-      if (!Number.isFinite(closedAt) || closedAt < todayStartMs) continue;
+      if (!Number.isFinite(closedAt) || closedAt < scanFromMs) continue;
       dayPnlCents += Number(t.pnlCents) || 0;
     }
 
@@ -5234,10 +5240,13 @@ class TradingBot {
       return { ok: false, reason: msg };
     }
 
-    // Clear any stale halt from a previous day.
+    // Clear any stale state from a previous day.
     if (this._dailyLossHaltedAt && this._dailyLossHaltedAt < todayStartMs) {
       this._dailyLossHaltedAt = null;
       this._dailyLossCents = null;
+    }
+    if (this._dailyLossResetAt && this._dailyLossResetAt < todayStartMs) {
+      this._dailyLossResetAt = null;
     }
     return { ok: true };
   }
@@ -6798,6 +6807,8 @@ class TradingBot {
         stopVerdict: trade.stopVerdict || undefined,
         stopPostMinBidCents: trade.stopPostMinBidCents,
         stopPostMaxBidCents: trade.stopPostMaxBidCents,
+        modelEntryHeldProb: trade.modelEntryHeldProb,
+        modelExitHeldProb: trade.modelExitHeldProb,
       });
     this._persist();
       return true;
@@ -11321,9 +11332,18 @@ class TradingBot {
     });
     const hourlyPnl = buildHourlyPnlBuckets(permanentLog, { hours: 6, now });
     const settleWindowRec = this.getSettleWindowRecommendation({ now });
+    const dailyLossHalted = !!(
+      this._dailyLossHaltedAt &&
+      this._dailyLossHaltedAt >= (() => {
+        const d = new Date();
+        return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+      })()
+    );
     return {
       mode: this.config.mode,
       isRunning: this.isRunning,
+      dailyLossHalted,
+      dailyLossCents: dailyLossHalted ? (this._dailyLossCents || 0) : null,
       runningSince: this.runningSince,
       config: this.config,
       lastError: this.lastError,
