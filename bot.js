@@ -8971,6 +8971,12 @@ class TradingBot {
       for (let attempt = 0; attempt < maxEntryAttempts; attempt++) {
         if (attempt > 0) await this._sleep(50);
 
+        // Bail if the market window closed while we were chasing.
+        if (Date.now() >= closeAt - 500) {
+          lastErr = new Error(`Market window closed during entry chase (${symbol} ${ticker})`);
+          break;
+        }
+
         let liveMarket = null;
         try {
           liveMarket = await this._getMarketBounded(ticker, 2000);
