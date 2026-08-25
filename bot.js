@@ -8763,11 +8763,12 @@ class TradingBot {
         }
       }
     }
-    const closeAt = Number(closeTime);
+    let closeAt = Number(closeTime);
     if (!Number.isFinite(closeAt) || closeAt <= Date.now() + 5000) {
       this.lastError = `Skipped ${symbol} ${side || 'unknown'} entry: market close time is missing or already ending.`;
       return false;
     }
+    let activeTicker = ticker;
     const isSettle = strategy === 'settle';
     // Bonus 3rd while a hold has tagged 90¢ — half stake (not stacked with NEAR ½).
     const thirdSlot = isSettle && this.openTrades.length >= 2 && this._hasTouched90Open();
@@ -8927,6 +8928,44 @@ class TradingBot {
     }
 
     if (this.config.mode === 'live' && !this._inShadow) {
+      // Re-verify the market with Kalshi immediately before placing any order.
+      // The ticker was resolved at evaluate time (up to 12s ago) — re-fetch
+      // status=open now to confirm the window is still live and get the exact ticker.
+      const seriesTickerForVerify = SERIES_BY_SYMBOL[symbol];
+      if (seriesTickerForVerify) {
+        // Bust the cache so we always get a live response here.
+        this.client.invalidateOpenMarkets(seriesTickerForVerify);
+        if (this._lastLiveMarket) delete this._lastLiveMarket[seriesTickerForVerify];
+        if (this._lastLiveMarketAt) delete this._lastLiveMarketAt[seriesTickerForVerify];
+        let verifiedMarket = null;
+        try {
+          verifiedMarket = await this._fetchLiveMarket(seriesTickerForVerify, 10_000);
+        } catch (_) {
+          verifiedMarket = null;
+        }
+        const verifiedTicker = verifiedMarket && verifiedMarket.ticker;
+        console.log(`[market] crypto=${symbol}`);
+        console.log(`[market] requested ticker=${activeTicker}`);
+        console.log(`[market] Kalshi active ticker=${verifiedTicker || 'NONE'}`);
+        console.log(`[market] market status=${verifiedMarket ? (verifiedMarket.status || 'active') : 'NOT FOUND'}`);
+        if (!verifiedMarket || !verifiedTicker) {
+          console.log(`[market] NO ACTIVE MARKET FOUND — skipping entry`);
+          this.lastError = `Skipped ${symbol} ${String(side).toUpperCase()} entry: no active Kalshi market found at order time.`;
+          return false;
+        }
+        if (verifiedTicker !== activeTicker) {
+          console.log(`[market] ticker mismatch — updating ${activeTicker} → ${verifiedTicker}`);
+        }
+        activeTicker = verifiedTicker;
+        trade.ticker = activeTicker;
+        // Update closeAt from the verified market.
+        const newClose = parseMarketCloseMs(verifiedMarket);
+        if (Number.isFinite(newClose) && newClose > Date.now() + 10_000) {
+          closeAt = newClose;
+        }
+        console.log(`[market] using verified ticker=${activeTicker}`);
+      }
+
       // MODEL default 4 IOC tries; settle/edge default 2. Re-quote + chase ask.
       // Pass entryAttempts to override (cap 5).
       let filled = 0;
@@ -8948,17 +8987,17 @@ class TradingBot {
 
         // Bail if the market window closed while we were chasing.
         if (Date.now() >= closeAt - 500) {
-          lastErr = new Error(`Market window closed during entry chase (${symbol} ${ticker})`);
+          lastErr = new Error(`Market window closed during entry chase (${symbol} ${activeTicker})`);
           break;
         }
 
         let liveMarket = null;
         try {
-          liveMarket = await this._getMarketBounded(ticker, 2000);
+          liveMarket = await this._getMarketBounded(activeTicker, 2000);
         } catch {
           liveMarket = null;
         }
-        freshAsk = await this._refreshLiveEntryAskCents(ticker, side);
+        freshAsk = await this._refreshLiveEntryAskCents(activeTicker, side);
         const band = isSettle ? settleSideEntryBand(this.config, side, minutesLeft) : null;
         const richFloor = isSettle ? settleRichAskFloorCents(this.config) : 100;
         const ceiling = isSettle
@@ -9045,7 +9084,7 @@ class TradingBot {
 
       try {
         const order = await this.client.createOrder({
-          ticker,
+          ticker: activeTicker,
           side,
           action: 'buy',
           count: trade.contracts,
@@ -9093,7 +9132,7 @@ class TradingBot {
           // 404 = ticker no longer exists on Kalshi — nuke caches immediately so
           // the next attempt (and next tick) re-resolves the current market.
           if (err && err.status === 404) {
-            this._markTickerDead(ticker);
+            this._markTickerDead(activeTicker);
             const st = SERIES_BY_SYMBOL[symbol];
             if (st) {
               if (this._lastLiveMarket) delete this._lastLiveMarket[st];
