@@ -778,6 +778,7 @@ class KalshiClient {
       clientOrderId,
       timeInForce,
     });
+    console.log('[kalshi] createOrder body:', JSON.stringify(body));
     const data = await this._request('POST', '/portfolio/events/orders', { body });
     return normalizeCreateOrderResponse(data);
   }
