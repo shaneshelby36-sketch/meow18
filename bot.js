@@ -7174,10 +7174,14 @@ class TradingBot {
       markets = await this.client.getOpenMarkets(seriesTicker, 20);
     }
     if (Array.isArray(markets) && markets.length) {
+      const tradeable = markets.filter((m) => {
+        const s = String(m && m.status || '').toLowerCase();
+        return !s || s === 'open' || s === 'active';
+      });
       const notDead = (m) => m && !this._isTickerDead(m.ticker);
       const picked =
-        (pickLiveOpenMarket(markets, Date.now(), pickFloor) ||
-         pickLiveOpenMarket(markets, Date.now(), 0));
+        (pickLiveOpenMarket(tradeable, Date.now(), pickFloor) ||
+         pickLiveOpenMarket(tradeable, Date.now(), 0));
       if (picked && notDead(picked) && quoted(picked)) {
         this._storeLiveMarketSeries(seriesTicker, picked);
         return normalizeMarketPrices(picked);
