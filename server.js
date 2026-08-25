@@ -57,7 +57,7 @@ function loadSavedCredentials() {
     if (fs.existsSync(CREDENTIALS_PATH)) {
       const saved = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
       kalshiClient.setCredentials(saved);
-      console.log('[kalshi] loaded previously-saved API credentials from disk');
+      console.log(`[kalshi] loaded previously-saved API credentials from disk (baseUrl: ${kalshiClient.baseUrl})`);
     }
   } catch (err) {
     console.error('[kalshi] failed to load saved credentials:', err.message);
@@ -606,6 +606,7 @@ app.get("/", (req, res) => {
     res.json({
       configured: kalshiClient.hasCredentials,
       keyIdPreview: kalshiClient.keyId ? `${kalshiClient.keyId.slice(0, 6)}…` : null,
+      baseUrl: kalshiClient.baseUrl,
     });
   });
 
