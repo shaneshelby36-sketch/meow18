@@ -70,7 +70,14 @@ if (kalshiClient.hasCredentials) {
     kalshiClient.syncAccountLimits({ force: true }).catch((err) => {
       console.warn('[kalshi] account limits sync deferred:', err && err.message ? err.message : err);
     });
-  }, 12_000);
+    // Verify auth works end-to-end — a failed balance fetch means credentials are bad.
+    kalshiClient.getBalance().then((b) => {
+      const cents = b && b.balance != null ? b.balance : (b && b.available_balance_cents);
+      console.log(`[kalshi] auth check OK — balance: ${cents != null ? '$' + (Number(cents) / 100).toFixed(2) : JSON.stringify(b)}`);
+    }).catch((err) => {
+      console.error(`[kalshi] AUTH CHECK FAILED — orders will 404: ${err && err.message ? err.message : err}`);
+    });
+  }, 3_000);
 }
 
 function saveCredentials({ keyId, privateKeyPem }) {
