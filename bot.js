@@ -7113,6 +7113,22 @@ class TradingBot {
     }
   }
 
+  _markTickerDead(ticker) {
+    if (!ticker) return;
+    if (!this._deadTickers) this._deadTickers = new Map();
+    // Expire after 20 minutes — long enough to outlast a 15-min session gap.
+    this._deadTickers.set(String(ticker), Date.now() + 20 * 60_000);
+    console.warn(`[bot] ticker ${ticker} marked dead (404) — will not re-use until expiry`);
+  }
+
+  _isTickerDead(ticker) {
+    if (!ticker || !this._deadTickers) return false;
+    const exp = this._deadTickers.get(String(ticker));
+    if (!exp) return false;
+    if (Date.now() > exp) { this._deadTickers.delete(String(ticker)); return false; }
+    return true;
+  }
+
   _storeLiveMarketSeries(seriesTicker, market) {
     if (!seriesTicker || !market || this._inShadow) return;
     if (!this._lastLiveMarket) this._lastLiveMarket = Object.create(null);
@@ -7211,7 +7227,7 @@ class TradingBot {
       Number.isFinite(cachedClose) &&
       cachedClose > Date.now() + Math.max(500, minMsLeft);
 
-    if (cached && quoted(cached) && cacheAge < staleCapMs && windowLive && cacheAge < refreshMs) {
+    if (cached && !this._isTickerDead(cached.ticker) && quoted(cached) && cacheAge < staleCapMs && windowLive && cacheAge < refreshMs) {
       return normalizeMarketPrices(cached);
     }
 
@@ -7223,6 +7239,8 @@ class TradingBot {
         found = null;
       }
     }
+    // Reject a market whose ticker was 404'd — Kalshi's list may still include it.
+    if (found && this._isTickerDead(found.ticker)) found = null;
     if (found) {
       if (
         found.ticker &&
@@ -9122,6 +9140,7 @@ class TradingBot {
           // 404 = ticker no longer exists on Kalshi — nuke caches immediately so
           // the next attempt (and next tick) re-resolves the current market.
           if (err && err.status === 404) {
+            this._markTickerDead(ticker);
             const st = SERIES_BY_SYMBOL[symbol];
             if (st) {
               if (this._lastLiveMarket) delete this._lastLiveMarket[st];
@@ -9802,7 +9821,7 @@ class TradingBot {
         };
       }
       try {
-        const market = await this._fetchLiveMarket(seriesTicker, 5000);
+        const market = await this._fetchLiveMarket(seriesTicker, 30_000);
         if (!market) {
           return {
             ok: false,
@@ -9885,7 +9904,7 @@ class TradingBot {
 
     let market;
     try {
-      market = await this._fetchLiveMarket(seriesTicker, 5000);
+      market = await this._fetchLiveMarket(seriesTicker, 30_000);
     } catch (err) {
       this.lastError = `Failed to fetch Kalshi market for ${seriesTicker}: ${err.message}`;
       console.error('[bot]', this.lastError);
@@ -10340,7 +10359,7 @@ class TradingBot {
 
     let market;
     try {
-      market = await this._fetchLiveMarket(seriesTicker, 5000);
+      market = await this._fetchLiveMarket(seriesTicker, 30_000);
     } catch (err) {
       this.lastError = `Failed to fetch Kalshi market for ${seriesTicker}: ${err.message}`;
       console.error('[bot]', this.lastError);
@@ -10811,7 +10830,7 @@ class TradingBot {
 
     let market;
     try {
-      market = await this._fetchLiveMarket(seriesTicker, 5000);
+      market = await this._fetchLiveMarket(seriesTicker, 30_000);
     } catch (err) {
       this.lastError = `Failed to fetch Kalshi market for ${seriesTicker}: ${err.message}`;
       console.error('[bot]', this.lastError);
