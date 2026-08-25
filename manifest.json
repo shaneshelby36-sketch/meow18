@@ -1,826 +1,834 @@
-'use strict';
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#0a0e14" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>BTC / XRP Prediction Dashboard</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
 
-const crypto = require('crypto');
-const fs = require('fs');
-const fetch = globalThis.fetch
-  ? (...args) => globalThis.fetch(...args)
-  : require('node-fetch');
+  <div id="rotate-notice">
+    <div class="rotate-icon">⟳</div>
+    <p>Rotate the tablet to landscape</p>
+  </div>
 
-// Kalshi's current market endpoints return decimal-dollar strings such as
-// "0.5600" in `yes_bid_dollars`; older responses used integer-cent fields
-// such as `yes_bid`. Normalize both shapes so the trading bot always sees
-// integer cents.
-function priceInCents(legacyCents, dollarValue) {
-  // Treat null/undefined/'' as "missing" — Number(null)===0 would wrongly
-  // prefer a fake 0¢ bid over a valid dollar-string quote.
-  if (legacyCents != null && legacyCents !== '') {
-    const legacy = Number(legacyCents);
-    if (Number.isFinite(legacy)) {
-      const cents = Math.round(legacy);
-      // Kalshi uses 0 for "no quote" on empty books — not a tradable 0¢.
-      return cents >= 1 ? cents : null;
-    }
-  }
-  const dollars = Number.parseFloat(dollarValue);
-  if (!Number.isFinite(dollars)) return null;
-  const cents = Math.round(dollars * 100);
-  return cents >= 1 ? cents : null;
-}
+  <div id="app">
 
-function parseMarketCloseMs(market) {
-  if (!market || typeof market !== 'object') return NaN;
-  const closeRaw = market.close_time != null ? market.close_time : market.expected_expiration_time;
-  if (closeRaw == null || closeRaw === '') return NaN;
-  if (typeof closeRaw === 'number' && Number.isFinite(closeRaw)) {
-    return closeRaw < 1e12 ? closeRaw * 1000 : closeRaw;
-  }
-  const ms = new Date(closeRaw).getTime();
-  return Number.isFinite(ms) ? ms : NaN;
-}
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">◈</span>
+        <span class="brand-name">CryptoPredict</span>
+        <span class="app-version" id="app-version" title="Deploy version">v…</span>
+      </div>
+      <div class="topbar-right">
+        <div class="uptime-pill" id="uptime-pill">
+          <span class="stat-label">Engine uptime</span>
+          <span class="uptime-value" id="uptime-value">—</span>
+        </div>
+        <div class="status-pill" id="status-pill">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="status-text">Connecting…</span>
+        </div>
+        <div class="updated-pill">
+          <span id="updated-text">—</span>
+        </div>
+        <button class="btn-secondary topbar-action" id="open-windows-btn" type="button">Open other windows</button>
+        <button class="icon-btn" id="bot-btn" aria-label="Trading bot">🤖</button>
+        <button class="icon-btn" id="settings-btn" aria-label="Settings">⚙</button>
+      </div>
+    </header>
 
-/**
- * Kalshi 15m crypto strike. List payloads sometimes omit `floor_strike`
- * (subtitle still has "Target Price: $63,048.28") or use cap-only `less`
- * markets. Never treat TBD / missing as 0.
- */
-function marketStrikePrice(market) {
-  if (!market || typeof market !== 'object') return null;
-  const type = String(market.strike_type || market.strikeType || '').toLowerCase();
-  const ordered =
-    type === 'less' || type === 'less_or_equal'
-      ? [market.cap_strike, market.capStrike, market.floor_strike, market.floorStrike]
-      : [market.floor_strike, market.floorStrike, market.cap_strike, market.capStrike];
-  ordered.push(market.strike_price, market.strikePrice, market.strike);
-  for (const raw of ordered) {
-    const n = Number(raw);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  const subtitle = String(
-    market.yes_sub_title || market.yesSubTitle || market.subtitle || market.title || ''
-  );
-  const m = subtitle.match(/\$\s*([\d,]+(?:\.\d+)?)/);
-  if (m) {
-    const n = Number(String(m[1]).replace(/,/g, ''));
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  return null;
-}
+    <p class="server-note" id="server-note">Engine + bot run on the server. Closing this page does not stop trading.</p>
 
-function sizeFromFp(legacy, fpValue) {
-  if (legacy != null && legacy !== '') {
-    const n = Number(legacy);
-    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
-  }
-  const fp = Number.parseFloat(fpValue);
-  return Number.isFinite(fp) && fp >= 0 ? Math.floor(fp) : null;
-}
+    <div class="asset-picker" id="asset-picker">
+      <!-- one chip per supported symbol, injected by app.js; tap to pin which stay on screen -->
+    </div>
+    <p class="picker-hint" id="asset-picker-hint">Tap a coin to pin it (max 2). Pinned coins stay on screen and do not rotate.</p>
 
-function clampQuoteCents(n) {
-  if (!Number.isFinite(n)) return null;
-  const c = Math.round(n);
-  if (c < 1 || c > 99) return null;
-  return c;
-}
+    <main class="grid" id="main-grid">
+      <!-- selected asset panels are injected here by app.js -->
+      <section class="asset-panel bot-dashboard-card" id="bot-dashboard-card" hidden>
+        <div class="asset-head">
+          <div class="asset-id"><span class="asset-symbol">BOT</span><span class="asset-name">Trading control</span></div>
+          <button class="btn-primary" id="bot-dashboard-open" type="button">Open bot</button>
+        </div>
+        <p class="bot-dashboard-server-note">Runs on the VPS. Closing the dashboard does not pause the bot.</p>
+        <div class="bot-runtime-banner" id="bot-runtime-banner">
+          <span class="stat-label">Bot runtime</span>
+          <span class="bot-runtime-value" id="bot-runtime-value">—</span>
+        </div>
+        <p class="bot-dashboard-state" id="bot-dashboard-state">Checking bot status…</p>
+        <div class="bot-dashboard-stats" id="bot-dashboard-stats"></div>
+        <button class="btn-secondary" id="bot-dashboard-toggle" type="button">Start bot</button>
+      </section>
+    </main>
 
-function normalizeMarketPrices(market) {
-  if (!market) return market;
-  let yes_bid = priceInCents(market.yes_bid, market.yes_bid_dollars);
-  let yes_ask = priceInCents(market.yes_ask, market.yes_ask_dollars);
-  let no_bid = priceInCents(market.no_bid, market.no_bid_dollars);
-  let no_ask = priceInCents(market.no_ask, market.no_ask_dollars);
-  const last_price = priceInCents(market.last_price, market.last_price_dollars);
+    <footer class="footer-note">
+      <span class="app-version" data-app-version title="Deploy version">v…</span>
+      · Heuristic technical-indicator model — not financial advice. Predictions and the bot keep running on the server even when no page is open.
+    </footer>
+  </div>
 
-  // Fill missing YES from the NO book (and vice versa). Thin 15m books often
-  // publish only one side; complement keeps entries from dying as "no quote".
-  if (yes_bid == null && no_ask != null) yes_bid = clampQuoteCents(100 - no_ask);
-  if (yes_ask == null && no_bid != null) yes_ask = clampQuoteCents(100 - no_bid);
-  if (no_bid == null && yes_ask != null) no_bid = clampQuoteCents(100 - yes_ask);
-  if (no_ask == null && yes_bid != null) no_ask = clampQuoteCents(100 - yes_bid);
+  <div id="settings-overlay" class="overlay hidden">
+    <div class="settings-card">
+      <h2>Prediction Engine Connection</h2>
+      <p class="settings-hint">Enter the address of the Prediction Engine running on your PC or VPS.</p>
+      <label for="engine-url">Engine API base URL</label>
+      <input id="engine-url" type="text" inputmode="url" placeholder="http://192.168.1.50:4000" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <label for="refresh-interval">Refresh interval (seconds)</label>
+      <input id="refresh-interval" type="number" min="5" max="10" step="1" />
+      <div class="settings-actions">
+        <button class="btn-secondary" id="settings-cancel">Cancel</button>
+        <button class="btn-primary" id="settings-save">Save &amp; Connect</button>
+      </div>
+    </div>
+  </div>
 
-  // Last trade can patch a single missing side when the book is one-sided.
-  if (yes_bid == null && yes_ask != null && last_price != null && last_price <= yes_ask) {
-    yes_bid = last_price;
-  }
-  if (yes_ask == null && yes_bid != null && last_price != null && last_price >= yes_bid) {
-    yes_ask = last_price;
-  }
-  if (yes_bid != null && yes_ask != null && yes_bid > yes_ask) {
-    // Crossed after complement — prefer the tighter last/mid if available.
-    if (last_price != null && last_price >= 1 && last_price <= 99) {
-      yes_bid = Math.min(yes_bid, last_price);
-      yes_ask = Math.max(yes_ask, last_price);
-    }
-  }
+  <template id="asset-panel-template">
+    <section class="asset-panel">
+      <div class="asset-head">
+        <div class="asset-id">
+          <span class="asset-symbol"></span>
+          <span class="asset-name"></span>
+          <span class="asset-corr"></span>
+        </div>
+        <div class="asset-price-block">
+          <span class="asset-price"></span>
+          <span class="asset-price-change"></span>
+        </div>
+      </div>
 
-  return {
-    ...market,
-    yes_bid,
-    yes_ask,
-    no_bid,
-    no_ask,
-    last_price,
-    yes_ask_size: sizeFromFp(market.yes_ask_size, market.yes_ask_size_fp),
-    no_ask_size: sizeFromFp(market.no_ask_size, market.no_ask_size_fp),
-    yes_bid_size: sizeFromFp(market.yes_bid_size, market.yes_bid_size_fp),
-    no_bid_size: sizeFromFp(market.no_bid_size, market.no_bid_size_fp),
-  };
-}
+      <div class="overall-row">
+        <span class="stat-label">Overall (all 3 windows blended)</span>
+        <span class="overall-rec"></span>
+        <span class="overall-prob"></span>
+      </div>
 
-/** List/ticker payloads need a real (or complemented) two-sided YES book. */
-function marketHasUsableTwoSidedQuote(market) {
-  if (!market || typeof market !== 'object') return false;
-  const yesBid = Number(market.yes_bid);
-  const yesAsk = Number(market.yes_ask);
-  return (
-    Number.isFinite(yesBid) &&
-    Number.isFinite(yesAsk) &&
-    yesBid >= 1 &&
-    yesAsk <= 99 &&
-    yesBid <= yesAsk
-  );
-}
+      <div class="asset-target-row">
+        <div class="target-block">
+          <span class="stat-label">Price to beat (over/under)</span>
+          <span class="stat-value target-price">—</span>
+          <span class="target-source"></span>
+          <form class="manual-strike-form" autocomplete="off">
+            <input class="manual-strike-input" type="number" inputmode="decimal" step="any" min="0" placeholder="Enter strike $" />
+            <button type="submit" class="btn-secondary manual-strike-set">Set</button>
+            <button type="button" class="btn-secondary manual-strike-clear">Clear</button>
+          </form>
+        </div>
+        <div class="countdown-block">
+          <span class="stat-label">Window settles in</span>
+          <span class="stat-value big-countdown">—</span>
+        </div>
+      </div>
 
-/**
- * Map legacy (action, side) to V2 book_side.
- * bid ≡ yes exposure, ask ≡ no exposure (Kalshi single-book convention).
- */
-function bookSideFromLegacy(side, action) {
-  const s = String(side || '').toLowerCase();
-  const a = String(action || '').toLowerCase();
-  if ((a === 'buy' && s === 'yes') || (a === 'sell' && s === 'no')) return 'bid';
-  if ((a === 'buy' && s === 'no') || (a === 'sell' && s === 'yes')) return 'ask';
-  throw new Error(`Invalid Kalshi order direction: action=${action} side=${side}`);
-}
+      <div class="asset-meta">
+        <div class="meta-chip">
+          <span class="meta-label">RSI</span>
+          <span class="meta-value meta-rsi">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">MACD hist</span>
+          <span class="meta-value meta-macd">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Volatility</span>
+          <span class="meta-value meta-vol">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Order flow</span>
+          <span class="meta-value meta-flow">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Pattern</span>
+          <span class="meta-value meta-pattern">—</span>
+        </div>
+      </div>
 
-/** Min gap between unauthenticated public GETs (IP bucket is much tighter than Basic read). */
-const UNAUTH_PUBLIC_SPACING_MS = 1200;
-/** After repeated 429s, stay cache-only briefly even when short cooldown expires. */
-const PUBLIC_QUIET_AFTER_429_MS = 8_000;
-/** Public 429 backoff — keep short so we still trade off cache, then probe again. */
-const PUBLIC_429_BACKOFF_BASE_MS = 6_000;
-const PUBLIC_429_BACKOFF_MAX_MS = 20_000;
-/** After this many consecutive 429s without a clean response, use a longer quiet period. */
-const PUBLIC_429_PERSISTENT_STREAK = 4;
-const PUBLIC_429_PERSISTENT_BACKOFF_MS = 90_000;
-/** Series list cache — avoid re-listing KXBTC15M / KXETH15M every 5s tick. */
-const OPEN_MARKETS_CACHE_MS = 45_000;
-const OPEN_MARKETS_CACHE_LIMITED_MS = 120_000;
-const TICKER_MARKET_CACHE_MS = 20_000;
-const TICKER_MARKET_CACHE_LIMITED_MS = 120_000;
+      <div class="window-tabs">
+        <button class="window-tab" data-window-key="w15" type="button">10-15 min</button>
+        <button class="window-tab" data-window-key="w10" type="button">5-10 min</button>
+        <button class="window-tab" data-window-key="w5" type="button">0-5 min</button>
+      </div>
 
-/** Default Kalshi endpoint cost (tokens). See GET /account/endpoint_costs for overrides. */
-const DEFAULT_TOKEN_COST = 10;
+      <div class="windows-row">
+        <!-- window cards injected here -->
+      </div>
+    </section>
+  </template>
 
-/**
- * Client-side token bucket matching Kalshi's rate-limit model.
- * Basic tier: Read 200 tok/s (capacity 2s), Write 100 tok/s (capacity 1s).
- * We pace at ~85% of budget so we stay under the ceiling instead of 429-retrying.
- */
-function createTokenBucket(refillPerSec, capacity) {
-  return {
-    refillPerSec: Math.max(1, Number(refillPerSec) || 1),
-    capacity: Math.max(1, Number(capacity) || 1),
-    tokens: Math.max(1, Number(capacity) || 1),
-    updatedAt: Date.now(),
-    refill() {
-      const now = Date.now();
-      const elapsed = (now - this.updatedAt) / 1000;
-      if (!(elapsed > 0)) return;
-      this.updatedAt = now;
-      this.tokens = Math.min(this.capacity, this.tokens + elapsed * this.refillPerSec);
-    },
-    async take(cost) {
-      const need = Math.max(1, Number(cost) || DEFAULT_TOKEN_COST);
-      for (;;) {
-        this.refill();
-        if (this.tokens >= need) {
-          this.tokens -= need;
-          return;
-        }
-        const deficit = need - this.tokens;
-        const waitMs = Math.ceil((deficit / this.refillPerSec) * 1000) + 5;
-        await new Promise((r) => setTimeout(r, Math.min(Math.max(waitMs, 5), 2500)));
-      }
-    },
-  };
-}
+  <template id="window-card-template">
+    <article class="window-card">
+      <div class="window-head">
+        <span class="window-label"></span>
+        <span class="window-rec"></span>
+      </div>
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+      <div class="prob-bar">
+        <div class="prob-up"></div>
+        <div class="prob-down"></div>
+      </div>
+      <div class="prob-numbers">
+        <span class="prob-up-text"></span>
+        <span class="prob-down-text"></span>
+      </div>
 
-/**
- * Build Create Order V2 body (POST /portfolio/events/orders).
- *
- * V2 uses a single YES-denominated book: `bid` = buy YES, `ask` = sell YES
- * (= buy NO at 1−price). `priceCents` from callers is always the traded
- * outcome limit (YES ¢ or NO ¢). For NO outcomes we convert to the YES-leg
- * wire price (100 − noCents) — sending the raw NO ¢ as `price` never crosses.
- */
-function buildCreateOrderV2Body({
-  ticker,
-  side,
-  action,
-  count,
-  priceCents,
-  clientOrderId,
-  timeInForce = 'good_till_canceled',
-}) {
-  const rounded = Math.round(Number(priceCents));
-  if (!Number.isFinite(rounded) || rounded < 1 || rounded > 99) {
-    throw new Error(`Invalid Kalshi limit price: ${priceCents}`);
-  }
-  const contracts = Math.floor(Number(count));
-  if (!Number.isFinite(contracts) || contracts < 1) {
-    throw new Error(`Invalid Kalshi order count: ${count}`);
-  }
-  const outcome = String(side || '').toLowerCase();
-  const yesLegCents = outcome === 'no' ? 100 - rounded : rounded;
-  if (yesLegCents < 1 || yesLegCents > 99) {
-    throw new Error(`Invalid Kalshi YES-leg price from ${outcome} ${rounded}¢`);
-  }
-  const tif = String(timeInForce || 'good_till_canceled').toLowerCase();
-  const allowedTif = new Set(['good_till_canceled', 'immediate_or_cancel', 'fill_or_kill']);
-  return {
-    ticker,
-    side: bookSideFromLegacy(side, action),
-    count: `${contracts}.00`,
-    price: (yesLegCents / 100).toFixed(4),
-    time_in_force: allowedTif.has(tif) ? tif : 'good_till_canceled',
-    self_trade_prevention_type: 'taker_at_cross',
-    client_order_id: clientOrderId || crypto.randomUUID(),
-  };
-}
+      <div class="signal-score-row">
+        <div class="signal-score-bar">
+          <div class="signal-up-fill"></div>
+          <div class="signal-down-fill"></div>
+        </div>
+        <div class="signal-score-numbers">
+          <span class="signal-up-value">UP —</span>
+          <span class="signal-trend-badge">—</span>
+          <span class="signal-down-value">DOWN —</span>
+        </div>
+      </div>
 
-/**
- * Accept V2 flat `{ order_id, fill_count, ... }`, legacy `{ order: { order_id } }`,
- * or occasional `{ orders: [{ order_id }] }`. Always expose a nested `order`
- * with fill fields preserved so callers can seed fill polling from create.
- */
-function normalizeCreateOrderResponse(data) {
-  const fromArray =
-    data &&
-    Array.isArray(data.orders) &&
-    data.orders[0] &&
-    typeof data.orders[0] === 'object'
-      ? data.orders[0]
-      : null;
-  const orderId =
-    (data && data.order_id) ||
-    (data && data.orderId) ||
-    (data && data.order && (data.order.order_id || data.order.orderId)) ||
-    (fromArray && (fromArray.order_id || fromArray.orderId)) ||
-    null;
-  if (!orderId) {
-    throw new Error('create order response missing order_id');
-  }
-  const nested =
-    data && data.order && typeof data.order === 'object'
-      ? { ...data.order, order_id: orderId }
-      : fromArray
-        ? { ...fromArray, order_id: orderId }
-        : { ...(data || {}), order_id: orderId };
-  // Preserve V2 immediate-fill fields on the nested order for seed polling.
-  // Create Order V2 uses `fill_count`; keep `fills_count` alias for callers/tests.
-  if (nested.fills_count == null) {
-    const fc =
-      (data && data.fills_count != null ? data.fills_count : null) ??
-      (data && data.fill_count != null ? data.fill_count : null) ??
-      nested.fill_count;
-    if (fc != null) nested.fills_count = fc;
-  }
-  if (nested.fill_count == null && nested.fills_count != null) {
-    nested.fill_count = nested.fills_count;
-  }
-  if (nested.fill_count_fp == null && data && data.fill_count_fp != null) {
-    nested.fill_count_fp = data.fill_count_fp;
-  }
-  if (nested.remaining_count == null && data && data.remaining_count != null) {
-    nested.remaining_count = data.remaining_count;
-  }
-  if (nested.average_fill_price == null && data && data.average_fill_price != null) {
-    nested.average_fill_price = data.average_fill_price;
-  }
-  if (nested.average_fee_paid == null && data && data.average_fee_paid != null) {
-    nested.average_fee_paid = data.average_fee_paid;
-  }
-  if (nested.taker_fees_dollars == null && data && data.taker_fees_dollars != null) {
-    nested.taker_fees_dollars = data.taker_fees_dollars;
-  }
-  if (nested.maker_fees_dollars == null && data && data.maker_fees_dollars != null) {
-    nested.maker_fees_dollars = data.maker_fees_dollars;
-  }
-  return { ...(data || {}), order: nested, order_id: orderId };
-}
+      <div class="window-stats">
+        <div class="stat">
+          <span class="stat-label">Confidence</span>
+          <span class="stat-value confidence-value">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Risk adj.</span>
+          <span class="stat-value risk-value">—</span>
+        </div>
+      </div>
 
-/**
- * Thin REST client for Kalshi's trading API.
- *
- * IMPORTANT: Kalshi's API surface (base URL, field names, endpoint paths)
- * has shifted between doc revisions in the past. Before relying on this in
- * production, cross-check every endpoint/field used below against the
- * current official reference at https://docs.kalshi.com and its
- * openapi.yaml — this file is written to be easy to patch if something
- * has moved.
- *
- * Auth: every private request is signed with RSA-PSS (SHA-256) over
- * `${timestampMs}${METHOD}${path}` (path only, no query string), using a
- * private key you generate yourself. Kalshi never sees the private key —
- * only the signature. Public market-data endpoints (GET /markets, GET
- * .../orderbook) do not require auth.
- */
-class KalshiClient {
-  constructor({ baseUrl, keyId, privateKeyPath, privateKeyPem }) {
-    this.baseUrl = (baseUrl || 'https://api.elections.kalshi.com/trade-api/v2').replace(/\/+$/, '');
-    this.keyId = keyId || null;
-    this.privateKey = privateKeyPem || (privateKeyPath && fs.existsSync(privateKeyPath)
-      ? fs.readFileSync(privateKeyPath, 'utf8')
-      : null);
-    this._openMarketsCache = new Map();
-    this._openMarketsInflight = new Map();
-    this._marketByTickerCache = new Map();
-    this._marketByTickerInflight = new Map();
-    this._publicGate = Promise.resolve();
-    this._lastPublicAt = 0;
-    this._cooldownUntil = 0;
-    this._429Streak = 0;
-    this._429LogAt = 0;
-    this._last429At = 0;
-    // Basic-tier defaults at ~85% headroom (200 read / 100 write).
-    this._readBudget = createTokenBucket(170, 340);
-    this._writeBudget = createTokenBucket(85, 85);
-    this._defaultTokenCost = DEFAULT_TOKEN_COST;
-    this._limitsSyncedAt = 0;
-    this._usageTier = 'basic';
-  }
+      <p class="window-explanation"></p>
 
-  /**
-   * Apply live limits from GET /account/limits (or manual override).
-   * Uses ~85% of refill/capacity so we stay under Kalshi's ceiling.
-   */
-  applyAccountLimits(limits = {}) {
-    const read = limits.read || {};
-    const write = limits.write || {};
-    const readRate = Number(read.refill_rate);
-    const readCap = Number(read.bucket_capacity);
-    const writeRate = Number(write.refill_rate);
-    const writeCap = Number(write.bucket_capacity);
-    const headroom = 0.85;
-    if (Number.isFinite(readRate) && readRate > 0) {
-      const cap = Number.isFinite(readCap) && readCap > 0 ? readCap : readRate * 2;
-      this._readBudget = createTokenBucket(readRate * headroom, cap * headroom);
-    }
-    if (Number.isFinite(writeRate) && writeRate > 0) {
-      const cap = Number.isFinite(writeCap) && writeCap > 0 ? writeCap : writeRate;
-      this._writeBudget = createTokenBucket(writeRate * headroom, cap * headroom);
-    }
-    if (limits.usage_tier) this._usageTier = String(limits.usage_tier);
-    this._limitsSyncedAt = Date.now();
-  }
+      <div class="track-row">
+        <div class="track-countdown">
+          <span class="stat-label">Settles in</span>
+          <span class="stat-value countdown-value">—</span>
+        </div>
+      </div>
 
-  /** Fetch GET /account/limits and tune local buckets (authenticated). */
-  async syncAccountLimits({ force = false } = {}) {
-    if (!this.hasCredentials) return null;
-    if (!force && this._limitsSyncedAt && Date.now() - this._limitsSyncedAt < 10 * 60_000) {
-      return { usage_tier: this._usageTier, cached: true };
-    }
-    try {
-      const data = await this._request('GET', '/account/limits', { auth: true });
-      this.applyAccountLimits(data || {});
-      return data;
-    } catch (err) {
-      console.warn('[kalshi] syncAccountLimits failed:', err && err.message ? err.message : err);
-      return null;
-    }
-  }
+      <div class="track-result hidden">
+        <span class="result-badge"></span>
+        <span class="result-text"></span>
+      </div>
 
-  _isWriteMethod(method) {
-    const m = String(method || '').toUpperCase();
-    return m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE';
-  }
+      <div class="track-accuracy">
+    <span class="accuracy-label">Track record (24h)</span>
+        <span class="accuracy-value">—</span>
+      </div>
+    </article>
+  </template>
 
-  async _acquireBudget(method, opts = {}) {
-    if (opts.skipBudget) return;
-    const cost = Math.max(1, Number(opts.tokenCost) || this._defaultTokenCost);
-    const bucket = this._isWriteMethod(method) ? this._writeBudget : this._readBudget;
-    await bucket.take(cost);
-  }
+  <div id="bot-overlay" class="overlay hidden">
+    <div class="settings-card bot-card">
+      <h2>Trading Bot <span class="app-version" data-app-version title="Deploy version">v…</span></h2>
+      <p class="settings-hint" id="bot-mode-line">Checking status…</p>
+      <p class="settings-hint" id="bot-persist-line" hidden></p>
 
-  /** Use signed market GETs when credentials are available — account read bucket
-   *  (170 req/s at basic tier) does not share the public IP pool that 429s. */
-  _preferMarketAuth() {
-    return this.hasCredentials;
-  }
+      <div class="bot-section">
+        <h3>Trading mode</h3>
+        <div class="mode-toggle-row">
+          <button class="mode-toggle-btn" id="mode-btn-paper" type="button">Paper (simulated)</button>
+          <button class="mode-toggle-btn" id="mode-btn-live" type="button">Live (real money)</button>
+        </div>
+        <p class="settings-hint" id="mode-toggle-feedback"></p>
+      </div>
 
-  getCachedMarket(ticker, maxAgeMs = Infinity) {
-    const key = String(ticker || '');
-    if (!key || !this._marketByTickerCache) return null;
-    const hit = this._marketByTickerCache.get(key);
-    if (!hit || !hit.market) return null;
-    const age = Date.now() - Number(hit.at || 0);
-    if (Number.isFinite(maxAgeMs) && age > maxAgeMs) return null;
-    return hit.market;
-  }
+      <div class="bot-section">
+        <h3>Live status</h3>
+        <div class="settings-actions">
+          <button class="btn-primary" id="bot-running-toggle" type="button">Start bot</button>
+          <span class="settings-hint" id="bot-running-timer"></span>
+        </div>
+        <div id="bot-status-body">
+          <p class="settings-hint">Loading…</p>
+        </div>
+      </div>
 
-  get hasCredentials() {
-    return !!(this.keyId && this.privateKey);
-  }
+      <div class="bot-section">
+        <h3>Settings
+          <button type="button" id="bot-settings-lock" class="bot-settings-lock" aria-pressed="false" title="Lock settings so sliders can't be bumped by accident">
+            Unlock to edit
+          </button>
+        </h3>
+        <p class="settings-hint">These apply immediately — no restart needed. Lock settings when you're done so a sleepy thumb can't drop stop-loss to 1¢. Trading mode (paper/live) is set on the server and can't be changed here.</p>
+        <div id="bot-settings-fields">
+        <div class="bot-strategy-tabs" role="tablist" aria-label="Strategy">
+          <button type="button" class="bot-strategy-tab" data-strategy="edge" id="bot-tab-edge">Edge</button>
+          <button type="button" class="bot-strategy-tab" data-strategy="settle" id="bot-tab-settle">Settle (80–94¢)</button>
+          <button type="button" class="bot-strategy-tab active" data-strategy="model" id="bot-tab-model">MODEL</button>
+        </div>
+        <input type="hidden" id="bot-strategy-mode" value="model" />
 
-  /**
-   * Update credentials at runtime (e.g. from a dashboard input) instead of
-   * only at construction time. Never logs or echoes the private key back —
-   * callers should only ever report hasCredentials, not the key itself.
-   */
-  setCredentials({ keyId, privateKeyPem }) {
-    if (keyId) this.keyId = keyId;
-    if (privateKeyPem) this.privateKey = privateKeyPem;
-  }
+        <div class="bot-field-grid bot-settings-global">
+          <label>Asset to trade
+            <select id="bot-symbol">
+              <option value="AUTO">Auto (scan enabled coins below)</option>
+              <option value="BTC">BTC</option>
+              <option value="XRP">XRP</option>
+              <option value="ETH">ETH</option>
+              <option value="SOL">SOL</option>
+              <option value="BNB">BNB</option>
+              <option value="NEAR">NEAR</option>
+              <option value="HYPE">HYPE</option>
+              <option value="DOGE">DOGE</option>
+            </select>
+            <span class="field-hint">AUTO only trades the coins you check below. Single-coin mode also requires that coin to be checked.</span>
+          </label>
+          <div class="auto-coin-picker" id="bot-auto-coins-wrap">
+            <div class="auto-coin-picker-title">AUTO coins</div>
+            <div class="auto-coin-picker-grid" id="bot-auto-coins">
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="BTC" /> BTC</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="BNB" /> BNB</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="SOL" /> SOL</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="ETH" /> ETH</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="XRP" /> XRP</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="HYPE" /> HYPE</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="DOGE" /> DOGE</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="NEAR" /> NEAR</label>
+            </div>
+            <span class="field-hint">Recommended <strong>BTC · ETH</strong> (Core setup). Tap a setup card in the MODEL tab instead of guessing.</span>
+          </div>
+          <label>Daily loss limit ($)
+            <div class="stepper-row">
+              <button type="button" class="stepper-btn" id="bot-daily-loss-down">−</button>
+              <span class="stepper-value" id="bot-daily-loss-value">—</span>
+              <button type="button" class="stepper-btn" id="bot-daily-loss-up">+</button>
+            </div>
+            <span class="field-hint">Kill-switch: halt all new entries for the rest of the day once realized losses hit this amount. Resets at midnight UTC. Default <strong>$5</strong>. <strong>$0</strong> = off.</span>
+          </label>
+          <label>Stake per trade
+            <div class="slider-row">
+              <input id="bot-stake" type="range" min="1" max="500" step="1" />
+              <span class="slider-value" id="bot-stake-value">—</span>
+            </div>
+            <div class="stake-quick-btns">
+              <button type="button" class="btn-secondary" id="bot-stake-half">½ stake</button>
+              <button type="button" class="btn-secondary" id="bot-stake-quarter">¼ stake</button>
+            </div>
+            <span class="field-hint">Dollar amount risked per trade (all strategies).</span>
+          </label>
+          <label>Max open positions
+            <div class="slider-row">
+              <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
+              <span class="slider-value" id="bot-maxpos-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>1</strong> open at a time. Still one open per coin when max &gt; 1.</span>
+          </label>
+          <label>Second open only if holding green
+            <select id="bot-second-green">
+              <option value="on">On (default)</option>
+              <option value="off">Off — fill up to max anytime</option>
+            </select>
+          </label>
+          <label class="bot-exit-sound-toggle">
+            <span>Exit sound</span>
+            <input type="checkbox" id="bot-exit-sound" />
+            <span class="field-hint">Short chime when a position closes (TP, breakeven, cut, settle, etc.). Saved in this browser only.</span>
+          </label>
+        </div>
 
-  _sign(method, path) {
-    const timestamp = Date.now().toString();
-    // Kalshi signs the full URL pathname, including /trade-api/v2.
-    const apiPrefix = new URL(this.baseUrl).pathname.replace(/\/$/, '');
-    const message = `${timestamp}${method.toUpperCase()}${apiPrefix}${path}`;
-    const signature = crypto.sign('sha256', Buffer.from(message), {
-      key: this.privateKey,
-      padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
-      saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
-    });
-    return {
-      'KALSHI-ACCESS-KEY': this.keyId,
-      'KALSHI-ACCESS-TIMESTAMP': timestamp,
-      'KALSHI-ACCESS-SIGNATURE': signature.toString('base64'),
-    };
-  }
+        <div id="bot-settings-edge" class="bot-field-grid" hidden>
+          <p class="settings-hint"><strong>Edge</strong> — probability edge vs Kalshi only. Sizing / coins are above.</p>
+          <label>Edge threshold
+            <div class="slider-row">
+              <input id="bot-edge" type="range" min="1" max="30" step="0.5" />
+              <span class="slider-value" id="bot-edge-value">—</span>
+            </div>
+            <span class="field-hint">How many percentage points our probability must beat Kalshi's own price before it's worth trading.</span>
+          </label>
 
-  async _request(method, path, opts = {}) {
-    const { query, body, auth = true } = opts;
-    await this._acquireBudget(method, opts);
-    const qs = query
-      ? '?' + new URLSearchParams(Object.entries(query).filter(([, v]) => v != null)).toString()
-      : '';
-    const url = `${this.baseUrl}${path}${qs}`;
-    const headers = {
-      'Content-Type': 'application/json',
-      'User-Agent': 'crypto-prediction-engine',
-      Accept: 'application/json',
-    };
-    if (auth) {
-      if (!this.hasCredentials) throw new Error('Kalshi credentials not configured for an authenticated request');
-      Object.assign(headers, this._sign(method, path));
-    }
-    const maxAttempts = opts.retryOn429 === false ? 1 : 3;
-    let lastErr = null;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const res = await fetch(url, {
-        method,
-        headers,
-        body: body ? JSON.stringify(body) : undefined,
-      });
-      const text = await res.text();
-      let json;
-      try {
-        json = text ? JSON.parse(text) : {};
-      } catch {
-        json = { raw: text };
-      }
-      if (res.status === 429) {
-        this._noteRateLimit();
-        lastErr = new Error(`Kalshi API ${method} ${path} -> HTTP 429: ${JSON.stringify(json)}`);
-        lastErr.status = 429;
-        lastErr.body = json;
-        // Docs: no Retry-After; bucket keeps refilling. Wait ~one default cost at our write/read rate.
-        const bucket = this._isWriteMethod(method) ? this._writeBudget : this._readBudget;
-        const cost = Math.max(1, Number(opts.tokenCost) || this._defaultTokenCost);
-        const waitMs = Math.min(2000, Math.ceil((cost / Math.max(1, bucket.refillPerSec)) * 1000) * attempt + 50);
-        await sleep(waitMs);
-        // Re-acquire so we don't stampede the empty bucket.
-        await this._acquireBudget(method, opts);
-        continue;
-      }
-      if (!res.ok) {
-        const err = new Error(`Kalshi API ${method} ${path} -> HTTP ${res.status}: ${JSON.stringify(json)}`);
-        err.status = res.status;
-        err.body = json;
-        throw err;
-      }
-      // Auth successes (balance, orders) must not reset public-market 429 backoff.
-      const isPublicMarket = !auth && String(path).startsWith('/markets');
-      if (isPublicMarket) this._clearRateLimitStreak();
-      return json;
-    }
-    throw lastErr || new Error(`Kalshi API ${method} ${path} -> HTTP 429`);
-  }
+          <label>Min confidence
+            <div class="slider-row">
+              <input id="bot-confidence" type="range" min="10" max="95" step="1" />
+              <span class="slider-value" id="bot-confidence-value">—</span>
+            </div>
+            <span class="field-hint">The engine's own trust in its prediction (docked for volatility, conflicting signals, etc.) — must clear this before the bot acts.</span>
+          </label>
 
-  // ---------- public market data (no auth needed) ----------
+          <label>Stop-loss (¢ below entry)
+            <div class="slider-row">
+              <input id="bot-stoploss" type="range" min="1" max="40" step="1" />
+              <span class="slider-value" id="bot-stoploss-value">—</span>
+            </div>
+            <span class="field-hint">Exit if the held side's bid drops this many cents from your entry (e.g. entry 55¢, stop 10 → exit near 45¢). Caps a loser before a full 0¢ settlement. Paper fills at that level; live uses the real bid.</span>
+          </label>
 
-  _maybeDecay429Streak() {
-    const streak = Number(this._429Streak) || 0;
-    const last = Number(this._last429At) || 0;
-    if (streak > 0 && last > 0 && Date.now() - last > 45_000) {
-      this._429Streak = 0;
-    }
-  }
+          <label>Post-stop recovery (¢ bounce)
+            <div class="slider-row">
+              <input id="bot-stoprecovery" type="range" min="0" max="25" step="1" />
+              <span class="slider-value" id="bot-stoprecovery-value">—</span>
+            </div>
+            <span class="field-hint">After a stop-loss, don't open on that coin <em>or any other coin</em> until the stopped coin's bid has bounced this many cents. Knife-catch (same coin + same side) also needs the engine still favoring that side. 0 = off.</span>
+          </label>
 
-  _noteRateLimit() {
-    // Prefer cache; public IP bucket refills slowly — don't sit out for minutes.
-    this._429Streak = Math.min(8, (Number(this._429Streak) || 0) + 1);
-    this._last429At = Date.now();
-    const streak = this._429Streak;
-    // Persistent throttle: Kalshi is blocking this IP — back off much longer
-    // instead of hammering every 20s and staying rate-limited indefinitely.
-    const backoffMs = streak >= PUBLIC_429_PERSISTENT_STREAK
-      ? PUBLIC_429_PERSISTENT_BACKOFF_MS
-      : Math.min(PUBLIC_429_BACKOFF_MAX_MS, PUBLIC_429_BACKOFF_BASE_MS * Math.pow(1.25, streak - 1));
-    this._cooldownUntil = Math.max(this._cooldownUntil || 0, Date.now() + backoffMs);
-    if (Date.now() - this._429LogAt > 10_000) {
-      this._429LogAt = Date.now();
-      console.warn(
-        `[kalshi] rate limited (429) — cache-only ${Math.round(backoffMs / 1000)}s, then retry` +
-        (streak >= PUBLIC_429_PERSISTENT_STREAK ? ` (persistent streak ${streak} — backing off)` : '')
-      );
-    }
-  }
+          <label>Take-profit (¢ above entry)
+            <div class="slider-row">
+              <input id="bot-takeprofit" type="range" min="1" max="40" step="1" />
+              <span class="slider-value" id="bot-takeprofit-value">—</span>
+            </div>
+            <span class="field-hint">Exit if the held side's bid rises this many cents above entry (e.g. entry 55¢, TP 15 → exit near 70¢). Also banks immediately at ~97¢ (near-certain). Last ~60s before close: take TP / bank a green bid instead of waiting on settlement.</span>
+          </label>
 
-  _clearRateLimitStreak() {
-    this._429Streak = 0;
-  }
+          <label>Min entry price
+            <div class="slider-row">
+              <input id="bot-minentries" type="range" min="1" max="50" step="1" />
+              <span class="slider-value" id="bot-minentries-value">—</span>
+            </div>
+            <span class="field-hint">Never buy a side cheaper than this, even with high confidence. Blocks longshot tickets (e.g. 7¢ NO fades) that blow up dollar P&amp;L. Also won't open with under 3 minutes left in the window (avoids freeze-into-settle).</span>
+          </label>
+        </div>
 
-  publicRateLimitRemainingMs() {
-    if (this._preferMarketAuth()) return 0; // auth uses account bucket — not public IP limited
-    this._maybeDecay429Streak();
-    const rem = Number(this._cooldownUntil) - Date.now();
-    if (rem > 0) return rem;
-    const streak = Number(this._429Streak) || 0;
-    const last = Number(this._last429At) || 0;
-    if (streak >= 2 && last > 0) {
-      const quietRem = PUBLIC_QUIET_AFTER_429_MS - (Date.now() - last);
-      if (quietRem > 0) return quietRem;
-    }
-    return 0;
-  }
+        <div id="bot-settings-model" class="bot-field-grid" hidden>
+          <p class="settings-hint"><strong>MODEL</strong> — Core: BTC/ETH, <strong>1</strong> slot, max <strong>88¢</strong>, conf <strong>55%</strong>, stall <strong>4s</strong>, stagnation <strong>60s</strong>, rapid adverse <strong>off</strong>. Full stake at all asks.</p>
 
-  async _withPublicGate(fn) {
-    const useAuth = this._preferMarketAuth();
-    const run = this._publicGate.then(async () => {
-      // Authenticated requests use the account token bucket — skip public IP cooldown/spacing.
-      if (!useAuth) {
-        const cooldownWait = Math.max(0, this._cooldownUntil - Date.now());
-        const spacingWait = Math.max(0, this._lastPublicAt + UNAUTH_PUBLIC_SPACING_MS - Date.now());
-        const wait = Math.max(cooldownWait, spacingWait);
-        if (wait > 0) await sleep(wait);
-        this._lastPublicAt = Date.now();
-      }
-      return fn();
-    });
-    this._publicGate = run.then(
-      () => undefined,
-      () => undefined
-    );
-    return run;
-  }
+          <div class="model-setups" id="bot-model-setups">
+            <h4 class="bot-panel-subhead">Paper setups</h4>
+            <p class="settings-hint">Tap one to make it the <strong>live</strong> book — that <strong>brings its bankroll</strong> (avail / wallet / ins) with it, and parks the previous live book. Knobs stay either way. Shadow paper books are optional (off freezes them; what-if still uses saved fills). <strong>What-if</strong> is raw PnL on saved fills only.</p>
+            <label>Shadow paper books
+              <select id="bot-model-shadow-books">
+                <option value="off">Off — freeze shadows (default)</option>
+                <option value="on">On — silent paper books for every other setup</option>
+              </select>
+            </label>
+            <label>Auto-switch live setup
+              <select id="bot-model-auto-switch">
+                <option value="off">Off — manual only (default)</option>
+                <option value="on">On — when live avail is low, jump to a climbing shadow</option>
+              </select>
+            </label>
+            <p class="settings-hint" id="bot-model-auto-switch-note" role="status" aria-live="polite">Auto-switch status loads with bot status.</p>
+            <div id="bot-model-setups-list" class="model-setups-list"></div>
+          </div>
 
-  async _listOpenMarketsUncached(seriesTicker, limit) {
-    const useAuth = this._preferMarketAuth();
-    const fetchList = async (query) => {
-      const data = await this._request('GET', '/markets', {
-        query: { series_ticker: seriesTicker, limit, ...query },
-        auth: useAuth,
-        retryOn429: false,
-      });
-      return (data.markets || []).map(normalizeMarketPrices);
-    };
-    const usable = (list) =>
-      (Array.isArray(list) ? list : []).filter((m) => {
-        const s = String(m.status || '').toLowerCase();
-        return !s || s === 'open' || s === 'active' || s === 'initialized' || s === 'unopened';
-      });
+          <h4 class="bot-panel-subhead">Entry</h4>
+          <label>MODEL fade (opposite side)
+            <select id="bot-model-invert">
+              <option value="off">Off — follow the lean (default)</option>
+              <option value="on">On — fade: UP→NO, DOWN→YES</option>
+            </select>
+          </label>
+          <label>MODEL min confidence
+            <div class="slider-row">
+              <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />
+              <span class="slider-value" id="bot-model-confidence-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>55%</strong> (Core).</span>
+          </label>
+          <label>MODEL live favor (pts)
+            <div class="slider-row">
+              <input id="bot-model-live-favor" type="range" min="0" max="15" step="1" />
+              <span class="slider-value" id="bot-model-live-favor-value">—</span>
+            </div>
+            <span class="field-hint">Live UP vs DOWN must lead by this many pts to enter. Default <strong>2</strong>. <strong>0</strong> = any lead.</span>
+          </label>
+          <label>MODEL stall-hold lean sensitivity (pts)
+            <div class="stepper-row">
+              <button type="button" class="stepper-btn" id="bot-model-soft-lean-down">−</button>
+              <span class="stepper-value" id="bot-model-soft-lean-value">—</span>
+              <button type="button" class="stepper-btn" id="bot-model-soft-lean-up">+</button>
+            </div>
+            <span class="field-hint">How many pts of lean lead counts as "still firm" when the price stalls while green. Higher = easier to keep holding (lean must lead by more to hold). Lower = banks sooner on a stall. Default <strong>3</strong>. Does <strong>not</strong> affect entries or any other exit.</span>
+          </label>
+          <label>MODEL min entry lean (%)
+            <div class="slider-row">
+              <input id="bot-model-min-entry-lean" type="range" min="0" max="95" step="1" />
+              <span class="slider-value" id="bot-model-min-entry-lean-value">—</span>
+            </div>
+            <span class="field-hint">Held-side live prob must be at least this to open (e.g. NO needs ≥65% DOWN). Default <strong>65%</strong>. Barriers/cuts protect exits — raise to 75–80% if entries feel too soft. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL signal score strength
+            <div class="slider-row">
+              <input id="bot-model-signal-dom" type="range" min="0" max="30" step="1" />
+              <span class="slider-value" id="bot-model-signal-dom-value">—</span>
+            </div>
+            <span class="field-hint"><strong>0 = off</strong> (default). When on: exit-only — min |netDominance| while <em>weakening</em> to treat as a turn (does <strong>not</strong> block new entries). Higher = more patient.</span>
+          </label>
+          <label>MODEL confirm cross (¢)
+            <div class="slider-row">
+              <input id="bot-model-confirm-cross" type="range" min="0" max="65" step="1" />
+              <span class="slider-value" id="bot-model-confirm-cross-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>off (0)</strong>. When on: per-coin gate after first MODEL round-trip this run.</span>
+          </label>
+          <label>MODEL max run after cross (¢)
+            <div class="slider-row">
+              <input id="bot-model-confirm-ext" type="range" min="5" max="30" step="1" />
+              <span class="slider-value" id="bot-model-confirm-ext-value">—</span>
+            </div>
+          </label>
+          <label>MODEL min entry (¢)
+            <div class="slider-row">
+              <input id="bot-model-min-entry" type="range" min="40" max="85" step="1" />
+              <span class="slider-value" id="bot-model-min-entry-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>65¢</strong>. Floor for any MODEL buy.</span>
+          </label>
+          <label>MODEL min room to hard floor (¢)
+            <div class="slider-row">
+              <input id="bot-model-min-room-floor" type="range" min="0" max="25" step="1" />
+              <span class="slider-value" id="bot-model-min-room-floor-value">—</span>
+            </div>
+            <span class="field-hint">Entry ask must be at least this many ¢ above the hard stop floor (default <strong>10</strong>). Blocks 57¢ buys when floor is 55. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL low-ask conviction (conf %)
+            <div class="slider-row">
+              <input id="bot-model-low-ask-conf" type="range" min="0" max="95" step="1" />
+              <span class="slider-value" id="bot-model-low-ask-conf-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Off by default (0)</strong> — no near-certain gate on ≤69¢ asks. Raise to re-enable (conf + live favor + held lean).</span>
+          </label>
+          <label>MODEL max entry (¢)
+            <div class="slider-row">
+              <input id="bot-model-max-entry" type="range" min="70" max="98" step="1" />
+              <span class="slider-value" id="bot-model-max-entry-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>88¢</strong>. Won't buy richer asks.</span>
+          </label>
+          <p class="field-hint">MODEL stake is <strong>full size</strong> at all asks (under-70¢ half-stake is off).</p>
 
-    // One list GET per refresh — the old open-then-min_close_ts double-fetch was 429 fuel.
-    return usable(
-      await fetchList({
-        status: 'open',
-        min_close_ts: Math.floor(Date.now() / 1000),
-      })
-    );
-  }
+          <h4 class="bot-panel-subhead">Exit &amp; recycle</h4>
+          <label>MODEL bank / TP green (¢)
+            <div class="slider-row">
+              <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
+              <span class="slider-value" id="bot-model-bank-green-value">—</span>
+            </div>
+            <span class="field-hint">Bank when bid hits this green (default <strong>+11¢</strong>). Trail arms ~+<strong>3¢</strong> — if bid stalls at the near-target slider below, banks at live bid even below this.</span>
+          </label>
+          <label>MODEL near-target stall (¢ green)
+            <div class="slider-row">
+              <input id="bot-model-near-target-bank" type="range" min="3" max="20" step="1" />
+              <span class="slider-value" id="bot-model-near-target-bank-value">—</span>
+            </div>
+            <span class="field-hint">When peak reaches this green, stall-bank at the live bid (default <strong>+8¢</strong> with +11 TP). Still tries for full TP above while momentum is up; once stalled here, exits even if bid pulled back.</span>
+          </label>
+          <label>MODEL green stall bank (sec)
+            <div class="slider-row">
+              <input id="bot-model-stall-sec" type="range" min="3" max="60" step="1" value="4" />
+              <span class="slider-value" id="bot-model-stall-sec-value">—</span>
+            </div>
+            <span class="field-hint">While green (trail armed), bank at the <strong>live bid</strong> if peak is flat this long or pulls back <strong>2¢</strong> — even if under the TP target above. Default <strong>4s</strong>.</span>
+          </label>
+          <label>MODEL stagnation check (sec)
+            <div class="slider-row">
+              <input id="bot-model-stagnation-sec" type="range" min="0" max="120" step="5" />
+              <span class="slider-value" id="bot-model-stagnation-sec-value">—</span>
+            </div>
+            <span class="field-hint">After this long with peak never reaching trail arm (<strong>&lt;+3¢</strong>) <em>and</em> model soft/decaying → exit. Soft lean no longer instant-BE or MODEL_AGAINST — this is the mushy-thesis exit. Time alone never cuts. Default <strong>60s</strong>. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL stagnation sensitivity (¢ progress needed)
+            <div class="slider-row">
+              <input id="bot-model-stagnation-sensitivity" type="range" min="0" max="10" step="1" />
+              <span class="slider-value" id="bot-model-stagnation-sensitivity-value">—</span>
+            </div>
+            <span class="field-hint">How much peak progress counts as "not stagnant." Lower = more lenient (a little progress avoids the exit). Higher = more sensitive (needs more progress to avoid it, so it cuts sooner). Default <strong>3¢</strong> (tracks trail arm). <strong>0</strong> = any progress at all counts.</span>
+          </label>
+          <label>MODEL BE chase (sec)
+            <div class="slider-row">
+              <input id="bot-model-be-chase-sec" type="range" min="0" max="60" step="1" />
+              <span class="slider-value" id="bot-model-be-chase-sec-value">—</span>
+            </div>
+            <span class="field-hint">After bid reaches entry, this many seconds to hit trail arm (<strong>+3¢</strong>) or scratch breakeven. Only fires if the model is also decaying — a firm lean will not BE. Default <strong>20s</strong> (was 8s). <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL rapid adverse (¢)
+            <div class="slider-row">
+              <input id="bot-model-rapid-adverse" type="range" min="0" max="15" step="1" />
+              <span class="slider-value" id="bot-model-rapid-adverse-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Off by default (0)</strong>. When on: true red ≥ this many ¢ <em>and</em> model decaying → cut after open grace.</span>
+          </label>
+          <label>MODEL lean decay trigger (pts drop)
+            <div class="slider-row">
+              <input id="bot-model-decay-drop" type="range" min="5" max="30" step="1" />
+              <span class="slider-value" id="bot-model-decay-drop-value">—</span>
+            </div>
+            <span class="field-hint">How many probability points the lean must drop from its peak before decay tracking starts (e.g. 92→78 = 14pt drop). Default <strong>14</strong>. Lower = more sensitive; higher = only cuts on bigger collapses.</span>
+          </label>
+          <label>MODEL lean decay stall (sec)
+            <div class="slider-row">
+              <input id="bot-model-decay-stall" type="range" min="0" max="30" step="1" />
+              <span class="slider-value" id="bot-model-decay-stall-value">—</span>
+            </div>
+            <span class="field-hint">After entering the decay zone with no recovery, cut after this many seconds regardless of lean strength. Default <strong>6s</strong>. Lower = cuts faster; <strong>0</strong> = stall timer off (only floor path fires).</span>
+          </label>
+          <label>MODEL lean decay floor (prob %)
+            <div class="slider-row">
+              <input id="bot-model-decay-floor" type="range" min="60" max="92" step="1" />
+              <span class="slider-value" id="bot-model-decay-floor-value">—</span>
+            </div>
+            <span class="field-hint">If the held-side probability drops to or below this level <em>and</em> the thesis is soft, cut immediately (no stall wait). Default <strong>85</strong>.</span>
+          </label>
+          <label>MODEL cash out before settle (min left)
+            <div class="slider-row">
+              <input id="bot-model-settle-close" type="range" min="0" max="8" step="0.5" />
+              <span class="slider-value" id="bot-model-settle-close-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>2.5</strong>. In the last N minutes, bank flat/green or cut small reds instead of riding to SETTLED 0/100. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL late barrier (min left)
+            <div class="slider-row">
+              <input id="bot-model-late-barrier" type="range" min="0" max="6" step="0.5" />
+              <span class="slider-value" id="bot-model-late-barrier-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>2</strong>. Force exit in this window unless conf is very high and lean still with you. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL never-settle window (min left)
+            <div class="slider-row">
+              <input id="bot-model-preclose-force" type="range" min="0" max="3" step="0.25" />
+              <span class="slider-value" id="bot-model-preclose-force-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>1</strong>. Last N minutes: always sell at the bid — never wait for Kalshi settlement. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL max loss (¢ below entry)
+            <div class="slider-row">
+              <input id="bot-model-max-loss" type="range" min="0" max="20" step="1" />
+              <span class="slider-value" id="bot-model-max-loss-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Off (0)</strong> — MODEL losses exit via stagnation (and hard lean flip), not a −N¢ cliff or lean-stop.</span>
+          </label>
+          <label>MODEL hard stop floor (¢)
+            <div class="slider-row">
+              <input id="bot-model-hard-floor" type="range" min="40" max="65" step="1" />
+              <span class="slider-value" id="bot-model-hard-floor-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Unused</strong> for exits (lean-stop / hard-floor cut removed). Entry “min room to floor” still blocks tight buys near 55.</span>
+          </label>
+          <label>MODEL pace lean-stop drawdown (% of room to floor)
+            <div class="slider-row">
+              <input id="bot-model-pace-drawdown" type="range" min="15" max="60" step="5" />
+              <span class="slider-value" id="bot-model-pace-drawdown-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Unused</strong> — pace lean-stop removed. Reds wait for stagnation or a hard lean flip.</span>
+          </label>
+          <label>MODEL pace sample (sec)
+            <div class="slider-row">
+              <input id="bot-model-pace-sample" type="range" min="2" max="20" step="1" />
+              <span class="slider-value" id="bot-model-pace-sample-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Unused</strong> (pace lean-stop off).</span>
+          </label>
+          <label>MODEL rich stop floor (¢)
+            <div class="slider-row">
+              <input id="bot-model-rich-floor" type="range" min="0" max="75" step="1" />
+              <span class="slider-value" id="bot-model-rich-floor-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Unused</strong> — exits no longer widen/tighten by price floor.</span>
+          </label>
+          <label>MODEL post-exit sit-out (sec)
+            <div class="slider-row">
+              <input id="bot-model-sitout" type="range" min="0" max="120" step="15" value="45" />
+              <span class="slider-value" id="bot-model-sitout-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Per coin</strong> — after BE/TP/cut on that coin, wait before rebuying it (default <strong>45s</strong>).</span>
+          </label>
+          <label>MODEL global sit-out (sec)
+            <div class="slider-row">
+              <input id="bot-model-global-sitout" type="range" min="0" max="60" step="5" value="20" />
+              <span class="slider-value" id="bot-model-global-sitout-value">—</span>
+            </div>
+            <span class="field-hint"><strong>All coins</strong> — after any TP/BE/cut, block <em>every</em> new entry this long so you don’t hop BTC→ETH in the same regime (default <strong>20s</strong>). <strong>0</strong> = off.</span>
+          </label>
+        </div>
 
-  async getOpenMarkets(seriesTicker, limit = 20) {
-    if (!this._openMarketsCache) this._openMarketsCache = new Map();
-    if (!this._openMarketsInflight) this._openMarketsInflight = new Map();
-    const cacheKey = String(seriesTicker || '');
-    const now = Date.now();
-    const cached = this._openMarketsCache.get(cacheKey);
-    // Public-IP 429 cooldown only applies to unauthenticated requests.
-    const useAuth = this._preferMarketAuth();
-    const limited = !useAuth && now < this._cooldownUntil;
-    // Empty lists go stale fast — a real rollover must not look "rolling over" for 12s+.
-    // During 429 cooldown, serve a non-empty list up to 60s so entries don't freeze on BTC.
-    if (cached) {
-      const n = Array.isArray(cached.markets) ? cached.markets.length : 0;
-      let ttl = n > 0 ? OPEN_MARKETS_CACHE_MS : 1_500;
-      if (limited && n > 0) ttl = OPEN_MARKETS_CACHE_LIMITED_MS;
-      if (now - cached.at < ttl) return cached.markets;
-    }
+        <div id="bot-settings-settle" class="bot-field-grid" hidden>
+          <p class="settings-hint"><strong>Settle</strong> only — buy 80–94¢ band. Sizing / coins are above. Half-stake NEAR is settle-only below.</p>
+          <label>Settle entry min (¢)
+            <div class="slider-row">
+              <input id="bot-settle-min" type="range" min="65" max="95" step="1" />
+              <span class="slider-value" id="bot-settle-min-value">—</span>
+            </div>
+            <span class="field-hint">Lowest ask in the primary band (default 80¢).</span>
+          </label>
+          <label>Settle entry max (¢)
+            <div class="slider-row">
+              <input id="bot-settle-max" type="range" min="75" max="98" step="1" />
+              <span class="slider-value" id="bot-settle-max-value">—</span>
+            </div>
+            <span class="field-hint">Highest ask allowed (default 94¢). 90–94¢ = hold to settle. Also requires upside to 100 ≥ min upside and skips ≥95¢ so AUTO hunts other coins.</span>
+          </label>
+          <label>Settle stop-loss (¢ below entry)
+            <div class="slider-row">
+              <input id="bot-settle-stoploss" type="range" min="8" max="60" step="1" />
+              <span class="slider-value" id="bot-settle-stoploss-value">—</span>
+            </div>
+            <span class="field-hint">Default 50¢ (max 60¢) — ride through wicks. Gap dumps can still fill worse. Floor 8¢. Lock settings when done editing.</span>
+          </label>
+          <label>Entry-tiered exits (TP / stale / stuck by entry)
+            <select id="bot-settle-tiered">
+              <option value="on">On (default)</option>
+              <option value="off">Off — stop + hold to settle only</option>
+            </select>
+            <span class="field-hint">On uses the table below. Stuck exits (flat / small-green) still follow the stuck slider. Off = stop + hold to settlement only.</span>
+          </label>
+          <div id="settle-exit-table-wrap" class="settle-exit-table-wrap">
+            <div class="settle-exit-table-title">Exit plan by entry</div>
+            <table class="settle-exit-table" aria-label="Settle take-profit and stale exits by entry price">
+              <thead>
+                <tr>
+                  <th scope="col">Entry</th>
+                  <th scope="col">Aim</th>
+                  <th scope="col">Stale green if not there by</th>
+                </tr>
+              </thead>
+              <tbody id="settle-exit-table-body">
+                <tr><td colspan="3" class="settle-exit-table-loading">Loading…</td></tr>
+              </tbody>
+            </table>
+            <p class="field-hint" id="settle-exit-table-note">Live from bot tiers. After a trade’s bid tags 90¢, stuck/stale turn off and it rides settlement even if price dips back under 90 (stop still applies). Tier TP (e.g. 96¢) can still bank if hit.</p>
+          </div>
+          <label>Stuck exit after (min parked)
+            <div class="slider-row">
+              <input id="bot-settle-stuck" type="range" min="0" max="10" step="0.5" />
+              <span class="slider-value" id="bot-settle-stuck-value">—</span>
+            </div>
+            <span class="field-hint">If the bid sits at/under entry this long → breakeven. If it sits +1–5¢ under the tier target this long → bank (settle_stuck). 0 = off. Skips ≥90¢ hold tier. Default 3 min.</span>
+          </label>
+          <label>Half stake on NEAR
+            <select id="bot-half-stake-near">
+              <option value="on">On (default)</option>
+              <option value="off">Off — full stake</option>
+            </select>
+            <span class="field-hint">Settle only, when Trade NEAR is On: NEAR at 80¢+ risks ½ stake. All coins under 80¢ always use ¼ stake.</span>
+          </label>
+          <label>Settle: only open with ≤ this many min left
+            <div class="slider-row">
+              <input id="bot-settle-maxmin" type="range" min="1" max="14" step="0.5" />
+              <span class="slider-value" id="bot-settle-maxmin-value">—</span>
+            </div>
+            <div class="settle-window-rec" id="settle-window-rec">
+              <span class="settle-window-light" id="settle-window-light" aria-hidden="true"></span>
+              <span class="settle-window-rec-text" id="settle-window-rec-text">Retrospect: gathering settle history…</span>
+              <div class="settle-window-apply-row">
+                <button type="button" class="settle-window-apply settle-window-apply-volatile" id="settle-window-apply-edge">
+                  Apply edge
+                </button>
+                <button type="button" class="settle-window-apply settle-window-apply-stable" id="settle-window-apply-settle">
+                  Apply settle
+                </button>
+              </div>
+            </div>
+            <span class="field-hint">Won’t open too early in the window (default 8.5). Green/red light scores live ~15m Coinbase action: red = choppy/volatile → edge; green = calmer and one-sided → settle. Apply either anytime (auto-switch later). Edge: max entry 95¢; after 3m hold stop moves to breakeven; cash out in the last 5 min if loss ≤ $0.75 on the ticket.</span>
+          </label>
+          <label>Settle same-side sit-out after stop (min)
+            <div class="slider-row">
+              <input id="bot-settle-cooldown" type="range" min="0" max="15" step="0.5" />
+              <span class="slider-value" id="bot-settle-cooldown-value">—</span>
+            </div>
+            <span class="field-hint">After a settle stop, block that coin+side for this many minutes (default 2.5). Stops knife-catch loops like SOL reopen-every-few-seconds. 0 = off (not recommended).</span>
+          </label>
+          <label>Late fallback: only with ≤ this many min left
+            <div class="slider-row">
+              <input id="bot-settle-late-min" type="range" min="0" max="8" step="0.5" />
+              <span class="slider-value" id="bot-settle-late-min-value">—</span>
+            </div>
+            <span class="field-hint">If nothing in the primary band, allow a lower ask only this late (default 2.5). 0 = never expand.</span>
+          </label>
+          <label>Late fallback floor (¢)
+            <div class="slider-row">
+              <input id="bot-settle-late-floor" type="range" min="60" max="85" step="1" />
+              <span class="slider-value" id="bot-settle-late-floor-value">—</span>
+            </div>
+            <span class="field-hint">Lowest ask allowed in the late window (default 70). Still prefers the highest available ask (e.g. 82 over 70).</span>
+          </label>
+        </div>
 
-    const inflight = this._openMarketsInflight.get(cacheKey);
-    if (inflight) return inflight;
+        <div id="bot-settings-wallet" class="bot-field-grid">
+          <label>Starting Bankroll
+            <div class="slider-row">
+              <input id="bot-paper-balance" type="range" min="10" max="10000" step="10" />
+              <span class="slider-value" id="bot-paper-balance-value">—</span>
+            </div>
+            <span class="field-hint">Your trading bankroll. Available Cash = bankroll + closed P&amp;L − Wallet − Insurance − Open Positions.</span>
+          </label>
 
-    if (limited) {
-      if (cached) return cached.markets;
-      return [];
-    }
+          <label>Profit skim mode
+            <select id="bot-skim-mode">
+              <option value="insurance">Insurance fund (20% / 40% wallet / 40% bankroll)</option>
+              <option value="percent">Percent of profit → Reserved only</option>
+              <option value="fixed">Fixed amount per win → Reserved</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
 
-    const work = this._withPublicGate(async () => {
-      try {
-        if (!useAuth && Date.now() < this._cooldownUntil) {
-          const again = this._openMarketsCache.get(cacheKey);
-          return again ? again.markets : [];
-        }
-        const markets = await this._listOpenMarketsUncached(seriesTicker, limit);
-        this._openMarketsCache.set(cacheKey, { at: Date.now(), markets });
-        // Only seed ticker cache when list rows include a real two-sided quote.
-        // Incomplete list rows previously poisoned getMarket's 8s cache.
-        if (!this._marketByTickerCache) this._marketByTickerCache = new Map();
-        const stamped = Date.now();
-        for (const m of markets) {
-          if (m && m.ticker && marketHasUsableTwoSidedQuote(m)) {
-            this._marketByTickerCache.set(String(m.ticker), { at: stamped, market: m });
-          }
-        }
-        return markets;
-      } catch (err) {
-        if (err && err.status === 429) {
-          this._noteRateLimit();
-          if (cached) return cached.markets;
-          return [];
-        }
-        if (cached && now - cached.at < 60_000) return cached.markets;
-        console.warn(`[kalshi] getOpenMarkets ${seriesTicker}:`, err && err.message ? err.message : err);
-        return cached ? cached.markets : [];
-      } finally {
-        this._openMarketsInflight.delete(cacheKey);
-      }
-    });
+          <label id="bot-skim-amount-label">Skim amount
+            <div class="slider-row">
+              <input id="bot-skim-amount" type="range" min="0" max="100" step="1" />
+              <span class="slider-value" id="bot-skim-amount-value">—</span>
+            </div>
+            <span class="field-hint" id="bot-skim-hint">Insurance: each win is 20% Insurance / 40% Wallet / 40% Available. Arms at the arm amount (default $10); stays usable down to the $6 floor. Soft fill ceiling $15 — excess 20% skim → Available (fund stays as cushion). Below floor, Available takes losses until re-armed at arm again.</span>
+          </label>
+        </div>
+        </div><!-- #bot-settings-fields -->
+        <div class="settings-actions">
+          <button class="btn-secondary" id="bot-settings-refresh">Refresh</button>
+          <button class="btn-primary" id="bot-settings-save">Save settings</button>
+        </div>
+        <p class="settings-hint" id="bot-settings-feedback"></p>
+      </div>
 
-    this._openMarketsInflight.set(cacheKey, work);
-    return work;
-  }
+      <div class="bot-section">
+        <h3>Kalshi API Access</h3>
+        <p class="settings-hint" id="kalshi-creds-status">Checking…</p>
+        <label>API Key ID
+          <input id="kalshi-key-id" type="text" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="e.g. 8f2c1a90-....." />
+        </label>
+        <label>Private Key (PEM)
+          <textarea id="kalshi-private-key" rows="5" placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----" spellcheck="false"></textarea>
+        </label>
+        <p class="field-hint">Stored on the engine's server only, never shown again once saved. This alone does not enable real-money trading — that still requires a separate server-side confirmation (see docs).</p>
+        <div class="settings-actions">
+          <button class="btn-primary" id="kalshi-creds-save">Save credentials</button>
+        </div>
+      </div>
 
-  /** Drop cached series list so the next getOpenMarkets hits the network. */
-  invalidateOpenMarkets(seriesTicker) {
-    if (!this._openMarketsCache) return;
-    this._openMarketsCache.delete(String(seriesTicker || ''));
-  }
+      <div class="bot-section">
+        <h3>Backtest</h3>
+        <p class="settings-hint">Uses the settings above. Runs a continuous full-day sim (24h of minute data per day) and reports how long Available Cash lasted before it couldn't fund another stake. Auto scans all Kalshi cryptos. Hunt best searches edge/confidence/stop on its own.</p>
+        <div class="backtest-controls">
+          <label>Asset
+            <select id="backtest-symbol">
+              <option value="AUTO">Auto (scan all markets, trade the best)</option>
+              <option value="BTC">BTC</option>
+              <option value="XRP">XRP</option>
+              <option value="ETH">ETH</option>
+              <option value="SOL">SOL</option>
+              <option value="BNB">BNB</option>
+              <option value="NEAR">NEAR</option>
+              <option value="HYPE">HYPE</option>
+              <option value="ZEC">ZEC</option>
+            </select>
+          </label>
+          <div class="backtest-days" role="group" aria-label="Backtest range">
+            <button class="btn-secondary backtest-day-btn" type="button" data-hours="24">1 day</button>
+            <button class="btn-secondary backtest-day-btn" type="button" data-hours="72">3 days</button>
+            <button class="btn-secondary backtest-day-btn" type="button" data-hours="168">7 days</button>
+          </div>
+          <button class="btn-primary" id="backtest-hunt" type="button">Hunt best</button>
+          <input id="backtest-hours" type="hidden" value="24" />
+        </div>
+        <div id="backtest-results"></div>
+      </div>
 
-  isPublicRateLimited() {
-    return this.publicRateLimitRemainingMs() > 0;
-  }
+      <div class="bot-section">
+        <h3>Calibration (real trade outcomes by probability)</h3>
+        <p class="settings-hint">Tracks every settled trade by the probability the engine gave it at entry, so you can see whether "75%" actually corresponds to winning more often in your own system — rather than guessing. Rule of thumb: ~40-50 trades in a bucket before trusting it at all, 100-200+ for real confidence.</p>
+        <div id="calibration-table"></div>
+        <div class="settings-actions">
+          <button class="btn-secondary" id="bot-reset-paper" type="button">Reset paper P&amp;L (keep last 40)</button>
+        </div>
+      </div>
 
-  /**
-   * Current tradeable 15m market for a series (soonest close still live).
-   * Bust+retry once on miss — but not while rate-limited (cache already empty/useless).
-   */
-  async getLiveOpenMarket(seriesTicker, { minMsLeft = 1500, limit = 20 } = {}) {
-    const pickFrom = (markets, floorMs) => {
-      const nowMs = Date.now();
-      const live = (Array.isArray(markets) ? markets : [])
-        .map((m) => ({ m, closeMs: parseMarketCloseMs(m) }))
-        .filter(({ closeMs }) => Number.isFinite(closeMs) && closeMs > nowMs + floorMs);
-      if (!live.length) return null;
-      live.sort((a, b) => a.closeMs - b.closeMs);
-      return live[0].m;
-    };
-    const attempt = async (force) => {
-      if (force) this.invalidateOpenMarkets(seriesTicker);
-      const markets = await this.getOpenMarkets(seriesTicker, limit);
-      return pickFrom(markets, minMsLeft) || pickFrom(markets, 0);
-    };
-    const first = await attempt(false);
-    if (first) return first;
-    // Cache-bust retry on miss when not rate-limited — stale list from the old
-    // session would otherwise block entry for one or more full compute ticks.
-    if (!this.isPublicRateLimited()) {
-      return (await attempt(true)) || null;
-    }
-    return null;
-  }
+      <div class="settings-actions">
+        <button class="btn-secondary" id="bot-overlay-close">Close</button>
+      </div>
+    </div>
+  </div>
 
-  async getMarket(ticker) {
-    const key = String(ticker || '');
-    if (!key) return null;
-    if (!this._marketByTickerCache) this._marketByTickerCache = new Map();
-    if (!this._marketByTickerInflight) this._marketByTickerInflight = new Map();
-    const now = Date.now();
-    const limited = now < this._cooldownUntil;
-    const cached = this._marketByTickerCache.get(key);
-    const cacheMaxMs = limited ? TICKER_MARKET_CACHE_LIMITED_MS : TICKER_MARKET_CACHE_MS;
-    if (cached && now - cached.at < cacheMaxMs && marketHasUsableTwoSidedQuote(cached.market)) {
-      return cached.market;
-    }
-    if (limited) {
-      if (cached && cached.market) return normalizeMarketPrices(cached.market);
-      return null;
-    }
-
-    const inflight = this._marketByTickerInflight.get(key);
-    if (inflight) return inflight;
-
-    const work = this._withPublicGate(async () => {
-      try {
-        if (Date.now() < this._cooldownUntil) {
-          if (cached && cached.market) return normalizeMarketPrices(cached.market);
-          return null;
-        }
-        const data = await this._request('GET', `/markets/${key}`, {
-          auth: this._preferMarketAuth(),
-          retryOn429: false,
-        });
-        const market = normalizeMarketPrices(data.market);
-        if (marketHasUsableTwoSidedQuote(market)) {
-          this._marketByTickerCache.set(key, { at: Date.now(), market });
-        }
-        return market;
-      } catch (err) {
-        if (err && err.status === 429) this._noteRateLimit();
-        if (cached && cached.market) return normalizeMarketPrices(cached.market);
-        if (err && err.status === 429) return null;
-        throw err;
-      } finally {
-        this._marketByTickerInflight.delete(key);
-      }
-    });
-    this._marketByTickerInflight.set(key, work);
-    return work;
-  }
-
-  async getOrderbook(ticker) {
-    return this._request('GET', `/markets/${ticker}/orderbook`, { auth: this._preferMarketAuth() });
-  }
-
-  // ---------- authenticated trading endpoints ----------
-
-  async getBalance() {
-    return this._request('GET', '/portfolio/balance');
-  }
-
-  async getPositions() {
-    const data = await this._request('GET', '/portfolio/positions');
-    return data.market_positions || [];
-  }
-
-  async getOrder(orderId) {
-    // Get Order remains on /portfolio/orders/{id} (full Order object with fill_count_fp).
-    return this._request('GET', `/portfolio/orders/${orderId}`);
-  }
-
-  /**
-   * side: 'yes' | 'no'
-   * action: 'buy' | 'sell'
-   * priceCents: limit price in cents (1-99) on the traded outcome
-   *
-   * Uses Create Order V2 (POST /portfolio/events/orders). Returns a shape
-   * compatible with legacy callers: `{ order: { order_id, ... } }`.
-   */
-  async createOrder({ ticker, side, action, count, priceCents, clientOrderId, timeInForce }) {
-    const body = buildCreateOrderV2Body({
-      ticker,
-      side,
-      action,
-      count,
-      priceCents,
-      clientOrderId,
-      timeInForce,
-    });
-    const data = await this._request('POST', '/portfolio/events/orders', { body });
-    return normalizeCreateOrderResponse(data);
-  }
-
-  /** Sync read of last series list — no HTTP, safe during 429 cooldown. */
-  peekOpenMarkets(seriesTicker, maxAgeMs = OPEN_MARKETS_CACHE_LIMITED_MS) {
-    if (!this._openMarketsCache) return null;
-    const cached = this._openMarketsCache.get(String(seriesTicker || ''));
-    if (!cached || !Array.isArray(cached.markets)) return null;
-    const age = Date.now() - Number(cached.at || 0);
-    if (!(age >= 0) || age > maxAgeMs) return null;
-    return cached.markets;
-  }
-
-  async cancelOrder(orderId) {
-    return this._request('DELETE', `/portfolio/events/orders/${orderId}`);
-  }
-}
-
-module.exports = {
-  KalshiClient,
-  normalizeMarketPrices,
-  marketHasUsableTwoSidedQuote,
-  priceInCents,
-  marketStrikePrice,
-  parseMarketCloseMs,
-  bookSideFromLegacy,
-  buildCreateOrderV2Body,
-  normalizeCreateOrderResponse,
-  createTokenBucket,
-  DEFAULT_TOKEN_COST,
-};
+  <script src="app.js"></script>
+</body>
+</html>

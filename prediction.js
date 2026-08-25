@@ -1,122 +1,129 @@
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
-
 /**
- * Where bot settings, ledger, calibration, and credentials are stored.
- *
- * Locally, `./data` survives reboots. On Render, the app directory is wiped on
- * every restart/deploy — attach a Persistent Disk (usually mounted at
- * `/var/data`) and set DATA_DIR, or leave DATA_DIR unset and we will use
- * `/var/data` automatically when that mount is writable.
+ * Maintains a live order book (bids/asks) from Coinbase's level2 channel.
+ * Bids and asks are stored as price -> size maps. Snapshot loads the
+ * initial book; update() applies incremental l2update changes.
  */
-const DEFAULT_LOCAL_DIR = path.join(__dirname, 'data');
-const RENDER_DISK_CANDIDATE = '/var/data';
-const ON_RENDER = Boolean(process.env.RENDER || process.env.RENDER_SERVICE_ID);
-
-function canUseDir(dir) {
-  try {
-    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return false;
-    fs.accessSync(dir, fs.constants.W_OK);
-    return true;
-  } catch {
-    return false;
+class OrderBook {
+  constructor(productId) {
+    this.productId = productId;
+    this.bids = new Map(); // price -> size
+    this.asks = new Map();
+    this.ready = false;
   }
-}
 
-function resolveDataDir() {
-  if (process.env.DATA_DIR) return path.resolve(process.env.DATA_DIR);
-  if (canUseDir(RENDER_DISK_CANDIDATE)) return path.resolve(RENDER_DISK_CANDIDATE);
-  return DEFAULT_LOCAL_DIR;
-}
+  loadSnapshot(bidsArr, asksArr) {
+    this.bids.clear();
+    this.asks.clear();
 
-const DATA_DIR = resolveDataDir();
-// True when Render would wipe this path on restart (app dir, no persistent disk).
-const DATA_DIR_EPHEMERAL = ON_RENDER && path.resolve(DATA_DIR) === path.resolve(DEFAULT_LOCAL_DIR);
-const DATA_DIR_FROM_ENV = Boolean(process.env.DATA_DIR);
-
-function ensureDataDir() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.mkdirSync(path.join(DATA_DIR, 'archive'), { recursive: true });
-}
-
-function dataPath(...parts) {
-  return path.join(DATA_DIR, ...parts);
-}
-
-/**
- * How long to keep rotated ledger/tracker/trade-log snapshots under
- * data/archive/. Default 14 days (matches a biweekly top-up cadence).
- * Set ARCHIVE_RETENTION_DAYS=0 to disable pruning.
- */
-const ARCHIVE_RETENTION_DAYS = (() => {
-  const raw = process.env.ARCHIVE_RETENTION_DAYS;
-  if (raw === undefined || raw === '') return 14;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : 14;
-})();
-
-/**
- * Deletes archive/*.json older than ARCHIVE_RETENTION_DAYS.
- * Live files (bot-ledger.json, trade-log.json, config, calibration) are never touched.
- */
-function pruneArchiveFiles({ now = Date.now() } = {}) {
-  if (!ARCHIVE_RETENTION_DAYS || ARCHIVE_RETENTION_DAYS <= 0) {
-    return { deleted: 0, kept: 0, retentionDays: ARCHIVE_RETENTION_DAYS };
-  }
-  const archiveDir = path.join(DATA_DIR, 'archive');
-  const cutoff = now - ARCHIVE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-  let deleted = 0;
-  let kept = 0;
-  try {
-    if (!fs.existsSync(archiveDir)) return { deleted: 0, kept: 0, retentionDays: ARCHIVE_RETENTION_DAYS };
-    for (const name of fs.readdirSync(archiveDir)) {
-      if (!name.endsWith('.json')) continue;
-      const full = path.join(archiveDir, name);
-      let mtime;
-      try {
-        mtime = fs.statSync(full).mtimeMs;
-      } catch {
-        continue;
-      }
-      if (mtime < cutoff) {
-        try {
-          fs.unlinkSync(full);
-          deleted += 1;
-        } catch (err) {
-          console.error(`[paths] failed to prune archive ${name}:`, err.message);
-        }
-      } else {
-        kept += 1;
-      }
+    for (const [price, size] of bidsArr) {
+      const s = parseFloat(size);
+      if (s > 0) this.bids.set(parseFloat(price), s);
     }
-  } catch (err) {
-    console.error('[paths] archive prune failed:', err.message);
-  }
-  if (deleted > 0) {
-    console.log(
-      `[paths] pruned ${deleted} archive file(s) older than ${ARCHIVE_RETENTION_DAYS}d (${kept} kept)`
-    );
-  }
-  return { deleted, kept, retentionDays: ARCHIVE_RETENTION_DAYS };
-}
 
-/** Atomic JSON write so a crash mid-save cannot leave a half-written config. */
-function writeJsonAtomic(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
-  fs.renameSync(tmp, filePath);
+    for (const [price, size] of asksArr) {
+      const s = parseFloat(size);
+      if (s > 0) this.asks.set(parseFloat(price), s);
+    }
+
+    this.ready = true;
+  }
+
+  applyChange(side, priceStr, sizeStr) {
+    const price = parseFloat(priceStr);
+    const size = parseFloat(sizeStr);
+    const book = side === 'buy' ? this.bids : this.asks;
+
+    if (size === 0) {
+      book.delete(price);
+    } else {
+      book.set(price, size);
+    }
+  }
+
+  bestBid() {
+    if (this.bids.size === 0) return null;
+    return Math.max(...this.bids.keys());
+  }
+
+  bestAsk() {
+    if (this.asks.size === 0) return null;
+    return Math.min(...this.asks.keys());
+  }
+
+  midPrice() {
+    const bb = this.bestBid();
+    const ba = this.bestAsk();
+
+    if (bb == null || ba == null) return null;
+
+    return (bb + ba) / 2;
+  }
+
+  spread() {
+    const bb = this.bestBid();
+    const ba = this.bestAsk();
+
+    if (bb == null || ba == null) return null;
+
+    return {
+      absolute: ba - bb,
+      percent: ((ba - bb) / ((ba + bb) / 2)) * 100,
+    };
+  }
+
+  /**
+   * Sums size within `depthPct` percent of the mid price on each side,
+   * then reports imbalance in [-1, 1]
+   * Positive = buy pressure
+   * Negative = sell pressure
+   */
+  imbalance(depthPct = 0.5) {
+    const mid = this.midPrice();
+    if (mid == null) return null;
+
+    const lowerBound = mid * (1 - depthPct / 100);
+    const upperBound = mid * (1 + depthPct / 100);
+
+    let bidVol = 0;
+    for (const [price, size] of this.bids) {
+      if (price >= lowerBound) bidVol += size;
+    }
+
+    let askVol = 0;
+    for (const [price, size] of this.asks) {
+      if (price <= upperBound) askVol += size;
+    }
+
+    const total = bidVol + askVol;
+
+    if (total === 0) {
+      return {
+        ratio: 0,
+        bidVolume: 0,
+        askVolume: 0,
+      };
+    }
+
+    return {
+      ratio: (bidVol - askVol) / total,
+      bidVolume: bidVol,
+      askVolume: askVol,
+    };
+  }
+
+  /**
+   * Total resting liquidity within `depthPct`
+   */
+  liquidity(depthPct = 0.5) {
+    const imb = this.imbalance(depthPct);
+    if (!imb) return null;
+
+    return imb.bidVolume + imb.askVolume;
+  }
 }
 
 module.exports = {
-  DATA_DIR,
-  DATA_DIR_EPHEMERAL,
-  DATA_DIR_FROM_ENV,
-  ARCHIVE_RETENTION_DAYS,
-  ensureDataDir,
-  dataPath,
-  pruneArchiveFiles,
-  writeJsonAtomic,
+  OrderBook,
 };

@@ -1,4 +1,1 @@
-<timestamp>Thursday, Aug 6, 2026, 2:55 PM (UTC-5)</timestamp>
-<user_query>
-another thing. idk if i should do this now but i think we might need separate tabs for the live and for paper mode so i can still trade live and experiement with paper
-</user_query>
+Agreed — I’ll make the bounce gate expire when that session’s window closes so it doesn’t follow into the next one.

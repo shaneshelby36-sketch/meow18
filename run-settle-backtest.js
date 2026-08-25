@@ -1,83 +1,154 @@
-# Crypto Prediction Engine
+'use strict';
 
-Server-side Coinbase prediction feed + optional Kalshi trading bot, with a dashboard UI.
+/**
+ * A/B settle backtest: hold+stop vs entry-tiered TP/stale exits.
+ * Prefers Coinbase 1m candles; falls back to seeded synthetic paths if fetch fails.
+ * Kalshi books are always synthesized from spot (no historical order books).
+ *
+ *   node run-settle-backtest.js [hours]
+ */
 
-## Important: always-on behavior
+const { fetchHistoricalRange } = require('./candles');
+const { backtestWithSettings } = require('./backtest');
 
-The **Node server** (`server.js`) owns:
+const HOURS = Math.max(24, Number(process.argv[2]) || 168); // default 7 days
+const PRODUCTS = {
+  BTC: 'BTC-USD',
+  ETH: 'ETH-USD',
+  SOL: 'SOL-USD',
+  XRP: 'XRP-USD',
+};
+const START_PRICES = { BTC: 65000, ETH: 3400, SOL: 160, XRP: 0.62 };
 
-- Coinbase websocket + candle seeding
-- Prediction recompute loop
-- Kalshi bot cycles (when `KALSHI_ENABLED=true`)
+/** Deterministic minute bars so A/B compare is apples-to-apples offline. */
+function syntheticCandles(symbol, hours, seed = 42) {
+  const n = Math.round(hours * 60);
+  const start = Date.now() - n * 60 * 1000;
+  let price = START_PRICES[symbol] || 100;
+  let s = seed + symbol.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+  const rand = () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 0xffffffff;
+  };
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    // ~crypto-ish minute vol + mild mean reversion bursts
+    const shock = (rand() - 0.5) * 0.0028 + (rand() < 0.03 ? (rand() - 0.5) * 0.01 : 0);
+    const open = price;
+    const close = Math.max(0.0001, open * (1 + shock));
+    const high = Math.max(open, close) * (1 + rand() * 0.0006);
+    const low = Math.min(open, close) * (1 - rand() * 0.0006);
+    out.push({
+      time: start + i * 60 * 1000,
+      open,
+      high,
+      low,
+      close,
+      volume: 10 + rand() * 100,
+    });
+    price = close;
+  }
+  return out;
+}
 
-Closing the browser does **not** stop trading or predictions. Keep `node server.js` running (Render Web Service, VPS systemd, etc.).
+const BASE = {
+  strategyMode: 'settle',
+  minConfidence: 55,
+  settleEntryMinCents: 80,
+  settleEntryMaxCents: 95,
+  settleStopLossCents: 8,
+  settleMinMinutesToOpen: 0.5,
+  settleMaxMinutesToOpen: 12,
+  stakeDollars: 5,
+  maxOpenPositions: 1,
+  paperStartingBalanceDollars: 150,
+  skimMode: 'off',
+  stopRecoveryCents: 0,
+  postStopSameSideCooldownMinutes: 0,
+};
 
-```bash
-npm install
-cp .env.example .env   # edit as needed
-npm start
-```
+function fmt(cents) {
+  const n = (Number(cents) || 0) / 100;
+  return `${n >= 0 ? '+' : ''}$${n.toFixed(2)}`;
+}
 
-## Render Web Service (recommended for always-on)
+function summarize(label, r) {
+  return {
+    label,
+    trades: r.trades,
+    winRatePct: r.winRatePct,
+    netPnl: fmt(r.netPnlCents),
+    netPnlCents: r.netPnlCents,
+    stopLossExits: r.stopLossExits,
+    takeProfitExits: r.takeProfitExits,
+    settleStaleExits: r.settleStaleExits,
+    settledExits: r.settledExits,
+    tradesBySymbol: r.tradesBySymbol,
+  };
+}
 
-Yes — use a **Web Service**, not a static site. The bot only runs while `node server.js` is alive.
+async function loadCandles() {
+  const candlesBySymbol = {};
+  let source = 'coinbase';
+  console.log(`Loading ~${HOURS}h 1m candles for ${Object.keys(PRODUCTS).join(', ')}…`);
+  try {
+    for (const [sym, product] of Object.entries(PRODUCTS)) {
+      process.stdout.write(`  ${sym}… `);
+      candlesBySymbol[sym] = await fetchHistoricalRange(product, HOURS);
+      console.log(`${candlesBySymbol[sym].length} bars`);
+    }
+  } catch (err) {
+    source = 'synthetic';
+    console.warn(`\nCoinbase fetch failed (${err.message}) — using seeded synthetic paths.`);
+    for (const sym of Object.keys(PRODUCTS)) {
+      candlesBySymbol[sym] = syntheticCandles(sym, HOURS);
+      console.log(`  ${sym}: ${candlesBySymbol[sym].length} synthetic bars`);
+    }
+  }
+  return { candlesBySymbol, source };
+}
 
-### Why settings reset after restart
+async function main() {
+  const { candlesBySymbol, source } = await loadCandles();
 
-Dashboard settings / paper ledger / credentials are saved as files under `DATA_DIR`.
+  const opts = { stepMinutes: 1, mode: 'AUTO', continuousSearch: true };
 
-Render’s default disk is **ephemeral**: every deploy or restart wipes local files, so the bot boots with defaults again. That is expected without a Persistent Disk.
+  console.log('\nRunning settle HOLD (stop + settle only)…');
+  const hold = backtestWithSettings(
+    candlesBySymbol,
+    { ...BASE, settleTieredExits: false },
+    opts
+  );
 
-### Fix: attach a Persistent Disk
+  console.log('Running settle TIERED (TP + stale by entry)…');
+  const tiered = backtestWithSettings(
+    candlesBySymbol,
+    { ...BASE, settleTieredExits: true },
+    opts
+  );
 
-1. In the Render service → **Disks** → add a disk (e.g. 1 GB).
-2. Mount path: `/var/data`
-3. Environment → add:
-   - `DATA_DIR=/var/data` (optional if the disk is mounted at `/var/data` — the app auto-detects that path)
-   - `KALSHI_ENABLED=true` (if you want the bot on)
-   - plus any Kalshi live-trading vars you need
-4. Redeploy.
+  const a = summarize('hold+stop', hold);
+  const b = summarize('tiered exits', tiered);
+  const delta = (tiered.netPnlCents || 0) - (hold.netPnlCents || 0);
 
-Settings auto-save from the dashboard (and again on every server boot) into `bot-config.json` under that data dir, so reboots keep your current edge/confidence/stake/etc.
+  console.log('\n══ Settle backtest (Kalshi marks synthesized from spot) ══');
+  console.log(
+    JSON.stringify(
+      { hours: HOURS, candleSource: source, hold: a, tiered: b, tieredMinusHold: fmt(delta) },
+      null,
+      2
+    )
+  );
+  console.log('\nNote:', tiered.note);
+  console.log('\nRecent tiered exits:');
+  for (const t of (tiered.recentTrades || []).slice(0, 12)) {
+    console.log(
+      `  ${t.symbol} ${String(t.side).toUpperCase()} conf ${t.confidence} → ${t.exitReason} ${t.pnlDollars >= 0 ? '+' : ''}$${Number(t.pnlDollars).toFixed(2)}`
+    );
+  }
+}
 
-Check `/api/health` — you want `"dataDirEphemeral": false` and `"configFileExists": true`.
-
-Disk use: live `trade-log.json` is capped at 5000 events; the 12h ledger/tracker rotations write into `data/archive/`. Those archive files are **auto-deleted after 14 days** by default (`ARCHIVE_RETENTION_DAYS`). Set that env to `0` to keep archives forever, or another number of days if you want a different retention window. Live config, open trades, reserve, and calibration are never pruned.
-
-### Optional: bake defaults into env
-
-You can also set starting defaults via env (the dashboard can still override them once `DATA_DIR` persists):
-
-- `KALSHI_SYMBOL`, `KALSHI_EDGE_THRESHOLD_PCT`, `KALSHI_MIN_CONFIDENCE`, etc. (see `bot.js` / server boot)
-- Insurance mode (default skim): **20% Insurance / 40% Wallet / 40% Available** on wins; arm **$10** / floor **$6** hysteresis (`KALSHI_INSURANCE_CAP_DOLLARS`, `KALSHI_INSURANCE_FLOOR_DOLLARS`)
-- Post-stop bounce default: **+6¢** (`KALSHI_STOP_RECOVERY_CENTS`)
-
-## Dashboard windows
-
-At most **3** browser windows: best crypto, second-best, bot. Use **Open other windows**.
-
-## Backtests
-
-Bot settings: **1 / 2 / 3 day** runs, plus **Auto** and **Hunt best**.
-
-## Before putting real money in
-
-1. Keep `KALSHI_LIVE_TRADING=false` (paper mode). Paper uses live Kalshi quotes but never places orders.
-2. Run the full offline suite (paths, indicators, candles, order book, tracker, predictions, backtest, every bot exit/settle/open path):
-
-```bash
-npm test
-```
-
-3. Optional live public-API smoke (Coinbase candles + Kalshi market read — still no orders):
-
-```bash
-ONLINE=1 npm test
-```
-
-4. In the dashboard, run **1 / 2 / 3 day** backtests (and **Hunt best**) with the settings you plan to use.
-5. Let paper mode run through several full 15-minute windows and confirm:
-   - open trades close (settled / stop / TP) instead of carrying forever
-   - countdown moves to the next window (not stuck)
-   - P&L / win rate look sane
-6. Only then set live env vars + confirm string, restart, and start with a tiny stake.
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
