@@ -6798,6 +6798,8 @@ class TradingBot {
         stopVerdict: trade.stopVerdict || undefined,
         stopPostMinBidCents: trade.stopPostMinBidCents,
         stopPostMaxBidCents: trade.stopPostMaxBidCents,
+        modelEntryHeldProb: trade.modelEntryHeldProb,
+        modelExitHeldProb: trade.modelExitHeldProb,
       });
     this._persist();
       return true;
