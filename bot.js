@@ -7097,6 +7097,10 @@ class TradingBot {
         if (!Number.isFinite(at) || now - at > 20 * 60_000) continue;
         const market = normalizeMarketPrices(row.market);
         if (!market || !market.ticker) continue;
+        // Don't seed memory with a market whose window has already closed —
+        // that's what causes post-restart 404s on the first compute tick.
+        const closeMs = parseMarketCloseMs(market);
+        if (Number.isFinite(closeMs) && closeMs <= now + 5000) continue;
         this._lastLiveMarket[series] = market;
         this._lastLiveMarketAt[series] = at;
         if (marketHasUsableTwoSidedQuote(market) && this.client) {
@@ -9115,6 +9119,19 @@ class TradingBot {
       } catch (err) {
           lastErr = err;
           console.error(`[bot] Live entry try ${attempt + 1}/${maxEntryAttempts} failed:`, err.message);
+          // 404 = ticker no longer exists on Kalshi — nuke caches immediately so
+          // the next attempt (and next tick) re-resolves the current market.
+          if (err && err.status === 404) {
+            const st = SERIES_BY_SYMBOL[symbol];
+            if (st) {
+              if (this._lastLiveMarket) delete this._lastLiveMarket[st];
+              if (this._lastLiveMarketAt) delete this._lastLiveMarketAt[st];
+              if (this.client && typeof this.client.invalidateOpenMarkets === 'function') {
+                this.client.invalidateOpenMarkets(st);
+              }
+            }
+            break; // no point retrying with the same dead ticker
+          }
         }
       }
 
