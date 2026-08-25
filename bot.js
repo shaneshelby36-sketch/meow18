@@ -9093,8 +9093,11 @@ class TradingBot {
         trade.stakeDollars = +(attemptCost / 100).toFixed(2);
 
       try {
+        // /portfolio/events/orders takes the event ticker (no strike suffix), not the market ticker.
+        const eventTicker = activeTicker.replace(/-\d+$/, '');
+        console.log(`[market] ordering event_ticker=${eventTicker} market_ticker=${activeTicker}`);
         const order = await this.client.createOrder({
-          ticker: activeTicker,
+          ticker: eventTicker,
           side,
           action: 'buy',
           count: trade.contracts,
