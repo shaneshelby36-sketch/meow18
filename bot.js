@@ -8944,14 +8944,24 @@ class TradingBot {
           verifiedMarket = null;
         }
         const verifiedTicker = verifiedMarket && verifiedMarket.ticker;
+        const verifiedOpenTime = verifiedMarket && verifiedMarket.open_time
+          ? new Date(verifiedMarket.open_time).getTime() : null;
         console.log(`[market] crypto=${symbol}`);
         console.log(`[market] requested ticker=${activeTicker}`);
         console.log(`[market] Kalshi active ticker=${verifiedTicker || 'NONE'}`);
         console.log(`[market] market status=${verifiedMarket ? (verifiedMarket.status || 'active') : 'NOT FOUND'}`);
+        console.log(`[market] open_time=${verifiedMarket && verifiedMarket.open_time || 'n/a'} now=${new Date().toISOString()}`);
         if (!verifiedMarket || !verifiedTicker) {
           console.log(`[market] NO ACTIVE MARKET FOUND — skipping entry`);
           this.lastError = `Skipped ${symbol} ${String(side).toUpperCase()} entry: no active Kalshi market found at order time.`;
           return false;
+        }
+        // Don't order if market hasn't opened yet — Kalshi shows it as active
+        // but rejects orders with 404 for a few seconds around session start.
+        if (Number.isFinite(verifiedOpenTime) && Date.now() < verifiedOpenTime + 5_000) {
+          const waitMs = verifiedOpenTime + 5_000 - Date.now();
+          console.log(`[market] market not yet accepting orders — waiting ${waitMs}ms`);
+          await this._sleep(Math.min(waitMs, 8_000));
         }
         if (verifiedTicker !== activeTicker) {
           console.log(`[market] ticker mismatch — updating ${activeTicker} → ${verifiedTicker}`);
@@ -9129,19 +9139,31 @@ class TradingBot {
       } catch (err) {
           lastErr = err;
           console.error(`[bot] Live entry try ${attempt + 1}/${maxEntryAttempts} failed:`, err.message);
-          // 404 = ticker no longer exists on Kalshi — nuke caches immediately so
-          // the next attempt (and next tick) re-resolves the current market.
           if (err && err.status === 404) {
-            this._markTickerDead(activeTicker);
+            // Re-verify with Kalshi before giving up — the market may have just
+            // rolled over or there may be a brief post-open settling period.
             const st = SERIES_BY_SYMBOL[symbol];
+            let reVerified = null;
             if (st) {
               if (this._lastLiveMarket) delete this._lastLiveMarket[st];
               if (this._lastLiveMarketAt) delete this._lastLiveMarketAt[st];
-              if (this.client && typeof this.client.invalidateOpenMarkets === 'function') {
-                this.client.invalidateOpenMarkets(st);
-              }
+              this.client.invalidateOpenMarkets(st);
+              try { reVerified = await this._fetchLiveMarket(st, 10_000); } catch (_) {}
             }
-            break; // no point retrying with the same dead ticker
+            if (!reVerified || reVerified.ticker === activeTicker) {
+              // Either no market at all, or Kalshi still returns the same 404 ticker —
+              // mark it dead and stop trying.
+              if (reVerified) this._markTickerDead(activeTicker);
+              console.log(`[market] 404 on ${activeTicker} — no valid replacement found, skipping`);
+              break;
+            }
+            // Kalshi returned a different ticker — swap and retry.
+            console.log(`[market] 404 on ${activeTicker} — retrying with new ticker ${reVerified.ticker}`);
+            activeTicker = reVerified.ticker;
+            trade.ticker = activeTicker;
+            const newClose = parseMarketCloseMs(reVerified);
+            if (Number.isFinite(newClose) && newClose > Date.now() + 10_000) closeAt = newClose;
+            continue;
           }
         }
       }
