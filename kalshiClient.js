@@ -593,7 +593,7 @@ class KalshiClient {
     const usable = (list) =>
       (Array.isArray(list) ? list : []).filter((m) => {
         const s = String(m.status || '').toLowerCase();
-        return !s || s === 'open' || s === 'active' || s === 'initialized' || s === 'unopened';
+        return !s || s === 'open' || s === 'active';
       });
 
     // One list GET per refresh — the old open-then-min_close_ts double-fetch was 429 fuel.
