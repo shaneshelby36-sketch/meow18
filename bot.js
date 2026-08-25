@@ -7156,123 +7156,97 @@ class TradingBot {
     }
   }
 
-  /** Memory → Kalshi list cache → disk. No HTTP when rate-limited. */
-  async _resolveMarketFromKalshiCache(seriesTicker, minMsLeft, { limited = false } = {}) {
-    const quoted = (m) => marketHasUsableTwoSidedQuote(normalizeMarketPrices(m));
-    const pickFloor = limited ? 0 : minMsLeft;
-
-    const mem = this._lastLiveMarket && this._lastLiveMarket[seriesTicker];
-    if (mem && quoted(mem)) {
-      return normalizeMarketPrices(mem);
-    }
-
-    let markets = null;
-    if (this.client && typeof this.client.peekOpenMarkets === 'function') {
-      markets = this.client.peekOpenMarkets(seriesTicker);
-    }
-    if (!markets && this.client && typeof this.client.getOpenMarkets === 'function') {
-      markets = await this.client.getOpenMarkets(seriesTicker, 20);
-    }
-    if (Array.isArray(markets) && markets.length) {
-      const tradeable = markets.filter((m) => {
-        const s = String(m && m.status || '').toLowerCase();
-        return !s || s === 'open' || s === 'active';
-      });
-      const notDead = (m) => m && !this._isTickerDead(m.ticker);
-      const picked =
-        (pickLiveOpenMarket(tradeable, Date.now(), pickFloor) ||
-         pickLiveOpenMarket(tradeable, Date.now(), 0));
-      if (picked && notDead(picked) && quoted(picked)) {
-        this._storeLiveMarketSeries(seriesTicker, picked);
-        return normalizeMarketPrices(picked);
-      }
-    }
-
-    if (mem && mem.ticker && !this._isTickerDead(mem.ticker) && this.client && typeof this.client.getCachedMarket === 'function') {
-      const hit = this.client.getCachedMarket(mem.ticker, 120_000);
-      if (hit && quoted(hit)) {
-        const merged = normalizeMarketPrices({ ...mem, ...hit });
-        this._storeLiveMarketSeries(seriesTicker, merged);
-        return merged;
-      }
-    }
-
-    if (mem && !this._isTickerDead(mem.ticker)) return normalizeMarketPrices(mem);
-    return null;
-  }
-
   /**
-   * Current tradeable Kalshi 15m market for a series (soonest still-live close).
-   * Throttled hard — re-listing KXBTC15M every 5s tick was tripping Kalshi 429s.
+   * Current tradeable Kalshi 15m market for a series.
+   *
+   * Strategy: fetch the open-markets list, sort by soonest close, then probe
+   * each candidate with getMarket() to confirm it's actually orderable before
+   * returning it. A market that 404s or has no two-sided quote is skipped and
+   * marked dead so it won't be tried again this session.
+   *
+   * Falls back to the in-memory cache only when rate-limited.
    */
   async _fetchLiveMarket(seriesTicker, minMsLeft = 1500) {
     if (!seriesTicker || !this.client) return null;
     if (this._inShadow) {
-      const cached = this._lastLiveMarket && this._lastLiveMarket[seriesTicker];
-      return cached || null;
+      return (this._lastLiveMarket && this._lastLiveMarket[seriesTicker]) || null;
     }
     if (!this._lastLiveMarket) this._lastLiveMarket = Object.create(null);
     if (!this._lastLiveMarketAt) this._lastLiveMarketAt = Object.create(null);
 
-    const limited =
+    const quoted = (m) => marketHasUsableTwoSidedQuote(normalizeMarketPrices(m));
+    const isLimited = () =>
       typeof this.client.isPublicRateLimited === 'function' && this.client.isPublicRateLimited();
 
-    if (limited) {
-      return this._resolveMarketFromKalshiCache(seriesTicker, minMsLeft, { limited: true });
+    // Rate-limited: return in-memory cache if still valid, else null.
+    if (isLimited()) {
+      const mem = this._lastLiveMarket[seriesTicker];
+      if (!mem) return null;
+      const closeMs = parseMarketCloseMs(mem);
+      if (Number.isFinite(closeMs) && closeMs > Date.now() + minMsLeft && !this._isTickerDead(mem.ticker)) {
+        return normalizeMarketPrices(mem);
+      }
+      return null;
     }
 
-    const refreshMs = KALSHI_SERIES_REFRESH_MS;
-    const staleCapMs = KALSHI_SERIES_STALE_CAP_MS;
+    // In-memory cache hit: still within refresh window and window is live.
     const cached = this._lastLiveMarket[seriesTicker];
     const cacheAge = Date.now() - (Number(this._lastLiveMarketAt[seriesTicker]) || 0);
-    const cachedClose = cached ? parseMarketCloseMs(cached) : NaN;
-    const quoted = (m) => marketHasUsableTwoSidedQuote(normalizeMarketPrices(m));
-    const windowLive =
-      cached &&
-      Number.isFinite(cachedClose) &&
-      cachedClose > Date.now() + Math.max(500, minMsLeft);
-
-    if (cached && !this._isTickerDead(cached.ticker) && quoted(cached) && cacheAge < staleCapMs && windowLive && cacheAge < refreshMs) {
-      return normalizeMarketPrices(cached);
+    if (cached && !this._isTickerDead(cached.ticker) && quoted(cached) && cacheAge < KALSHI_SERIES_REFRESH_MS) {
+      const closeMs = parseMarketCloseMs(cached);
+      if (Number.isFinite(closeMs) && closeMs > Date.now() + minMsLeft) {
+        return normalizeMarketPrices(cached);
+      }
     }
 
-    let found = null;
-    if (typeof this.client.getLiveOpenMarket === 'function') {
+    // Fetch a fresh list from Kalshi (invalidate first so we always get current data).
+    this.client.invalidateOpenMarkets(seriesTicker);
+    let list = [];
+    try {
+      list = await this.client.getOpenMarkets(seriesTicker, 20) || [];
+    } catch (_) {
+      list = [];
+    }
+
+    // Filter to only genuinely open/active markets with enough time left,
+    // sorted soonest-close first so we pick the most current window.
+    const now = Date.now();
+    const candidates = list
+      .filter((m) => {
+        if (!m || !m.ticker) return false;
+        if (this._isTickerDead(m.ticker)) return false;
+        const s = String(m.status || '').toLowerCase();
+        if (s && s !== 'open' && s !== 'active') return false;
+        const closeMs = parseMarketCloseMs(m);
+        return Number.isFinite(closeMs) && closeMs > now + minMsLeft;
+      })
+      .sort((a, b) => parseMarketCloseMs(a) - parseMarketCloseMs(b));
+
+    // Probe each candidate with a direct getMarket call to confirm it's live.
+    // Bypass _getMarketBounded — it caches results and swallows errors.
+    for (const candidate of candidates) {
       try {
-        found = await this.client.getLiveOpenMarket(seriesTicker, { minMsLeft, limit: 20 });
-      } catch (_) {
-        found = null;
-      }
-    }
-    // Reject a market whose ticker was 404'd — Kalshi's list may still include it.
-    if (found && this._isTickerDead(found.ticker)) found = null;
-    if (found) {
-      if (
-        found.ticker &&
-        typeof this.client.getMarket === 'function' &&
-        !quoted(found) &&
-        !(
-          typeof this.client.isPublicRateLimited === 'function' && this.client.isPublicRateLimited()
-        )
-      ) {
-        try {
-          const q = await this._getMarketBounded(found.ticker, 3500);
-          if (quoted(q)) found = { ...found, ...q };
-        } catch (_) {
-          /* keep list row */
+        // Bust the ticker cache so we always get a fresh response.
+        if (this.client._marketByTickerCache) {
+          this.client._marketByTickerCache.delete(String(candidate.ticker));
         }
+        const probed = await this.client.getMarket(candidate.ticker);
+        if (!probed || !probed.ticker) {
+          this._markTickerDead(candidate.ticker);
+          continue;
+        }
+        const closeMs = parseMarketCloseMs(probed);
+        if (!Number.isFinite(closeMs) || closeMs <= Date.now() + minMsLeft) continue;
+        if (!quoted(probed)) continue;
+        // Confirmed live — cache and return.
+        this._storeLiveMarketSeries(seriesTicker, normalizeMarketPrices(probed));
+        return normalizeMarketPrices(probed);
+      } catch (err) {
+        this._markTickerDead(candidate.ticker);
+        // Not live — try next candidate.
       }
-      if (quoted(found)) {
-        this._storeLiveMarketSeries(seriesTicker, found);
-      }
-      return normalizeMarketPrices(found);
     }
 
-    const fallback = await this._resolveMarketFromKalshiCache(seriesTicker, minMsLeft, { limited: false });
-    if (fallback && !this._isTickerDead(fallback.ticker) && quoted(fallback)) return fallback;
-    // Don't fall back to the old session's market when its window has already
-    // closed — that causes the bot to evaluate/bid into a closed market.
-    if (cached && !this._isTickerDead(cached.ticker) && quoted(cached) && windowLive) return normalizeMarketPrices(cached);
     return null;
   }
 
