@@ -11323,9 +11323,18 @@ class TradingBot {
     });
     const hourlyPnl = buildHourlyPnlBuckets(permanentLog, { hours: 6, now });
     const settleWindowRec = this.getSettleWindowRecommendation({ now });
+    const dailyLossHalted = !!(
+      this._dailyLossHaltedAt &&
+      this._dailyLossHaltedAt >= (() => {
+        const d = new Date();
+        return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+      })()
+    );
     return {
       mode: this.config.mode,
       isRunning: this.isRunning,
+      dailyLossHalted,
+      dailyLossCents: dailyLossHalted ? (this._dailyLossCents || 0) : null,
       runningSince: this.runningSince,
       config: this.config,
       lastError: this.lastError,
