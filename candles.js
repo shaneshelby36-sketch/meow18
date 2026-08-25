@@ -1,144 +1,230 @@
 'use strict';
 
-const fetch = globalThis.fetch
-  ? (...args) => globalThis.fetch(...args)
-  : require('node-fetch');
+const fs = require('fs');
+const path = require('path');
+const { DATA_DIR, writeJsonAtomic } = require('./paths');
 
-const CANDLE_SECONDS = 60; // 1-minute candles
-const MAX_CANDLES = 300; // enough history for EMA200 + lookback
+const COORD_FILENAME = 'bot-coordination.json';
+/** Primary must refresh within this window or backup treats it as offline. */
+const COORD_STALE_MS_DEFAULT = 90_000;
+/** Backup only rescues after primary has been retrying an exit this long. */
+const BACKUP_RESCUE_MIN_STUCK_MS_DEFAULT = 12_000;
 
-/**
- * Maintains a rolling series of 1-minute OHLCV candles for one product,
- * seeded from Coinbase's public REST candle endpoint and then kept live
- * by folding in individual trade prints from the WebSocket feed.
- */
-class CandleSeries {
-  constructor(productId) {
-    this.productId = productId;
-    this.candles = []; // oldest -> newest, each {time, open, high, low, close, volume}
-  }
+function botRole() {
+  const r = String(process.env.BOT_ROLE || 'primary').toLowerCase();
+  return r === 'backup' ? 'backup' : 'primary';
+}
 
-  async seed() {
-    const end = new Date();
-    const start = new Date(end.getTime() - MAX_CANDLES * CANDLE_SECONDS * 1000);
-    const url = `https://api.exchange.coinbase.com/products/${this.productId}/candles?granularity=${CANDLE_SECONDS}&start=${start.toISOString()}&end=${end.toISOString()}`;
-    try {
-      const res = await fetch(url, { headers: { 'User-Agent': 'crypto-prediction-engine' } });
-      if (!res.ok) throw new Error(`Coinbase candles HTTP ${res.status}`);
-      const raw = await res.json();
-      // raw rows: [time, low, high, open, close, volume], newest first
-      const rows = raw
-        .slice()
-        .sort((a, b) => a[0] - b[0])
-        .map((r) => ({
-          time: r[0] * 1000,
-          low: r[1],
-          high: r[2],
-          open: r[3],
-          close: r[4],
-          volume: r[5],
-        }));
-      this.candles = rows.slice(-MAX_CANDLES);
-      return true;
-    } catch (err) {
-      console.error(`[candles:${this.productId}] seed failed:`, err.message);
-      return false;
-    }
-  }
+function isPrimaryBotRole() {
+  return botRole() === 'primary';
+}
 
-  // Fold a live trade (price, size, timestamp ms) into the current or a new candle
-  addTrade(price, size, timeMs) {
-    const bucketStart = Math.floor(timeMs / (CANDLE_SECONDS * 1000)) * (CANDLE_SECONDS * 1000);
-    const last = this.candles[this.candles.length - 1];
+function isBackupBotRole() {
+  return botRole() === 'backup';
+}
 
-    if (last && last.time === bucketStart) {
-      last.high = Math.max(last.high, price);
-      last.low = Math.min(last.low, price);
-      last.close = price;
-      last.volume += size;
-    } else if (!last || bucketStart > last.time) {
-      // Starting a fresh candle. Carry the previous close forward as the open
-      // if we skipped time (e.g. after a quiet period).
-      const open = last ? last.close : price;
-      this.candles.push({
-        time: bucketStart,
-        open,
-        high: Math.max(open, price),
-        low: Math.min(open, price),
-        close: price,
-        volume: size,
-      });
-      if (this.candles.length > MAX_CANDLES) this.candles.shift();
-    }
-    // Late/out-of-order trades for a bucket in the past are ignored — negligible
-    // impact on indicators and keeps this path allocation-free and simple.
-  }
+function botInstanceId() {
+  const id = process.env.BOT_INSTANCE_ID;
+  if (id && String(id).trim()) return String(id).trim();
+  return `bot-${process.pid}`;
+}
 
-  closes() {
-    return this.candles.map((c) => c.close);
-  }
+function coordinationDir() {
+  if (process.env.BOT_COORD_DIR) return path.resolve(process.env.BOT_COORD_DIR);
+  return DATA_DIR;
+}
 
-  volumes() {
-    return this.candles.map((c) => c.volume);
-  }
+function coordinationPath() {
+  return path.join(coordinationDir(), COORD_FILENAME);
+}
 
-  latestClose() {
-    const last = this.candles[this.candles.length - 1];
-    return last ? last.close : null;
-  }
+function coordStaleMs(config = {}) {
+  const n = Number(config.botCoordStaleMs);
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  const env = Number(process.env.BOT_COORD_STALE_MS);
+  if (Number.isFinite(env) && env > 0) return Math.round(env);
+  return COORD_STALE_MS_DEFAULT;
+}
 
-  ready(minLength = 210) {
-    return this.candles.length >= minLength;
+function backupRescueMinStuckMs(config = {}) {
+  const n = Number(config.botBackupRescueMinStuckMs);
+  if (Number.isFinite(n) && n >= 0) return Math.round(n);
+  const env = Number(process.env.BOT_BACKUP_RESCUE_MIN_STUCK_MS);
+  if (Number.isFinite(env) && env >= 0) return Math.round(env);
+  return BACKUP_RESCUE_MIN_STUCK_MS_DEFAULT;
+}
+
+function loadCoordination() {
+  try {
+    const p = coordinationPath();
+    if (!fs.existsSync(p)) return null;
+    const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return raw && typeof raw === 'object' ? raw : null;
+  } catch {
+    return null;
   }
 }
 
-module.exports = { CandleSeries, CANDLE_SECONDS };
-
-/**
- * Fetches up to `hours` of 1-minute candles for a product, paginating
- * through Coinbase's 300-candles-per-request limit. Used only for
- * backtesting — independent of the live CandleSeries so it never touches
- * live prediction state.
- */
-async function fetchHistoricalRange(productId, hours) {
-  const totalMinutes = Math.round(hours * 60);
-  const chunks = [];
-  let end = new Date();
-  let remaining = totalMinutes;
-
-  while (remaining > 0) {
-    const chunkMinutes = Math.min(remaining, MAX_CANDLES);
-    const start = new Date(end.getTime() - chunkMinutes * CANDLE_SECONDS * 1000);
-    const url = `https://api.exchange.coinbase.com/products/${productId}/candles?granularity=${CANDLE_SECONDS}&start=${start.toISOString()}&end=${end.toISOString()}`;
-    // eslint-disable-next-line no-await-in-loop
-    const res = await fetch(url, { headers: { 'User-Agent': 'crypto-prediction-engine-backtest' } });
-    if (!res.ok) {
-      if (res.status === 429) {
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise((r) => setTimeout(r, 500));
-        continue;
-      }
-      throw new Error(`Coinbase historical candles HTTP ${res.status}`);
-    }
-    // eslint-disable-next-line no-await-in-loop
-    const raw = await res.json();
-    const rows = raw.map((r) => ({
-      time: r[0] * 1000,
-      low: r[1],
-      high: r[2],
-      open: r[3],
-      close: r[4],
-      volume: r[5],
-    }));
-    chunks.push(...rows);
-    end = start;
-    remaining -= chunkMinutes;
-    // Be polite to Coinbase's public (unauthenticated, rate-limited) endpoint.
-    // eslint-disable-next-line no-await-in-loop
-    await new Promise((r) => setTimeout(r, 350));
-  }
-
-  return chunks.sort((a, b) => a.time - b.time);
+function isCoordinationFresh(coord, now = Date.now(), config = {}) {
+  if (!coord || !Number.isFinite(Number(coord.updatedAt))) return false;
+  return now - Number(coord.updatedAt) <= coordStaleMs(config);
 }
 
-module.exports.fetchHistoricalRange = fetchHistoricalRange;
+function serializeOpenTrade(trade) {
+  if (!trade || String(trade.status) !== 'open') return null;
+  const ticker = String(trade.ticker || '');
+  if (!ticker) return null;
+  return {
+    id: trade.id,
+    ticker,
+    symbol: String(trade.symbol || '').toUpperCase(),
+    side: String(trade.side || '').toLowerCase(),
+    windowCloseTime: trade.windowCloseTime,
+    pendingForceExit: trade.pendingForceExit ? String(trade.pendingForceExit) : null,
+    pendingForceExitSince: Number(trade.pendingForceExitSince) || null,
+    entryPriceCents: Number(trade.entryPriceCents),
+    contracts: Number(trade.contracts),
+    strategy: trade.strategy || 'model',
+    mode: trade.mode || 'live',
+    status: 'open',
+  };
+}
+
+/** Primary publishes open inventory so backup can enforce one-bot-per-window. */
+function publishPrimaryCoordination({ openTrades, instanceId, now = Date.now() } = {}) {
+  if (!isPrimaryBotRole()) return null;
+  const payload = {
+    role: 'primary',
+    instanceId: instanceId || botInstanceId(),
+    updatedAt: now,
+    openTrades: (openTrades || [])
+      .map(serializeOpenTrade)
+      .filter(Boolean),
+  };
+  writeJsonAtomic(coordinationPath(), payload);
+  return payload;
+}
+
+function primaryOpenOnTicker(coord, ticker) {
+  if (!coord || String(coord.role) !== 'primary') return null;
+  const t = String(ticker || '');
+  if (!t) return null;
+  return (coord.openTrades || []).find(
+    (row) => row && row.status === 'open' && String(row.ticker) === t
+  ) || null;
+}
+
+function primaryOpenOnWindow(coord, { ticker, symbol, windowCloseTime } = {}) {
+  const byTicker = primaryOpenOnTicker(coord, ticker);
+  if (byTicker) return byTicker;
+  const sym = String(symbol || '').toUpperCase();
+  const close = Number(windowCloseTime);
+  if (!sym || !Number.isFinite(close)) return null;
+  return (
+    (coord.openTrades || []).find((row) => {
+      if (!row || row.status !== 'open') return false;
+      if (String(row.symbol || '').toUpperCase() !== sym) return false;
+      return Number(row.windowCloseTime) === close;
+    }) || null
+  );
+}
+
+/**
+ * Backup must not enter when primary already holds this market/window.
+ * Primary always allowed.
+ */
+function checkBackupEntryAllowed({
+  coord,
+  ticker,
+  symbol,
+  windowCloseTime,
+  now = Date.now(),
+  config = {},
+} = {}) {
+  if (!isBackupBotRole()) return { ok: true };
+  if (!coord || !isCoordinationFresh(coord, now, config)) {
+    return {
+      ok: false,
+      reason:
+        'Backup bot: primary coordination missing or stale — entries blocked (rescue-only).',
+    };
+  }
+  const held = primaryOpenOnWindow(coord, { ticker, symbol, windowCloseTime });
+  if (held) {
+    return {
+      ok: false,
+      reason:
+        `Backup bot: primary holds ${held.symbol} ${String(held.side || '').toUpperCase()} ` +
+        `on this window — no second entry.`,
+      primaryTrade: held,
+    };
+  }
+  return { ok: true };
+}
+
+/** Primary trades stuck on a force-retry exit — backup may sell to flatten. */
+function backupRescueCandidates(coord, { now = Date.now(), config = {} } = {}) {
+  if (!coord || String(coord.role) !== 'primary') return [];
+  if (!isCoordinationFresh(coord, now, config)) return [];
+  const minStuck = backupRescueMinStuckMs(config);
+  return (coord.openTrades || []).filter((row) => {
+    if (!row || row.status !== 'open') return false;
+    const reason = row.pendingForceExit;
+    if (!reason) return false;
+    const since = Number(row.pendingForceExitSince);
+    if (!Number.isFinite(since)) return minStuck <= 0;
+    return now - since >= minStuck;
+  });
+}
+
+function coordinationTradeStub(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ticker: row.ticker,
+    symbol: row.symbol,
+    side: row.side,
+    contracts: row.contracts,
+    entryPriceCents: row.entryPriceCents,
+    windowCloseTime: row.windowCloseTime,
+    strategy: row.strategy || 'model',
+    mode: row.mode || 'live',
+    status: 'open',
+    backupRescue: true,
+  };
+}
+
+function noteBackupRescueAttempt({ tradeId, ticker, reason, ok, detail, now = Date.now() } = {}) {
+  const coord = loadCoordination() || { role: 'primary', openTrades: [] };
+  coord.lastBackupRescue = {
+    at: now,
+    instanceId: botInstanceId(),
+    tradeId,
+    ticker,
+    reason,
+    ok: !!ok,
+    detail: detail ? String(detail) : '',
+  };
+  writeJsonAtomic(coordinationPath(), coord);
+}
+
+module.exports = {
+  botRole,
+  isPrimaryBotRole,
+  isBackupBotRole,
+  botInstanceId,
+  coordinationPath,
+  coordStaleMs,
+  backupRescueMinStuckMs,
+  loadCoordination,
+  isCoordinationFresh,
+  publishPrimaryCoordination,
+  primaryOpenOnTicker,
+  primaryOpenOnWindow,
+  checkBackupEntryAllowed,
+  backupRescueCandidates,
+  coordinationTradeStub,
+  noteBackupRescueAttempt,
+  COORD_STALE_MS_DEFAULT,
+  BACKUP_RESCUE_MIN_STUCK_MS_DEFAULT,
+};

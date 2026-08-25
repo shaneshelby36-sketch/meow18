@@ -1,257 +1,818 @@
-'use strict';
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#0a0e14" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>BTC / XRP Prediction Dashboard</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
 
-/**
- * Pure, dependency-free technical indicator functions.
- * All functions take plain arrays of numbers (or candle objects) and
- * return either a single latest value or an array aligned to the input.
- * No indicator here invents data — every output is a deterministic
- * function of the inputs passed in.
- */
+  <div id="rotate-notice">
+    <div class="rotate-icon">⟳</div>
+    <p>Rotate the tablet to landscape</p>
+  </div>
 
-function sma(values, period) {
-  if (values.length < period) return null;
-  const slice = values.slice(values.length - period);
-  return slice.reduce((a, b) => a + b, 0) / period;
-}
+  <div id="app">
 
-// Returns the full EMA series (same length as input, leading nulls until seeded)
-function emaSeries(values, period) {
-  const k = 2 / (period + 1);
-  const out = new Array(values.length).fill(null);
-  if (values.length < period) return out;
-  const seed = sma(values.slice(0, period), period);
-  out[period - 1] = seed;
-  let prev = seed;
-  for (let i = period; i < values.length; i++) {
-    const val = values[i] * k + prev * (1 - k);
-    out[i] = val;
-    prev = val;
-  }
-  return out;
-}
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">◈</span>
+        <span class="brand-name">CryptoPredict</span>
+        <span class="app-version" id="app-version" title="Deploy version">v…</span>
+      </div>
+      <div class="topbar-right">
+        <div class="uptime-pill" id="uptime-pill">
+          <span class="stat-label">Engine uptime</span>
+          <span class="uptime-value" id="uptime-value">—</span>
+        </div>
+        <div class="status-pill" id="status-pill">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="status-text">Connecting…</span>
+        </div>
+        <div class="updated-pill">
+          <span id="updated-text">—</span>
+        </div>
+        <button class="btn-secondary topbar-action" id="open-windows-btn" type="button">Open other windows</button>
+        <button class="icon-btn" id="bot-btn" aria-label="Trading bot">🤖</button>
+        <button class="icon-btn" id="settings-btn" aria-label="Settings">⚙</button>
+      </div>
+    </header>
 
-function ema(values, period) {
-  const series = emaSeries(values, period);
-  return series.length ? series[series.length - 1] : null;
-}
+    <p class="server-note" id="server-note">Engine + bot run on the server. Closing this page does not stop trading.</p>
 
-function rsi(closes, period = 14) {
-  if (closes.length < period + 1) return null;
-  let gains = 0;
-  let losses = 0;
-  // Wilder's smoothing, seeded with a simple average over the first `period` changes
-  const start = closes.length - period - 1;
-  for (let i = start + 1; i <= start + period; i++) {
-    const change = closes[i] - closes[i - 1];
-    if (change >= 0) gains += change;
-    else losses -= change;
-  }
-  let avgGain = gains / period;
-  let avgLoss = losses / period;
+    <div class="asset-picker" id="asset-picker">
+      <!-- one chip per supported symbol, injected by app.js; tap to pin which stay on screen -->
+    </div>
+    <p class="picker-hint" id="asset-picker-hint">Tap a coin to pin it (max 2). Pinned coins stay on screen and do not rotate.</p>
 
-  for (let i = start + period + 1; i < closes.length; i++) {
-    const change = closes[i] - closes[i - 1];
-    const gain = change > 0 ? change : 0;
-    const loss = change < 0 ? -change : 0;
-    avgGain = (avgGain * (period - 1) + gain) / period;
-    avgLoss = (avgLoss * (period - 1) + loss) / period;
-  }
+    <main class="grid" id="main-grid">
+      <!-- selected asset panels are injected here by app.js -->
+      <section class="asset-panel bot-dashboard-card" id="bot-dashboard-card" hidden>
+        <div class="asset-head">
+          <div class="asset-id"><span class="asset-symbol">BOT</span><span class="asset-name">Trading control</span></div>
+          <button class="btn-primary" id="bot-dashboard-open" type="button">Open bot</button>
+        </div>
+        <p class="bot-dashboard-server-note">Runs on the VPS. Closing the dashboard does not pause the bot.</p>
+        <div class="bot-runtime-banner" id="bot-runtime-banner">
+          <span class="stat-label">Bot runtime</span>
+          <span class="bot-runtime-value" id="bot-runtime-value">—</span>
+        </div>
+        <p class="bot-dashboard-state" id="bot-dashboard-state">Checking bot status…</p>
+        <div class="bot-dashboard-stats" id="bot-dashboard-stats"></div>
+        <button class="btn-secondary" id="bot-dashboard-toggle" type="button">Start bot</button>
+      </section>
+    </main>
 
-  if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - 100 / (1 + rs);
-}
+    <footer class="footer-note">
+      <span class="app-version" data-app-version title="Deploy version">v…</span>
+      · Heuristic technical-indicator model — not financial advice. Predictions and the bot keep running on the server even when no page is open.
+    </footer>
+  </div>
 
-function macd(closes, fast = 12, slow = 26, signalPeriod = 9) {
-  if (closes.length < slow + signalPeriod) return null;
-  const fastSeries = emaSeries(closes, fast);
-  const slowSeries = emaSeries(closes, slow);
-  const macdLine = [];
-  for (let i = 0; i < closes.length; i++) {
-    if (fastSeries[i] != null && slowSeries[i] != null) {
-      macdLine.push(fastSeries[i] - slowSeries[i]);
-    }
-  }
-  if (macdLine.length < signalPeriod) return null;
-  const signalSeries = emaSeries(macdLine, signalPeriod);
-  const signal = signalSeries[signalSeries.length - 1];
-  const macdVal = macdLine[macdLine.length - 1];
-  const prevMacd = macdLine[macdLine.length - 2];
-  const prevSignalSeries = signalSeries[signalSeries.length - 2];
-  return {
-    macd: macdVal,
-    signal,
-    histogram: macdVal - signal,
-    prevHistogram:
-      prevMacd != null && prevSignalSeries != null ? prevMacd - prevSignalSeries : null,
-  };
-}
+  <div id="settings-overlay" class="overlay hidden">
+    <div class="settings-card">
+      <h2>Prediction Engine Connection</h2>
+      <p class="settings-hint">Enter the address of the Prediction Engine running on your PC or VPS.</p>
+      <label for="engine-url">Engine API base URL</label>
+      <input id="engine-url" type="text" inputmode="url" placeholder="http://192.168.1.50:4000" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <label for="refresh-interval">Refresh interval (seconds)</label>
+      <input id="refresh-interval" type="number" min="5" max="10" step="1" />
+      <div class="settings-actions">
+        <button class="btn-secondary" id="settings-cancel">Cancel</button>
+        <button class="btn-primary" id="settings-save">Save &amp; Connect</button>
+      </div>
+    </div>
+  </div>
 
-// candles: [{high, low, close}], oldest -> newest
-function atr(candles, period = 14) {
-  if (candles.length < period + 1) return null;
-  const trs = [];
-  for (let i = 1; i < candles.length; i++) {
-    const cur = candles[i];
-    const prevClose = candles[i - 1].close;
-    const tr = Math.max(
-      cur.high - cur.low,
-      Math.abs(cur.high - prevClose),
-      Math.abs(cur.low - prevClose)
-    );
-    trs.push(tr);
-  }
-  return sma(trs, period) ?? trs.slice(-period).reduce((a, b) => a + b, 0) / Math.min(period, trs.length);
-}
+  <template id="asset-panel-template">
+    <section class="asset-panel">
+      <div class="asset-head">
+        <div class="asset-id">
+          <span class="asset-symbol"></span>
+          <span class="asset-name"></span>
+          <span class="asset-corr"></span>
+        </div>
+        <div class="asset-price-block">
+          <span class="asset-price"></span>
+          <span class="asset-price-change"></span>
+        </div>
+      </div>
 
-// Rate of change (%) between the latest close and the close `lookback` periods ago
-function momentum(closes, lookback) {
-  if (closes.length <= lookback) return null;
-  const past = closes[closes.length - 1 - lookback];
-  const now = closes[closes.length - 1];
-  if (!past) return null;
-  return ((now - past) / past) * 100;
-}
+      <div class="overall-row">
+        <span class="stat-label">Overall (all 3 windows blended)</span>
+        <span class="overall-rec"></span>
+        <span class="overall-prob"></span>
+      </div>
 
-// Standard deviation of simple returns, annualization-free (raw volatility measure)
-function volatility(closes, period = 20) {
-  if (closes.length < period + 1) return null;
-  const returns = [];
-  const slice = closes.slice(closes.length - period - 1);
-  for (let i = 1; i < slice.length; i++) {
-    returns.push((slice[i] - slice[i - 1]) / slice[i - 1]);
-  }
-  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-  const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
-  return Math.sqrt(variance) * 100; // percent
-}
+      <div class="asset-target-row">
+        <div class="target-block">
+          <span class="stat-label">Price to beat (over/under)</span>
+          <span class="stat-value target-price">—</span>
+          <span class="target-source"></span>
+          <form class="manual-strike-form" autocomplete="off">
+            <input class="manual-strike-input" type="number" inputmode="decimal" step="any" min="0" placeholder="Enter strike $" />
+            <button type="submit" class="btn-secondary manual-strike-set">Set</button>
+            <button type="button" class="btn-secondary manual-strike-clear">Clear</button>
+          </form>
+        </div>
+        <div class="countdown-block">
+          <span class="stat-label">Window settles in</span>
+          <span class="stat-value big-countdown">—</span>
+        </div>
+      </div>
 
-// Pearson correlation coefficient between two aligned return series
-function correlation(closesA, closesB, period = 30) {
-  const n = Math.min(closesA.length, closesB.length);
-  if (n < period + 1) return null;
-  const a = closesA.slice(closesA.length - period - 1);
-  const b = closesB.slice(closesB.length - period - 1);
-  const ra = [];
-  const rb = [];
-  for (let i = 1; i < a.length; i++) {
-    ra.push((a[i] - a[i - 1]) / a[i - 1]);
-    rb.push((b[i] - b[i - 1]) / b[i - 1]);
-  }
-  const meanA = ra.reduce((x, y) => x + y, 0) / ra.length;
-  const meanB = rb.reduce((x, y) => x + y, 0) / rb.length;
-  let cov = 0;
-  let varA = 0;
-  let varB = 0;
-  for (let i = 0; i < ra.length; i++) {
-    const da = ra[i] - meanA;
-    const db = rb[i] - meanB;
-    cov += da * db;
-    varA += da * da;
-    varB += db * db;
-  }
-  if (varA === 0 || varB === 0) return null;
-  return cov / Math.sqrt(varA * varB);
-}
+      <div class="asset-meta">
+        <div class="meta-chip">
+          <span class="meta-label">RSI</span>
+          <span class="meta-value meta-rsi">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">MACD hist</span>
+          <span class="meta-value meta-macd">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Volatility</span>
+          <span class="meta-value meta-vol">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Order flow</span>
+          <span class="meta-value meta-flow">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Pattern</span>
+          <span class="meta-value meta-pattern">—</span>
+        </div>
+      </div>
 
-// Simple trend strength: normalized slope of EMA50 plus EMA alignment bonus
-function trendStrength(closes) {
-  const ema20 = ema(closes, 20);
-  const ema50 = ema(closes, 50);
-  const ema200 = ema(closes, 200);
-  if (ema20 == null || ema50 == null) return null;
-  const last = closes[closes.length - 1];
+      <div class="window-tabs">
+        <button class="window-tab" data-window-key="w15" type="button">10-15 min</button>
+        <button class="window-tab" data-window-key="w10" type="button">5-10 min</button>
+        <button class="window-tab" data-window-key="w5" type="button">0-5 min</button>
+      </div>
 
-  // Slope of EMA50 over the last 10 periods, normalized by price
-  const ema50Series = emaSeries(closes, 50);
-  let slope = 0;
-  const validSeries = ema50Series.filter((v) => v != null);
-  if (validSeries.length >= 11) {
-    const recent = validSeries.slice(-11);
-    slope = ((recent[recent.length - 1] - recent[0]) / recent[0]) * 100;
-  }
+      <div class="windows-row">
+        <!-- window cards injected here -->
+      </div>
+    </section>
+  </template>
 
-  let alignment = 0; // -2..2
-  if (ema200 != null) {
-    if (ema20 > ema50 && ema50 > ema200) alignment = 2;
-    else if (ema20 > ema50) alignment = 1;
-    else if (ema20 < ema50 && ema50 < ema200) alignment = -2;
-    else if (ema20 < ema50) alignment = -1;
-  } else {
-    alignment = ema20 > ema50 ? 1 : ema20 < ema50 ? -1 : 0;
-  }
+  <template id="window-card-template">
+    <article class="window-card">
+      <div class="window-head">
+        <span class="window-label"></span>
+        <span class="window-rec"></span>
+      </div>
 
-  return {
-    ema20,
-    ema50,
-    ema200,
-    slope,
-    alignment,
-    priceVsEma20: ((last - ema20) / ema20) * 100,
-  };
-}
+      <div class="prob-bar">
+        <div class="prob-up"></div>
+        <div class="prob-down"></div>
+      </div>
+      <div class="prob-numbers">
+        <span class="prob-up-text"></span>
+        <span class="prob-down-text"></span>
+      </div>
 
-// Volume spike: current volume vs. rolling average volume
-function volumeSpike(volumes, period = 20) {
-  if (volumes.length < period + 1) return null;
-  const avg = sma(volumes.slice(0, -1), period);
-  const current = volumes[volumes.length - 1];
-  if (!avg) return null;
-  return { ratio: current / avg, average: avg, current };
-}
+      <div class="signal-score-row">
+        <div class="signal-score-bar">
+          <div class="signal-up-fill"></div>
+          <div class="signal-down-fill"></div>
+        </div>
+        <div class="signal-score-numbers">
+          <span class="signal-up-value">UP —</span>
+          <span class="signal-trend-badge">—</span>
+          <span class="signal-down-value">DOWN —</span>
+        </div>
+      </div>
 
-// Very small candlestick-pattern classifier on the last 1-3 candles.
-// Returns a short label and a directional lean in [-1, 1].
-function candlePattern(candles) {
-  if (candles.length < 3) return { label: 'insufficient data', lean: 0 };
-  const [c3, c2, c1] = candles.slice(-3); // c3 oldest of the three, c1 latest
-  const body = (c) => Math.abs(c.close - c.open);
-  const range = (c) => Math.max(c.high - c.low, 1e-9);
-  const isBull = (c) => c.close > c.open;
-  const isBear = (c) => c.close < c.open;
+      <div class="window-stats">
+        <div class="stat">
+          <span class="stat-label">Confidence</span>
+          <span class="stat-value confidence-value">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Risk adj.</span>
+          <span class="stat-value risk-value">—</span>
+        </div>
+      </div>
 
-  // Bullish engulfing
-  if (isBear(c2) && isBull(c1) && c1.close >= c2.open && c1.open <= c2.close) {
-    return { label: 'bullish engulfing', lean: 0.8 };
-  }
-  // Bearish engulfing
-  if (isBull(c2) && isBear(c1) && c1.open >= c2.close && c1.close <= c2.open) {
-    return { label: 'bearish engulfing', lean: -0.8 };
-  }
-  // Doji (indecision)
-  if (body(c1) / range(c1) < 0.1) {
-    return { label: 'doji (indecision)', lean: 0 };
-  }
-  // Three rising / falling candles
-  if (isBull(c3) && isBull(c2) && isBull(c1)) {
-    return { label: 'three rising candles', lean: 0.5 };
-  }
-  if (isBear(c3) && isBear(c2) && isBear(c1)) {
-    return { label: 'three falling candles', lean: -0.5 };
-  }
-  // Hammer-ish / shooting-star-ish based on wick ratio
-  const lowerWick = Math.min(c1.open, c1.close) - c1.low;
-  const upperWick = c1.high - Math.max(c1.open, c1.close);
-  if (lowerWick > body(c1) * 2 && upperWick < body(c1)) {
-    return { label: 'hammer (potential reversal up)', lean: 0.4 };
-  }
-  if (upperWick > body(c1) * 2 && lowerWick < body(c1)) {
-    return { label: 'shooting star (potential reversal down)', lean: -0.4 };
-  }
-  return { label: isBull(c1) ? 'plain bullish candle' : 'plain bearish candle', lean: isBull(c1) ? 0.15 : -0.15 };
-}
+      <p class="window-explanation"></p>
 
-module.exports = {
-  sma,
-  ema,
-  emaSeries,
-  rsi,
-  macd,
-  atr,
-  momentum,
-  volatility,
-  correlation,
-  trendStrength,
-  volumeSpike,
-  candlePattern,
-};
+      <div class="track-row">
+        <div class="track-countdown">
+          <span class="stat-label">Settles in</span>
+          <span class="stat-value countdown-value">—</span>
+        </div>
+      </div>
+
+      <div class="track-result hidden">
+        <span class="result-badge"></span>
+        <span class="result-text"></span>
+      </div>
+
+      <div class="track-accuracy">
+    <span class="accuracy-label">Track record (24h)</span>
+        <span class="accuracy-value">—</span>
+      </div>
+    </article>
+  </template>
+
+  <div id="bot-overlay" class="overlay hidden">
+    <div class="settings-card bot-card">
+      <h2>Trading Bot <span class="app-version" data-app-version title="Deploy version">v…</span></h2>
+      <p class="settings-hint" id="bot-mode-line">Checking status…</p>
+      <p class="settings-hint" id="bot-persist-line" hidden></p>
+
+      <div class="bot-section">
+        <h3>Trading mode</h3>
+        <div class="mode-toggle-row">
+          <button class="mode-toggle-btn" id="mode-btn-paper" type="button">Paper (simulated)</button>
+          <button class="mode-toggle-btn" id="mode-btn-live" type="button">Live (real money)</button>
+        </div>
+        <p class="settings-hint" id="mode-toggle-feedback"></p>
+      </div>
+
+      <div class="bot-section">
+        <h3>Live status</h3>
+        <div class="settings-actions">
+          <button class="btn-primary" id="bot-running-toggle" type="button">Start bot</button>
+          <span class="settings-hint" id="bot-running-timer"></span>
+        </div>
+        <div id="bot-status-body">
+          <p class="settings-hint">Loading…</p>
+        </div>
+      </div>
+
+      <div class="bot-section">
+        <h3>Settings
+          <button type="button" id="bot-settings-lock" class="bot-settings-lock" aria-pressed="false" title="Lock settings so sliders can't be bumped by accident">
+            Unlock to edit
+          </button>
+        </h3>
+        <p class="settings-hint">These apply immediately — no restart needed. Lock settings when you're done so a sleepy thumb can't drop stop-loss to 1¢. Trading mode (paper/live) is set on the server and can't be changed here.</p>
+        <div id="bot-settings-fields">
+        <div class="bot-strategy-tabs" role="tablist" aria-label="Strategy">
+          <button type="button" class="bot-strategy-tab" data-strategy="edge" id="bot-tab-edge">Edge</button>
+          <button type="button" class="bot-strategy-tab" data-strategy="settle" id="bot-tab-settle">Settle (80–94¢)</button>
+          <button type="button" class="bot-strategy-tab active" data-strategy="model" id="bot-tab-model">MODEL</button>
+        </div>
+        <input type="hidden" id="bot-strategy-mode" value="model" />
+
+        <div class="bot-field-grid bot-settings-global">
+          <label>Asset to trade
+            <select id="bot-symbol">
+              <option value="AUTO">Auto (scan enabled coins below)</option>
+              <option value="BTC">BTC</option>
+              <option value="XRP">XRP</option>
+              <option value="ETH">ETH</option>
+              <option value="SOL">SOL</option>
+              <option value="BNB">BNB</option>
+              <option value="NEAR">NEAR</option>
+              <option value="HYPE">HYPE</option>
+              <option value="DOGE">DOGE</option>
+            </select>
+            <span class="field-hint">AUTO only trades the coins you check below. Single-coin mode also requires that coin to be checked.</span>
+          </label>
+          <div class="auto-coin-picker" id="bot-auto-coins-wrap">
+            <div class="auto-coin-picker-title">AUTO coins</div>
+            <div class="auto-coin-picker-grid" id="bot-auto-coins">
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="BTC" /> BTC</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="BNB" /> BNB</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="SOL" /> SOL</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="ETH" /> ETH</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="XRP" /> XRP</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="HYPE" /> HYPE</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="DOGE" /> DOGE</label>
+              <label class="auto-coin-chip"><input type="checkbox" data-coin="NEAR" /> NEAR</label>
+            </div>
+            <span class="field-hint">Recommended <strong>BTC · ETH</strong> (Core setup). Tap a setup card in the MODEL tab instead of guessing.</span>
+          </div>
+          <label>Stake per trade
+            <div class="slider-row">
+              <input id="bot-stake" type="range" min="1" max="500" step="1" />
+              <span class="slider-value" id="bot-stake-value">—</span>
+            </div>
+            <div class="stake-quick-btns">
+              <button type="button" class="btn-secondary" id="bot-stake-half">½ stake</button>
+              <button type="button" class="btn-secondary" id="bot-stake-quarter">¼ stake</button>
+            </div>
+            <span class="field-hint">Dollar amount risked per trade (all strategies).</span>
+          </label>
+          <label>Max open positions
+            <div class="slider-row">
+              <input id="bot-maxpos" type="range" min="1" max="10" step="1" />
+              <span class="slider-value" id="bot-maxpos-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>1</strong> open at a time. Still one open per coin when max &gt; 1.</span>
+          </label>
+          <label>Second open only if holding green
+            <select id="bot-second-green">
+              <option value="on">On (default)</option>
+              <option value="off">Off — fill up to max anytime</option>
+            </select>
+          </label>
+          <label class="bot-exit-sound-toggle">
+            <span>Exit sound</span>
+            <input type="checkbox" id="bot-exit-sound" />
+            <span class="field-hint">Short chime when a position closes (TP, breakeven, cut, settle, etc.). Saved in this browser only.</span>
+          </label>
+        </div>
+
+        <div id="bot-settings-edge" class="bot-field-grid" hidden>
+          <p class="settings-hint"><strong>Edge</strong> — probability edge vs Kalshi only. Sizing / coins are above.</p>
+          <label>Edge threshold
+            <div class="slider-row">
+              <input id="bot-edge" type="range" min="1" max="30" step="0.5" />
+              <span class="slider-value" id="bot-edge-value">—</span>
+            </div>
+            <span class="field-hint">How many percentage points our probability must beat Kalshi's own price before it's worth trading.</span>
+          </label>
+
+          <label>Min confidence
+            <div class="slider-row">
+              <input id="bot-confidence" type="range" min="10" max="95" step="1" />
+              <span class="slider-value" id="bot-confidence-value">—</span>
+            </div>
+            <span class="field-hint">The engine's own trust in its prediction (docked for volatility, conflicting signals, etc.) — must clear this before the bot acts.</span>
+          </label>
+
+          <label>Stop-loss (¢ below entry)
+            <div class="slider-row">
+              <input id="bot-stoploss" type="range" min="1" max="40" step="1" />
+              <span class="slider-value" id="bot-stoploss-value">—</span>
+            </div>
+            <span class="field-hint">Exit if the held side's bid drops this many cents from your entry (e.g. entry 55¢, stop 10 → exit near 45¢). Caps a loser before a full 0¢ settlement. Paper fills at that level; live uses the real bid.</span>
+          </label>
+
+          <label>Post-stop recovery (¢ bounce)
+            <div class="slider-row">
+              <input id="bot-stoprecovery" type="range" min="0" max="25" step="1" />
+              <span class="slider-value" id="bot-stoprecovery-value">—</span>
+            </div>
+            <span class="field-hint">After a stop-loss, don't open on that coin <em>or any other coin</em> until the stopped coin's bid has bounced this many cents. Knife-catch (same coin + same side) also needs the engine still favoring that side. 0 = off.</span>
+          </label>
+
+          <label>Take-profit (¢ above entry)
+            <div class="slider-row">
+              <input id="bot-takeprofit" type="range" min="1" max="40" step="1" />
+              <span class="slider-value" id="bot-takeprofit-value">—</span>
+            </div>
+            <span class="field-hint">Exit if the held side's bid rises this many cents above entry (e.g. entry 55¢, TP 15 → exit near 70¢). Also banks immediately at ~97¢ (near-certain). Last ~60s before close: take TP / bank a green bid instead of waiting on settlement.</span>
+          </label>
+
+          <label>Min entry price
+            <div class="slider-row">
+              <input id="bot-minentries" type="range" min="1" max="50" step="1" />
+              <span class="slider-value" id="bot-minentries-value">—</span>
+            </div>
+            <span class="field-hint">Never buy a side cheaper than this, even with high confidence. Blocks longshot tickets (e.g. 7¢ NO fades) that blow up dollar P&amp;L. Also won't open with under 3 minutes left in the window (avoids freeze-into-settle).</span>
+          </label>
+        </div>
+
+        <div id="bot-settings-model" class="bot-field-grid" hidden>
+          <p class="settings-hint"><strong>MODEL</strong> — Core: BTC/ETH, <strong>1</strong> slot, max <strong>88¢</strong>, conf <strong>55%</strong>, stall <strong>4s</strong>, stagnation <strong>60s</strong>, rapid adverse <strong>off</strong>. Full stake at all asks.</p>
+
+          <div class="model-setups" id="bot-model-setups">
+            <h4 class="bot-panel-subhead">Paper setups</h4>
+            <p class="settings-hint">Tap one to make it the <strong>live</strong> book — that <strong>brings its bankroll</strong> (avail / wallet / ins) with it, and parks the previous live book. Knobs stay either way. Shadow paper books are optional (off freezes them; what-if still uses saved fills). <strong>What-if</strong> is raw PnL on saved fills only.</p>
+            <label>Shadow paper books
+              <select id="bot-model-shadow-books">
+                <option value="off">Off — freeze shadows (default)</option>
+                <option value="on">On — silent paper books for every other setup</option>
+              </select>
+            </label>
+            <label>Auto-switch live setup
+              <select id="bot-model-auto-switch">
+                <option value="off">Off — manual only (default)</option>
+                <option value="on">On — when live avail is low, jump to a climbing shadow</option>
+              </select>
+            </label>
+            <p class="settings-hint" id="bot-model-auto-switch-note" role="status" aria-live="polite">Auto-switch status loads with bot status.</p>
+            <div id="bot-model-setups-list" class="model-setups-list"></div>
+          </div>
+
+          <h4 class="bot-panel-subhead">Entry</h4>
+          <label>MODEL fade (opposite side)
+            <select id="bot-model-invert">
+              <option value="off">Off — follow the lean (default)</option>
+              <option value="on">On — fade: UP→NO, DOWN→YES</option>
+            </select>
+          </label>
+          <label>MODEL min confidence
+            <div class="slider-row">
+              <input id="bot-model-confidence" type="range" min="10" max="95" step="1" />
+              <span class="slider-value" id="bot-model-confidence-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>55%</strong> (Core).</span>
+          </label>
+          <label>MODEL live favor (pts)
+            <div class="slider-row">
+              <input id="bot-model-live-favor" type="range" min="0" max="15" step="1" />
+              <span class="slider-value" id="bot-model-live-favor-value">—</span>
+            </div>
+            <span class="field-hint">Live UP vs DOWN must lead by this many pts to enter. Default <strong>2</strong>. <strong>0</strong> = any lead.</span>
+          </label>
+          <label>MODEL min entry lean (%)
+            <div class="slider-row">
+              <input id="bot-model-min-entry-lean" type="range" min="0" max="95" step="1" />
+              <span class="slider-value" id="bot-model-min-entry-lean-value">—</span>
+            </div>
+            <span class="field-hint">Held-side live prob must be at least this to open (e.g. NO needs ≥65% DOWN). Default <strong>65%</strong>. Barriers/cuts protect exits — raise to 75–80% if entries feel too soft. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL signal score strength
+            <div class="slider-row">
+              <input id="bot-model-signal-dom" type="range" min="0" max="30" step="1" />
+              <span class="slider-value" id="bot-model-signal-dom-value">—</span>
+            </div>
+            <span class="field-hint"><strong>0 = off</strong> (default). When on: exit-only — min |netDominance| while <em>weakening</em> to treat as a turn (does <strong>not</strong> block new entries). Higher = more patient.</span>
+          </label>
+          <label>MODEL confirm cross (¢)
+            <div class="slider-row">
+              <input id="bot-model-confirm-cross" type="range" min="0" max="65" step="1" />
+              <span class="slider-value" id="bot-model-confirm-cross-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>off (0)</strong>. When on: per-coin gate after first MODEL round-trip this run.</span>
+          </label>
+          <label>MODEL max run after cross (¢)
+            <div class="slider-row">
+              <input id="bot-model-confirm-ext" type="range" min="5" max="30" step="1" />
+              <span class="slider-value" id="bot-model-confirm-ext-value">—</span>
+            </div>
+          </label>
+          <label>MODEL min entry (¢)
+            <div class="slider-row">
+              <input id="bot-model-min-entry" type="range" min="40" max="85" step="1" />
+              <span class="slider-value" id="bot-model-min-entry-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>65¢</strong>. Floor for any MODEL buy.</span>
+          </label>
+          <label>MODEL min room to hard floor (¢)
+            <div class="slider-row">
+              <input id="bot-model-min-room-floor" type="range" min="0" max="25" step="1" />
+              <span class="slider-value" id="bot-model-min-room-floor-value">—</span>
+            </div>
+            <span class="field-hint">Entry ask must be at least this many ¢ above the hard stop floor (default <strong>10</strong>). Blocks 57¢ buys when floor is 55. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL low-ask conviction (conf %)
+            <div class="slider-row">
+              <input id="bot-model-low-ask-conf" type="range" min="0" max="95" step="1" />
+              <span class="slider-value" id="bot-model-low-ask-conf-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Off by default (0)</strong> — no near-certain gate on ≤69¢ asks. Raise to re-enable (conf + live favor + held lean).</span>
+          </label>
+          <label>MODEL max entry (¢)
+            <div class="slider-row">
+              <input id="bot-model-max-entry" type="range" min="70" max="98" step="1" />
+              <span class="slider-value" id="bot-model-max-entry-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>88¢</strong>. Won't buy richer asks.</span>
+          </label>
+          <p class="field-hint">MODEL stake is <strong>full size</strong> at all asks (under-70¢ half-stake is off).</p>
+
+          <h4 class="bot-panel-subhead">Exit &amp; recycle</h4>
+          <label>MODEL bank / TP green (¢)
+            <div class="slider-row">
+              <input id="bot-model-bank-green" type="range" min="3" max="20" step="1" />
+              <span class="slider-value" id="bot-model-bank-green-value">—</span>
+            </div>
+            <span class="field-hint">Bank when bid hits this green (default <strong>+11¢</strong>). Trail arms ~+<strong>3¢</strong> — if bid stalls at the near-target slider below, banks at live bid even below this.</span>
+          </label>
+          <label>MODEL near-target stall (¢ green)
+            <div class="slider-row">
+              <input id="bot-model-near-target-bank" type="range" min="3" max="20" step="1" />
+              <span class="slider-value" id="bot-model-near-target-bank-value">—</span>
+            </div>
+            <span class="field-hint">When peak reaches this green, stall-bank at the live bid (default <strong>+8¢</strong> with +11 TP). Still tries for full TP above while momentum is up; once stalled here, exits even if bid pulled back.</span>
+          </label>
+          <label>MODEL green stall bank (sec)
+            <div class="slider-row">
+              <input id="bot-model-stall-sec" type="range" min="3" max="60" step="1" value="4" />
+              <span class="slider-value" id="bot-model-stall-sec-value">—</span>
+            </div>
+            <span class="field-hint">While green (trail armed), bank at the <strong>live bid</strong> if peak is flat this long or pulls back <strong>2¢</strong> — even if under the TP target above. Default <strong>4s</strong>.</span>
+          </label>
+          <label>MODEL stagnation check (sec)
+            <div class="slider-row">
+              <input id="bot-model-stagnation-sec" type="range" min="0" max="120" step="5" />
+              <span class="slider-value" id="bot-model-stagnation-sec-value">—</span>
+            </div>
+            <span class="field-hint">After this long with peak never reaching trail arm (<strong>&lt;+3¢</strong>) <em>and</em> model soft/decaying → exit. Soft lean no longer instant-BE or MODEL_AGAINST — this is the mushy-thesis exit. Time alone never cuts. Default <strong>60s</strong>. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL stagnation sensitivity (¢ progress needed)
+            <div class="slider-row">
+              <input id="bot-model-stagnation-sensitivity" type="range" min="0" max="10" step="1" />
+              <span class="slider-value" id="bot-model-stagnation-sensitivity-value">—</span>
+            </div>
+            <span class="field-hint">How much peak progress counts as "not stagnant." Lower = more lenient (a little progress avoids the exit). Higher = more sensitive (needs more progress to avoid it, so it cuts sooner). Default <strong>3¢</strong> (tracks trail arm). <strong>0</strong> = any progress at all counts.</span>
+          </label>
+          <label>MODEL BE chase (sec)
+            <div class="slider-row">
+              <input id="bot-model-be-chase-sec" type="range" min="0" max="60" step="1" />
+              <span class="slider-value" id="bot-model-be-chase-sec-value">—</span>
+            </div>
+            <span class="field-hint">After bid reaches entry, this many seconds to hit trail arm (<strong>+3¢</strong>) or scratch breakeven. Only fires if the model is also decaying — a firm lean will not BE. Default <strong>20s</strong> (was 8s). <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL rapid adverse (¢)
+            <div class="slider-row">
+              <input id="bot-model-rapid-adverse" type="range" min="0" max="15" step="1" />
+              <span class="slider-value" id="bot-model-rapid-adverse-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Off by default (0)</strong>. When on: true red ≥ this many ¢ <em>and</em> model decaying → cut after open grace.</span>
+          </label>
+          <label>MODEL lean decay trigger (pts drop)
+            <div class="slider-row">
+              <input id="bot-model-decay-drop" type="range" min="5" max="30" step="1" />
+              <span class="slider-value" id="bot-model-decay-drop-value">—</span>
+            </div>
+            <span class="field-hint">How many probability points the lean must drop from its peak before decay tracking starts (e.g. 92→78 = 14pt drop). Default <strong>14</strong>. Lower = more sensitive; higher = only cuts on bigger collapses.</span>
+          </label>
+          <label>MODEL lean decay stall (sec)
+            <div class="slider-row">
+              <input id="bot-model-decay-stall" type="range" min="0" max="30" step="1" />
+              <span class="slider-value" id="bot-model-decay-stall-value">—</span>
+            </div>
+            <span class="field-hint">After entering the decay zone with no recovery, cut after this many seconds regardless of lean strength. Default <strong>6s</strong>. Lower = cuts faster; <strong>0</strong> = stall timer off (only floor path fires).</span>
+          </label>
+          <label>MODEL lean decay floor (prob %)
+            <div class="slider-row">
+              <input id="bot-model-decay-floor" type="range" min="60" max="92" step="1" />
+              <span class="slider-value" id="bot-model-decay-floor-value">—</span>
+            </div>
+            <span class="field-hint">If the held-side probability drops to or below this level <em>and</em> the thesis is soft, cut immediately (no stall wait). Default <strong>85</strong>.</span>
+          </label>
+          <label>MODEL cash out before settle (min left)
+            <div class="slider-row">
+              <input id="bot-model-settle-close" type="range" min="0" max="8" step="0.5" />
+              <span class="slider-value" id="bot-model-settle-close-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>2.5</strong>. In the last N minutes, bank flat/green or cut small reds instead of riding to SETTLED 0/100. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL late barrier (min left)
+            <div class="slider-row">
+              <input id="bot-model-late-barrier" type="range" min="0" max="6" step="0.5" />
+              <span class="slider-value" id="bot-model-late-barrier-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>2</strong>. Force exit in this window unless conf is very high and lean still with you. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL never-settle window (min left)
+            <div class="slider-row">
+              <input id="bot-model-preclose-force" type="range" min="0" max="3" step="0.25" />
+              <span class="slider-value" id="bot-model-preclose-force-value">—</span>
+            </div>
+            <span class="field-hint">Default <strong>1</strong>. Last N minutes: always sell at the bid — never wait for Kalshi settlement. <strong>0</strong> = off.</span>
+          </label>
+          <label>MODEL max loss (¢ below entry)
+            <div class="slider-row">
+              <input id="bot-model-max-loss" type="range" min="0" max="20" step="1" />
+              <span class="slider-value" id="bot-model-max-loss-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Off (0)</strong> — MODEL losses exit via stagnation (and hard lean flip), not a −N¢ cliff or lean-stop.</span>
+          </label>
+          <label>MODEL hard stop floor (¢)
+            <div class="slider-row">
+              <input id="bot-model-hard-floor" type="range" min="40" max="65" step="1" />
+              <span class="slider-value" id="bot-model-hard-floor-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Unused</strong> for exits (lean-stop / hard-floor cut removed). Entry “min room to floor” still blocks tight buys near 55.</span>
+          </label>
+          <label>MODEL pace lean-stop drawdown (% of room to floor)
+            <div class="slider-row">
+              <input id="bot-model-pace-drawdown" type="range" min="15" max="60" step="5" />
+              <span class="slider-value" id="bot-model-pace-drawdown-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Unused</strong> — pace lean-stop removed. Reds wait for stagnation or a hard lean flip.</span>
+          </label>
+          <label>MODEL pace sample (sec)
+            <div class="slider-row">
+              <input id="bot-model-pace-sample" type="range" min="2" max="20" step="1" />
+              <span class="slider-value" id="bot-model-pace-sample-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Unused</strong> (pace lean-stop off).</span>
+          </label>
+          <label>MODEL rich stop floor (¢)
+            <div class="slider-row">
+              <input id="bot-model-rich-floor" type="range" min="0" max="75" step="1" />
+              <span class="slider-value" id="bot-model-rich-floor-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Unused</strong> — exits no longer widen/tighten by price floor.</span>
+          </label>
+          <label>MODEL post-exit sit-out (sec)
+            <div class="slider-row">
+              <input id="bot-model-sitout" type="range" min="0" max="120" step="15" value="45" />
+              <span class="slider-value" id="bot-model-sitout-value">—</span>
+            </div>
+            <span class="field-hint"><strong>Per coin</strong> — after BE/TP/cut on that coin, wait before rebuying it (default <strong>45s</strong>).</span>
+          </label>
+          <label>MODEL global sit-out (sec)
+            <div class="slider-row">
+              <input id="bot-model-global-sitout" type="range" min="0" max="60" step="5" value="20" />
+              <span class="slider-value" id="bot-model-global-sitout-value">—</span>
+            </div>
+            <span class="field-hint"><strong>All coins</strong> — after any TP/BE/cut, block <em>every</em> new entry this long so you don’t hop BTC→ETH in the same regime (default <strong>20s</strong>). <strong>0</strong> = off.</span>
+          </label>
+        </div>
+
+        <div id="bot-settings-settle" class="bot-field-grid" hidden>
+          <p class="settings-hint"><strong>Settle</strong> only — buy 80–94¢ band. Sizing / coins are above. Half-stake NEAR is settle-only below.</p>
+          <label>Settle entry min (¢)
+            <div class="slider-row">
+              <input id="bot-settle-min" type="range" min="65" max="95" step="1" />
+              <span class="slider-value" id="bot-settle-min-value">—</span>
+            </div>
+            <span class="field-hint">Lowest ask in the primary band (default 80¢).</span>
+          </label>
+          <label>Settle entry max (¢)
+            <div class="slider-row">
+              <input id="bot-settle-max" type="range" min="75" max="98" step="1" />
+              <span class="slider-value" id="bot-settle-max-value">—</span>
+            </div>
+            <span class="field-hint">Highest ask allowed (default 94¢). 90–94¢ = hold to settle. Also requires upside to 100 ≥ min upside and skips ≥95¢ so AUTO hunts other coins.</span>
+          </label>
+          <label>Settle stop-loss (¢ below entry)
+            <div class="slider-row">
+              <input id="bot-settle-stoploss" type="range" min="8" max="60" step="1" />
+              <span class="slider-value" id="bot-settle-stoploss-value">—</span>
+            </div>
+            <span class="field-hint">Default 50¢ (max 60¢) — ride through wicks. Gap dumps can still fill worse. Floor 8¢. Lock settings when done editing.</span>
+          </label>
+          <label>Entry-tiered exits (TP / stale / stuck by entry)
+            <select id="bot-settle-tiered">
+              <option value="on">On (default)</option>
+              <option value="off">Off — stop + hold to settle only</option>
+            </select>
+            <span class="field-hint">On uses the table below. Stuck exits (flat / small-green) still follow the stuck slider. Off = stop + hold to settlement only.</span>
+          </label>
+          <div id="settle-exit-table-wrap" class="settle-exit-table-wrap">
+            <div class="settle-exit-table-title">Exit plan by entry</div>
+            <table class="settle-exit-table" aria-label="Settle take-profit and stale exits by entry price">
+              <thead>
+                <tr>
+                  <th scope="col">Entry</th>
+                  <th scope="col">Aim</th>
+                  <th scope="col">Stale green if not there by</th>
+                </tr>
+              </thead>
+              <tbody id="settle-exit-table-body">
+                <tr><td colspan="3" class="settle-exit-table-loading">Loading…</td></tr>
+              </tbody>
+            </table>
+            <p class="field-hint" id="settle-exit-table-note">Live from bot tiers. After a trade’s bid tags 90¢, stuck/stale turn off and it rides settlement even if price dips back under 90 (stop still applies). Tier TP (e.g. 96¢) can still bank if hit.</p>
+          </div>
+          <label>Stuck exit after (min parked)
+            <div class="slider-row">
+              <input id="bot-settle-stuck" type="range" min="0" max="10" step="0.5" />
+              <span class="slider-value" id="bot-settle-stuck-value">—</span>
+            </div>
+            <span class="field-hint">If the bid sits at/under entry this long → breakeven. If it sits +1–5¢ under the tier target this long → bank (settle_stuck). 0 = off. Skips ≥90¢ hold tier. Default 3 min.</span>
+          </label>
+          <label>Half stake on NEAR
+            <select id="bot-half-stake-near">
+              <option value="on">On (default)</option>
+              <option value="off">Off — full stake</option>
+            </select>
+            <span class="field-hint">Settle only, when Trade NEAR is On: NEAR at 80¢+ risks ½ stake. All coins under 80¢ always use ¼ stake.</span>
+          </label>
+          <label>Settle: only open with ≤ this many min left
+            <div class="slider-row">
+              <input id="bot-settle-maxmin" type="range" min="1" max="14" step="0.5" />
+              <span class="slider-value" id="bot-settle-maxmin-value">—</span>
+            </div>
+            <div class="settle-window-rec" id="settle-window-rec">
+              <span class="settle-window-light" id="settle-window-light" aria-hidden="true"></span>
+              <span class="settle-window-rec-text" id="settle-window-rec-text">Retrospect: gathering settle history…</span>
+              <div class="settle-window-apply-row">
+                <button type="button" class="settle-window-apply settle-window-apply-volatile" id="settle-window-apply-edge">
+                  Apply edge
+                </button>
+                <button type="button" class="settle-window-apply settle-window-apply-stable" id="settle-window-apply-settle">
+                  Apply settle
+                </button>
+              </div>
+            </div>
+            <span class="field-hint">Won’t open too early in the window (default 8.5). Green/red light scores live ~15m Coinbase action: red = choppy/volatile → edge; green = calmer and one-sided → settle. Apply either anytime (auto-switch later). Edge: max entry 95¢; after 3m hold stop moves to breakeven; cash out in the last 5 min if loss ≤ $0.75 on the ticket.</span>
+          </label>
+          <label>Settle same-side sit-out after stop (min)
+            <div class="slider-row">
+              <input id="bot-settle-cooldown" type="range" min="0" max="15" step="0.5" />
+              <span class="slider-value" id="bot-settle-cooldown-value">—</span>
+            </div>
+            <span class="field-hint">After a settle stop, block that coin+side for this many minutes (default 2.5). Stops knife-catch loops like SOL reopen-every-few-seconds. 0 = off (not recommended).</span>
+          </label>
+          <label>Late fallback: only with ≤ this many min left
+            <div class="slider-row">
+              <input id="bot-settle-late-min" type="range" min="0" max="8" step="0.5" />
+              <span class="slider-value" id="bot-settle-late-min-value">—</span>
+            </div>
+            <span class="field-hint">If nothing in the primary band, allow a lower ask only this late (default 2.5). 0 = never expand.</span>
+          </label>
+          <label>Late fallback floor (¢)
+            <div class="slider-row">
+              <input id="bot-settle-late-floor" type="range" min="60" max="85" step="1" />
+              <span class="slider-value" id="bot-settle-late-floor-value">—</span>
+            </div>
+            <span class="field-hint">Lowest ask allowed in the late window (default 70). Still prefers the highest available ask (e.g. 82 over 70).</span>
+          </label>
+        </div>
+
+        <div id="bot-settings-wallet" class="bot-field-grid">
+          <label>Starting Bankroll
+            <div class="slider-row">
+              <input id="bot-paper-balance" type="range" min="10" max="10000" step="10" />
+              <span class="slider-value" id="bot-paper-balance-value">—</span>
+            </div>
+            <span class="field-hint">Your trading bankroll. Available Cash = bankroll + closed P&amp;L − Wallet − Insurance − Open Positions.</span>
+          </label>
+
+          <label>Profit skim mode
+            <select id="bot-skim-mode">
+              <option value="insurance">Insurance fund (20% / 40% wallet / 40% bankroll)</option>
+              <option value="percent">Percent of profit → Reserved only</option>
+              <option value="fixed">Fixed amount per win → Reserved</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+
+          <label id="bot-skim-amount-label">Skim amount
+            <div class="slider-row">
+              <input id="bot-skim-amount" type="range" min="0" max="100" step="1" />
+              <span class="slider-value" id="bot-skim-amount-value">—</span>
+            </div>
+            <span class="field-hint" id="bot-skim-hint">Insurance: each win is 20% Insurance / 40% Wallet / 40% Available. Arms at the arm amount (default $10); stays usable down to the $6 floor. Soft fill ceiling $15 — excess 20% skim → Available (fund stays as cushion). Below floor, Available takes losses until re-armed at arm again.</span>
+          </label>
+        </div>
+        </div><!-- #bot-settings-fields -->
+        <div class="settings-actions">
+          <button class="btn-secondary" id="bot-settings-refresh">Refresh</button>
+          <button class="btn-primary" id="bot-settings-save">Save settings</button>
+        </div>
+        <p class="settings-hint" id="bot-settings-feedback"></p>
+      </div>
+
+      <div class="bot-section">
+        <h3>Kalshi API Access</h3>
+        <p class="settings-hint" id="kalshi-creds-status">Checking…</p>
+        <label>API Key ID
+          <input id="kalshi-key-id" type="text" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="e.g. 8f2c1a90-....." />
+        </label>
+        <label>Private Key (PEM)
+          <textarea id="kalshi-private-key" rows="5" placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----" spellcheck="false"></textarea>
+        </label>
+        <p class="field-hint">Stored on the engine's server only, never shown again once saved. This alone does not enable real-money trading — that still requires a separate server-side confirmation (see docs).</p>
+        <div class="settings-actions">
+          <button class="btn-primary" id="kalshi-creds-save">Save credentials</button>
+        </div>
+      </div>
+
+      <div class="bot-section">
+        <h3>Backtest</h3>
+        <p class="settings-hint">Uses the settings above. Runs a continuous full-day sim (24h of minute data per day) and reports how long Available Cash lasted before it couldn't fund another stake. Auto scans all Kalshi cryptos. Hunt best searches edge/confidence/stop on its own.</p>
+        <div class="backtest-controls">
+          <label>Asset
+            <select id="backtest-symbol">
+              <option value="AUTO">Auto (scan all markets, trade the best)</option>
+              <option value="BTC">BTC</option>
+              <option value="XRP">XRP</option>
+              <option value="ETH">ETH</option>
+              <option value="SOL">SOL</option>
+              <option value="BNB">BNB</option>
+              <option value="NEAR">NEAR</option>
+              <option value="HYPE">HYPE</option>
+              <option value="ZEC">ZEC</option>
+            </select>
+          </label>
+          <div class="backtest-days" role="group" aria-label="Backtest range">
+            <button class="btn-secondary backtest-day-btn" type="button" data-hours="24">1 day</button>
+            <button class="btn-secondary backtest-day-btn" type="button" data-hours="72">3 days</button>
+            <button class="btn-secondary backtest-day-btn" type="button" data-hours="168">7 days</button>
+          </div>
+          <button class="btn-primary" id="backtest-hunt" type="button">Hunt best</button>
+          <input id="backtest-hours" type="hidden" value="24" />
+        </div>
+        <div id="backtest-results"></div>
+      </div>
+
+      <div class="bot-section">
+        <h3>Calibration (real trade outcomes by probability)</h3>
+        <p class="settings-hint">Tracks every settled trade by the probability the engine gave it at entry, so you can see whether "75%" actually corresponds to winning more often in your own system — rather than guessing. Rule of thumb: ~40-50 trades in a bucket before trusting it at all, 100-200+ for real confidence.</p>
+        <div id="calibration-table"></div>
+        <div class="settings-actions">
+          <button class="btn-secondary" id="bot-reset-paper" type="button">Reset paper P&amp;L (keep last 40)</button>
+        </div>
+      </div>
+
+      <div class="settings-actions">
+        <button class="btn-secondary" id="bot-overlay-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
