@@ -7174,16 +7174,17 @@ class TradingBot {
       markets = await this.client.getOpenMarkets(seriesTicker, 20);
     }
     if (Array.isArray(markets) && markets.length) {
+      const notDead = (m) => m && !this._isTickerDead(m.ticker);
       const picked =
-        pickLiveOpenMarket(markets, Date.now(), pickFloor) ||
-        pickLiveOpenMarket(markets, Date.now(), 0);
-      if (picked && quoted(picked)) {
+        (pickLiveOpenMarket(markets, Date.now(), pickFloor) ||
+         pickLiveOpenMarket(markets, Date.now(), 0));
+      if (picked && notDead(picked) && quoted(picked)) {
         this._storeLiveMarketSeries(seriesTicker, picked);
         return normalizeMarketPrices(picked);
       }
     }
 
-    if (mem && mem.ticker && this.client && typeof this.client.getCachedMarket === 'function') {
+    if (mem && mem.ticker && !this._isTickerDead(mem.ticker) && this.client && typeof this.client.getCachedMarket === 'function') {
       const hit = this.client.getCachedMarket(mem.ticker, 120_000);
       if (hit && quoted(hit)) {
         const merged = normalizeMarketPrices({ ...mem, ...hit });
@@ -7192,7 +7193,7 @@ class TradingBot {
       }
     }
 
-    if (mem) return normalizeMarketPrices(mem);
+    if (mem && !this._isTickerDead(mem.ticker)) return normalizeMarketPrices(mem);
     return null;
   }
 
@@ -7264,10 +7265,10 @@ class TradingBot {
     }
 
     const fallback = await this._resolveMarketFromKalshiCache(seriesTicker, minMsLeft, { limited: false });
-    if (fallback && quoted(fallback)) return fallback;
+    if (fallback && !this._isTickerDead(fallback.ticker) && quoted(fallback)) return fallback;
     // Don't fall back to the old session's market when its window has already
     // closed — that causes the bot to evaluate/bid into a closed market.
-    if (cached && quoted(cached) && windowLive) return normalizeMarketPrices(cached);
+    if (cached && !this._isTickerDead(cached.ticker) && quoted(cached) && windowLive) return normalizeMarketPrices(cached);
     return null;
   }
 
