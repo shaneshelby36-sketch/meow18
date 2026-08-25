@@ -7159,95 +7159,69 @@ class TradingBot {
   /**
    * Current tradeable Kalshi 15m market for a series.
    *
-   * Strategy: fetch the open-markets list, sort by soonest close, then probe
-   * each candidate with getMarket() to confirm it's actually orderable before
-   * returning it. A market that 404s or has no two-sided quote is skipped and
-   * marked dead so it won't be tried again this session.
-   *
-   * Falls back to the in-memory cache only when rate-limited.
+   * Calls GET /markets?series_ticker=X&status=open — Kalshi's status=open filter
+   * returns ONLY the single currently active window (no initialized/future markets).
+   * Result is cached for KALSHI_SERIES_REFRESH_MS to avoid hammering the API.
    */
   async _fetchLiveMarket(seriesTicker, minMsLeft = 1500) {
     if (!seriesTicker || !this.client) return null;
-    if (this._inShadow) {
-      return (this._lastLiveMarket && this._lastLiveMarket[seriesTicker]) || null;
-    }
     if (!this._lastLiveMarket) this._lastLiveMarket = Object.create(null);
     if (!this._lastLiveMarketAt) this._lastLiveMarketAt = Object.create(null);
 
-    const quoted = (m) => marketHasUsableTwoSidedQuote(normalizeMarketPrices(m));
-    const isLimited = () =>
-      typeof this.client.isPublicRateLimited === 'function' && this.client.isPublicRateLimited();
-
-    // Rate-limited: return in-memory cache if still valid, else null.
-    if (isLimited()) {
-      const mem = this._lastLiveMarket[seriesTicker];
-      if (!mem) return null;
-      const closeMs = parseMarketCloseMs(mem);
-      if (Number.isFinite(closeMs) && closeMs > Date.now() + minMsLeft && !this._isTickerDead(mem.ticker)) {
-        return normalizeMarketPrices(mem);
-      }
-      return null;
+    if (this._inShadow) {
+      return (this._lastLiveMarket[seriesTicker]) || null;
     }
 
-    // In-memory cache hit: still within refresh window and window is live.
+    const quoted = (m) => marketHasUsableTwoSidedQuote(normalizeMarketPrices(m));
+    const now = Date.now();
+
+    // Serve from cache if fresh enough and window still open.
     const cached = this._lastLiveMarket[seriesTicker];
-    const cacheAge = Date.now() - (Number(this._lastLiveMarketAt[seriesTicker]) || 0);
-    if (cached && !this._isTickerDead(cached.ticker) && quoted(cached) && cacheAge < KALSHI_SERIES_REFRESH_MS) {
+    const cacheAge = now - (Number(this._lastLiveMarketAt[seriesTicker]) || 0);
+    if (cached && !this._isTickerDead(cached.ticker) && cacheAge < KALSHI_SERIES_REFRESH_MS) {
       const closeMs = parseMarketCloseMs(cached);
-      if (Number.isFinite(closeMs) && closeMs > Date.now() + minMsLeft) {
+      if (Number.isFinite(closeMs) && closeMs > now + minMsLeft) {
         return normalizeMarketPrices(cached);
       }
     }
 
-    // Fetch a fresh list from Kalshi (invalidate first so we always get current data).
-    this.client.invalidateOpenMarkets(seriesTicker);
-    let list = [];
-    try {
-      list = await this.client.getOpenMarkets(seriesTicker, 20) || [];
-    } catch (_) {
-      list = [];
-    }
-
-    // Filter to only genuinely open/active markets with enough time left,
-    // sorted soonest-close first so we pick the most current window.
-    const now = Date.now();
-    const candidates = list
-      .filter((m) => {
-        if (!m || !m.ticker) return false;
-        if (this._isTickerDead(m.ticker)) return false;
-        const s = String(m.status || '').toLowerCase();
-        if (s && s !== 'open' && s !== 'active') return false;
-        const closeMs = parseMarketCloseMs(m);
-        return Number.isFinite(closeMs) && closeMs > now + minMsLeft;
-      })
-      .sort((a, b) => parseMarketCloseMs(a) - parseMarketCloseMs(b));
-
-    // Probe each candidate with a direct getMarket call to confirm it's live.
-    // Bypass _getMarketBounded — it caches results and swallows errors.
-    for (const candidate of candidates) {
-      try {
-        // Bust the ticker cache so we always get a fresh response.
-        if (this.client._marketByTickerCache) {
-          this.client._marketByTickerCache.delete(String(candidate.ticker));
+    // Rate-limited — can't fetch fresh, serve cache if window still open.
+    const limited =
+      typeof this.client.isPublicRateLimited === 'function' && this.client.isPublicRateLimited();
+    if (limited) {
+      if (cached && !this._isTickerDead(cached.ticker)) {
+        const closeMs = parseMarketCloseMs(cached);
+        if (Number.isFinite(closeMs) && closeMs > now + minMsLeft) {
+          return normalizeMarketPrices(cached);
         }
-        const probed = await this.client.getMarket(candidate.ticker);
-        if (!probed || !probed.ticker) {
-          this._markTickerDead(candidate.ticker);
-          continue;
-        }
-        const closeMs = parseMarketCloseMs(probed);
-        if (!Number.isFinite(closeMs) || closeMs <= Date.now() + minMsLeft) continue;
-        if (!quoted(probed)) continue;
-        // Confirmed live — cache and return.
-        this._storeLiveMarketSeries(seriesTicker, normalizeMarketPrices(probed));
-        return normalizeMarketPrices(probed);
-      } catch (err) {
-        this._markTickerDead(candidate.ticker);
-        // Not live — try next candidate.
       }
+      return null;
     }
 
-    return null;
+    // Always fetch fresh — status=open returns exactly the active window or empty.
+    this.client.invalidateOpenMarkets(seriesTicker);
+    let markets = [];
+    try {
+      markets = await this.client.getOpenMarkets(seriesTicker, 5) || [];
+    } catch (_) {
+      return null;
+    }
+
+    // Pick the market with the most time left that clears minMsLeft.
+    const market = markets
+      .filter((m) => {
+        if (!m || !m.ticker || this._isTickerDead(m.ticker)) return false;
+        const closeMs = parseMarketCloseMs(m);
+        return Number.isFinite(closeMs) && closeMs > Date.now() + minMsLeft;
+      })
+      .sort((a, b) => parseMarketCloseMs(b) - parseMarketCloseMs(a))[0] || null;
+
+    if (!market) return null;
+
+    // Cache and return — no probe needed, status=open guarantees it's tradeable.
+    const norm = normalizeMarketPrices(market);
+    this._storeLiveMarketSeries(seriesTicker, norm);
+    return norm;
   }
 
   /** One pass over tradeable series — serial, stops on 429. */

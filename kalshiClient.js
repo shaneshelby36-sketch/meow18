@@ -582,27 +582,13 @@ class KalshiClient {
 
   async _listOpenMarketsUncached(seriesTicker, limit) {
     const useAuth = this._preferMarketAuth();
-    const fetchList = async (query) => {
-      const data = await this._request('GET', '/markets', {
-        query: { series_ticker: seriesTicker, limit, ...query },
-        auth: useAuth,
-        retryOn429: false,
-      });
-      return (data.markets || []).map(normalizeMarketPrices);
-    };
-    const usable = (list) =>
-      (Array.isArray(list) ? list : []).filter((m) => {
-        const s = String(m.status || '').toLowerCase();
-        return !s || s === 'open' || s === 'active';
-      });
-
-    // One list GET per refresh — the old open-then-min_close_ts double-fetch was 429 fuel.
-    return usable(
-      await fetchList({
-        status: 'open',
-        min_close_ts: Math.floor(Date.now() / 1000),
-      })
-    );
+    // status=open returns ONLY the currently active window — no initialized/future markets.
+    const data = await this._request('GET', '/markets', {
+      query: { series_ticker: seriesTicker, status: 'open', limit },
+      auth: useAuth,
+      retryOn429: false,
+    });
+    return (data.markets || []).map(normalizeMarketPrices);
   }
 
   async getOpenMarkets(seriesTicker, limit = 20) {
